@@ -32,7 +32,7 @@ TwitchAuthService::TwitchAuthService(QObject*p):QObject(p){
 void TwitchAuthService::authorize(const QString&clientId){
     clientId_=clientId.trimmed();deviceCode_.clear();accessToken_.clear();refreshToken_.clear();
     pollTimer_.stop();refreshTimer_.stop();
-    if(clientId_.isEmpty()){finishWithError(QStringLiteral("This build is missing Leapcast Studio's Twitch application ID."));return;}
+    if(clientId_.isEmpty()){finishWithError(QStringLiteral("No Twitch application Client ID is set. Paste one into \u201cTwitch application Client ID\u201d on this Keys page, then select Connect again."));return;}
     requestDeviceCode();
 }
 

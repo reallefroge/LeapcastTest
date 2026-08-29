@@ -1271,6 +1271,34 @@ QWidget* MainWindow::buildKeysPage() {
     auto* notice=new QFrame;notice->setObjectName(QStringLiteral("keyNotice"));auto* noticeLayout=new QVBoxLayout(notice);
     noticeLayout->addWidget(label(QStringLiteral("IMPORTANT — RELOAD KEYS AFTER EVERY UPDATE"),"cardTitle"));
     auto* noticeText=label(QStringLiteral("For every Leapcast Studio update—and before using the software again—reload or reconnect the necessary Twitch and YouTube keys here. This keeps chat and moderation permissions working correctly."),"muted");noticeText->setWordWrap(true);noticeLayout->addWidget(noticeText);layout->addWidget(notice);
+    // Builds made without a bundled Twitch application ID (test builds) would
+    // otherwise have a Connect button that can only fail. AppController's
+    // configuredTwitchClientId() already falls back to this saved value, so
+    // exposing it here makes such a build usable rather than dead-ended.
+    if(QString::fromLatin1(leapcast::TwitchClientId).trimmed().isEmpty()){
+        auto* clientCard=new QFrame;clientCard->setProperty("card",true);auto* clientLayout=new QVBoxLayout(clientCard);
+        clientLayout->addWidget(label(QStringLiteral("TWITCH APPLICATION CLIENT ID"),"cardTitle"));
+        auto* clientHelp=label(QStringLiteral("This build does not ship with Leapcast's Twitch application ID, so Connect needs one here first. Create an application at dev.twitch.tv/console/apps, set the OAuth Redirect URL to http://localhost, choose Confidential, and paste its Client ID below. A Client ID is public — never paste a Client Secret anywhere in Leapcast."),"muted");
+        clientHelp->setWordWrap(true);clientLayout->addWidget(clientHelp);
+        auto* clientRow=new QHBoxLayout;
+        auto* clientEdit=new QLineEdit(controller_->settings()->secret(QStringLiteral("twitch_client_id")));
+        clientEdit->setPlaceholderText(QStringLiteral("Paste Twitch Client ID"));
+        auto* clientSave=new QPushButton(QStringLiteral("Save Client ID"));
+        clientRow->addWidget(clientEdit,1);clientRow->addWidget(clientSave);clientLayout->addLayout(clientRow);
+        auto* clientStatus=label(controller_->settings()->secret(QStringLiteral("twitch_client_id")).isEmpty()
+                                     ?QStringLiteral("No Client ID saved — Connect will not work yet.")
+                                     :QStringLiteral("Client ID saved."),"muted");
+        clientStatus->setWordWrap(true);clientLayout->addWidget(clientStatus);
+        connect(clientSave,&QPushButton::clicked,this,[this,clientEdit,clientStatus]{
+            const QString value=clientEdit->text().trimmed();
+            controller_->settings()->setSecret(QStringLiteral("twitch_client_id"),value);
+            clientStatus->setText(value.isEmpty()?QStringLiteral("No Client ID saved — Connect will not work yet.")
+                                                 :QStringLiteral("Client ID saved. Select Connect above."));
+            clientStatus->setStyleSheet(value.isEmpty()?QStringLiteral("color:#ff637d"):QStringLiteral("color:#63e6be"));
+        });
+        layout->addWidget(clientCard);
+    }
+
     auto* columns=new QHBoxLayout;
     const bool twitchAuthorized=!controller_->settings()->secret(QStringLiteral("twitch_access_token")).isEmpty();
     auto* twitchCard=makePlatformCard(QStringLiteral("Twitch"),twitchAuthorized?QStringLiteral("Connected"):QStringLiteral("Connect your Twitch account"),QColor("#9146ff"),twitchAuthorized?QStringLiteral("Reload Twitch"):QStringLiteral("Connect Twitch"));
