@@ -722,6 +722,17 @@ QWidget* MainWindow::buildDashboard() {
         railLayout->addWidget(button);
     }
     railLayout->addStretch();
+    // A build with automatic updates compiled out is a test build by
+    // definition - it can never replace itself with the published release - so
+    // it says so in the corner rather than looking like a normal install.
+    if constexpr (!leapcast::AutoUpdate) {
+        auto* testBadge = label(QStringLiteral("TEST BUILD"), "testBuild");
+        testBadge->setAlignment(Qt::AlignCenter);
+        testBadge->setMinimumHeight(20);
+        testBadge->setToolTip(QStringLiteral("Test build %1 - automatic updates are disabled, so this copy will not update itself.")
+                                  .arg(QString::fromLatin1(leapcast::Version)));
+        railLayout->addWidget(testBadge);
+    }
     auto* version = label(QStringLiteral("v%1").arg(QString::fromLatin1(leapcast::Version)), "version");
     version->setAlignment(Qt::AlignCenter);
     version->setMinimumHeight(24);
@@ -1274,11 +1285,11 @@ QWidget* MainWindow::buildKeysPage() {
     // Builds made without a bundled Twitch application ID (test builds) would
     // otherwise have a Connect button that can only fail. AppController's
     // configuredTwitchClientId() already falls back to this saved value, so
-    // exposing it here makes such a build usable rather than broken.
+    // exposing it here makes such a build usable rather than dead-ended.
     if(QString::fromLatin1(leapcast::TwitchClientId).trimmed().isEmpty()){
         auto* clientCard=new QFrame;clientCard->setProperty("card",true);auto* clientLayout=new QVBoxLayout(clientCard);
         clientLayout->addWidget(label(QStringLiteral("TWITCH APPLICATION CLIENT ID"),"cardTitle"));
-        auto* clientHelp=label(QStringLiteral("This build does not ship with Leapcast's Twitch application ID, so Twitch Connect needs one here first. Create an application at dev.twitch.tv/console/apps, set OAuth Redirect URL to http://localhost, choose Confidential, and paste its Client ID below. The Client ID is not a secret."),"muted");
+        auto* clientHelp=label(QStringLiteral("This build does not ship with Leapcast's Twitch application ID, so Connect needs one here first. Create an application at dev.twitch.tv/console/apps, set the OAuth Redirect URL to http://localhost, choose Confidential, and paste its Client ID below. A Client ID is public — never paste a Client Secret anywhere in Leapcast."),"muted");
         clientHelp->setWordWrap(true);clientLayout->addWidget(clientHelp);
         auto* clientRow=new QHBoxLayout;
         auto* clientEdit=new QLineEdit(controller_->settings()->secret(QStringLiteral("twitch_client_id")));
@@ -1286,14 +1297,15 @@ QWidget* MainWindow::buildKeysPage() {
         auto* clientSave=new QPushButton(QStringLiteral("Save Client ID"));
         clientRow->addWidget(clientEdit,1);clientRow->addWidget(clientSave);clientLayout->addLayout(clientRow);
         auto* clientStatus=label(controller_->settings()->secret(QStringLiteral("twitch_client_id")).isEmpty()
-                                     ?QStringLiteral("No Client ID saved — Twitch Connect will not work yet.")
+                                     ?QStringLiteral("No Client ID saved — Connect will not work yet.")
                                      :QStringLiteral("Client ID saved."),"muted");
         clientStatus->setWordWrap(true);clientLayout->addWidget(clientStatus);
         connect(clientSave,&QPushButton::clicked,this,[this,clientEdit,clientStatus]{
             const QString value=clientEdit->text().trimmed();
             controller_->settings()->setSecret(QStringLiteral("twitch_client_id"),value);
-            clientStatus->setText(value.isEmpty()?QStringLiteral("No Client ID saved — Twitch Connect will not work yet.")
-                                                 :QStringLiteral("Client ID saved. Select Connect Twitch above."));
+            clientStatus->setText(value.isEmpty()?QStringLiteral("No Client ID saved — Connect will not work yet.")
+                                                 :QStringLiteral("Client ID saved. Select Connect above."));
+            clientStatus->setStyleSheet(value.isEmpty()?QStringLiteral("color:#ff637d"):QStringLiteral("color:#63e6be"));
         });
         layout->addWidget(clientCard);
     }
@@ -1612,6 +1624,7 @@ void MainWindow::applyTheme() {
         QFrame#navigationRail, QFrame#chatDock { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #121827,stop:1 #0e1320); border:1px solid #293451; border-radius:14px; }
         QLabel[role='brand'] { font-size:11pt; font-weight:800; color:#f8fbff; qproperty-alignment:AlignCenter; }
         QLabel[role='version'] { background:#0b0e17; border-radius:5px; padding:4px; font-size:10pt; font-weight:700; color:#aeb8d0; }
+        QLabel[role='testBuild'] { background:#3a2a10; border:1px solid #f6c85f; border-radius:5px; padding:3px; font-size:9pt; font-weight:800; color:#f6c85f; letter-spacing:1px; }
         QLabel[role='pageTitle'] { font-size:11pt; font-weight:800; color:#f8fbff; }
         QLabel[role='heroTitle'] { font-size:15pt; font-weight:800; color:#ffffff; }
         QLabel[role='muted'], QLabel[role='status'] { color:#9ca7bf; }
