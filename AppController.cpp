@@ -487,8 +487,15 @@ void AppController::receive(const ChatMessage&m){
         // lists can start loading off the first message with no extra Twitch
         // API call and no access token.
         twitchEmotes_.loadForChannel(coloured.metadata.value(QStringLiteral("room_id")).toString());
-        const QJsonArray runs=twitchEmotes_.buildRuns(coloured.text,coloured.metadata.value(QStringLiteral("emotes")).toString());
+        const QString emotesTag=coloured.metadata.value(QStringLiteral("emotes")).toString();
+        const QJsonArray runs=twitchEmotes_.buildRuns(coloured.text,emotesTag);
         if(!runs.isEmpty())coloured.metadata[QStringLiteral("runs")]=runs;
+        // Emote trouble is otherwise invisible: this says whether Twitch tagged
+        // the line at all and how many pictures came out of it.
+        if(!emotesTag.isEmpty()||!runs.isEmpty())
+            emit emoteDiagnostic(QStringLiteral("tag[%1] -> %2 run(s), %3 third-party words loaded")
+                                     .arg(emotesTag.isEmpty()?QStringLiteral("none"):emotesTag)
+                                     .arg(runs.size()).arg(twitchEmotes_.emoteWordCount()));
     }
     // Assign every chatter a vivid, stable pseudo-random name colour. Using
     // the platform plus account id avoids collisions between services, while

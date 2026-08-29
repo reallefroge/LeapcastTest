@@ -127,7 +127,15 @@ void appendTrimmed(QTextBrowser* view, const QString& html) {
 // chat_ — each message is stamped with an id as a block property instead of
 // just appended as plain HTML.
 constexpr int kMessageIdProperty = QTextFormat::UserProperty + 1;
-void appendChatMessage(QTextBrowser* view, const QString& html, qint64 id) {
+// Stamped on the username run only. An earlier attempt wrapped the name in an
+// <a href> and listened for anchorClicked, but the name is itself a stack of
+// per-character coloured spans and the anchor did not survive the rich-text
+// import, so the click never arrived. Marking the run with a format property
+// instead is entirely under our control: the name is inserted as its own run
+// with the property set, and a click just reads the property back.
+constexpr int kUserCardProperty = QTextFormat::UserProperty + 2;
+void appendChatMessage(QTextBrowser* view, const QString& leadingHtml,
+                       const QString& nameHtml, const QString& bodyHtml, qint64 id) {
     if (!view) return;
     auto* doc = view->document();
     QTextCursor cursor(doc);
@@ -139,9 +147,28 @@ void appendChatMessage(QTextBrowser* view, const QString& html, qint64 id) {
     QTextCharFormat messageFormat=cursor.charFormat();
     messageFormat.setProperty(kMessageIdProperty,id);
     cursor.setCharFormat(messageFormat);
-    cursor.insertHtml(html);
+    if(!leadingHtml.isEmpty())cursor.insertHtml(leadingHtml);
+    QTextCharFormat nameFormat=messageFormat;
+    nameFormat.setProperty(kUserCardProperty,id);
+    cursor.setCharFormat(nameFormat);
+    cursor.insertHtml(nameHtml);
+    cursor.setCharFormat(messageFormat);
+    cursor.insertHtml(QStringLiteral(" ")+bodyHtml);
     view->moveCursor(QTextCursor::End);
     trimBlocks(doc);
+}
+
+// Reads the user-card id under a viewport position, or 0 when the point is not
+// over a username.
+qint64 userCardIdAt(QTextBrowser* view, const QPoint& viewportPos) {
+    if(!view)return 0;
+    const QTextCursor cursor=view->cursorForPosition(viewportPos);
+    // cursorForPosition snaps to the nearest character boundary, so a click
+    // just past the end of a line would otherwise read the name of the run
+    // before it. Only trust the hit when it is genuinely inside the text.
+    const QRect rect=view->cursorRect(cursor);
+    if(viewportPos.x()>rect.right()+14)return 0;
+    return cursor.charFormat().property(kUserCardProperty).toLongLong();
 }
 
 QString friendlyTimestamp(const QString& value) {
@@ -324,19 +351,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         const QString badges = chatBadgeHtml(m);
         const QString icon=controller_->settings()->preference(QStringLiteral("program_popout_show_platform_icons"),true).toBool()?platformIconHtml(m.platform):QString();
         // Stamped with an id (see appendChatMessage) so a right-click on
-        // either view can be traced back to this message for moderation.
+        // either view can be traced back to this message for moderation, and
+        // so a left-click on the name alone opens that chatter's card.
         const qint64 id = ++nextChatSeq_;
-        // The name is also an anchor carrying that id, so a plain left-click
-        // opens the chatter card without disturbing text selection anywhere
-        // else in the line.
-        const QString name = QStringLiteral("<a href='leapcast:user/%1' style='text-decoration:none'>%2</a>")
-                                 .arg(QString::number(id),chatNameHtml(m));
-        const QString html = QStringLiteral("%1%2%3 %4")
-            .arg(icon,badges.isEmpty() ? QString() : badges + QStringLiteral(" "),name,chatMessageBodyHtml(m));
+        const QString leading = icon + (badges.isEmpty() ? QString() : badges + QStringLiteral(" "));
+        const QString name = chatNameHtml(m);
+        const QString body = chatMessageBodyHtml(m);
         chatHistoryById_.insert(id, m);
         chatHistoryById_.remove(id - 400);
-        appendChatMessage(chatViews_.value(QStringLiteral("combined")), html, id);
-        appendChatMessage(chatViews_.value(m.platform), html, id);
+        appendChatMessage(chatViews_.value(QStringLiteral("combined")), leading, name, body, id);
+        appendChatMessage(chatViews_.value(m.platform), leading, name, body, id);
         overlay_->ingest(m);
         if(popout_) popout_->appendMessage(m);
     });
@@ -556,6 +580,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             [this](const QString& line){ appendDiagnostic(QStringLiteral("Discord"), line); });
     connect(controller_, &AppController::tiktokDiagnostic, this,
             [this](const QString& line){ appendDiagnostic(QStringLiteral("TikTok"), line); });
+    connect(controller_, &AppController::emoteDiagnostic, this,
+            [this](const QString& line){ appendDiagnostic(QStringLiteral("Emotes"), line); });
     QTimer::singleShot(0, controller_, &AppController::startConfiguredSources);
     QTimer::singleShot(350, this, &MainWindow::showPostUpdateConnectionCheck);
     QTimer::singleShot(900, this, &MainWindow::showFirstLaunchUpdateLog);
@@ -617,6 +643,30 @@ void MainWindow::updateSeasonalEffects(bool allowCelebration){
     }
     const bool ballDrop=theme==QStringLiteral("newyear")&&now.date().month()==1&&now.date().day()==1&&now.time().hour()==0&&now.time().minute()<5;
     new CelebrationOverlay(theme,ballDrop);
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* e) {
+    // Installed on each chat view's viewport (see buildChatDock). Turns the
+    // pointer into a hand over a username and opens that chatter's card on a
+    // plain left-click, while leaving every other click to QTextBrowser.
+    if(e->type()!=QEvent::MouseButtonRelease&&e->type()!=QEvent::MouseMove)
+        return QMainWindow::eventFilter(watched,e);
+    auto* viewport=qobject_cast<QWidget*>(watched);
+    if(!viewport)return QMainWindow::eventFilter(watched,e);
+    auto* view=qobject_cast<QTextBrowser*>(viewport->parentWidget());
+    if(!view)return QMainWindow::eventFilter(watched,e);
+    auto* mouse=static_cast<QMouseEvent*>(e);
+    const qint64 id=userCardIdAt(view,mouse->pos());
+    if(e->type()==QEvent::MouseMove){
+        viewport->setCursor(id&&chatHistoryById_.contains(id)?Qt::PointingHandCursor:Qt::IBeamCursor);
+        return QMainWindow::eventFilter(watched,e);
+    }
+    // Only a click, never the end of a drag-selection.
+    if(mouse->button()!=Qt::LeftButton||!id||!chatHistoryById_.contains(id))
+        return QMainWindow::eventFilter(watched,e);
+    if(view->textCursor().hasSelection())return QMainWindow::eventFilter(watched,e);
+    showUserCard(chatHistoryById_.value(id));
+    return true;
 }
 
 bool MainWindow::event(QEvent* e) {
@@ -969,21 +1019,19 @@ QWidget* MainWindow::buildDashboard() {
         railLayout->addWidget(button);
     }
     railLayout->addStretch();
-    // A build with automatic updates compiled out is a test build by
-    // definition - it can never replace itself with the published release - so
-    // it says so in the corner rather than looking like a normal install.
-    if constexpr (!leapcast::AutoUpdate) {
-        auto* testBadge = label(QStringLiteral("TEST BUILD"), "testBuild");
-        testBadge->setAlignment(Qt::AlignCenter);
-        testBadge->setMinimumHeight(20);
-        testBadge->setToolTip(QStringLiteral("Test build %1 - automatic updates are disabled, so this copy will not update itself.")
-                                  .arg(QString::fromLatin1(leapcast::Version)));
-        railLayout->addWidget(testBadge);
-    }
-    auto* version = label(QStringLiteral("v%1").arg(QString::fromLatin1(leapcast::Version)), "version");
+    // A build with automatic updates compiled out is a test build by definition
+    // - it can never replace itself with the published release - so the version
+    // in the corner says so directly rather than needing a separate badge.
+    const QString versionText = leapcast::AutoUpdate
+        ? QStringLiteral("v%1").arg(QString::fromLatin1(leapcast::Version))
+        : QStringLiteral("Test V%1").arg(QString::fromLatin1(leapcast::Version));
+    auto* version = label(versionText, leapcast::AutoUpdate ? "version" : "testBuild");
     version->setAlignment(Qt::AlignCenter);
     version->setMinimumHeight(24);
-    version->setToolTip(QStringLiteral("Leapcast Studio version %1").arg(QString::fromLatin1(leapcast::Version)));
+    version->setToolTip(leapcast::AutoUpdate
+        ? QStringLiteral("Leapcast Studio version %1").arg(QString::fromLatin1(leapcast::Version))
+        : QStringLiteral("Test build %1 - automatic updates are disabled, so this copy will not update itself.")
+              .arg(QString::fromLatin1(leapcast::Version)));
     railLayout->addWidget(version);
     group->button(keys.indexOf(QStringLiteral("moderation")))->setChecked(true);
     pages_->setCurrentIndex(keys.indexOf(QStringLiteral("moderation")));
@@ -1766,16 +1814,13 @@ QWidget* MainWindow::buildChatDock() {
         // Emote pictures download in the background; binding each tab's
         // document lets them appear as soon as they land.
         EmoteImageCache::instance().bind(chat->document());
-        // Names are anchors. Handle them here rather than letting QTextBrowser
-        // try to navigate the view to a made-up URL, and keep them looking like
-        // names rather than underlined blue links.
         chat->setOpenLinks(false);
-        chat->document()->setDefaultStyleSheet(QStringLiteral("a{text-decoration:none}"));
-        connect(chat,&QTextBrowser::anchorClicked,this,[this](const QUrl& link){
-            if(link.scheme()!=QStringLiteral("leapcast"))return;
-            const qint64 id=link.path().section(QLatin1Char('/'),-1).toLongLong();
-            if(chatHistoryById_.contains(id))showUserCard(chatHistoryById_.value(id));
-        });
+        // A left-click on a username opens that chatter's card. Filtered on the
+        // viewport rather than handled by a QTextBrowser subclass so the normal
+        // selection, scrolling and right-click behaviour is untouched: a click
+        // that is not on a name simply falls through.
+        chat->viewport()->setMouseTracking(true);
+        chat->viewport()->installEventFilter(this);
         const QIcon icon(tab.second);
         int tabIndex=-1;
         if (!icon.isNull()) {

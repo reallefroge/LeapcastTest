@@ -1,6 +1,6 @@
 # Leapcast Studio Changelog
 
-## Leapcast Studio 3.0.9.2
+## Leapcast Studio 3.0.9.3
 
 - **Automatic updates are switched off in this build.** The splash screen no longer contacts GitHub at startup, the background check is gone, and Check now is disabled, so a locally built test binary can never be replaced by the published release. Rebuild with `-DLEAPCAST_AUTO_UPDATE=ON` to turn updating back on.
 - Added a Diagnose 403 button to the Discord card. It checks the bot token, then whether the bot can see the channel, then whether the bot is a member of that server, and names the step that fails instead of returning a bare HTTP 403.
@@ -26,6 +26,9 @@
 - Left-clicking a name in the program chat opens a chatter card: account id, account age, follower count, whether they follow the channel and since when, subscription tier and months, and their Twitch badges.
 - The card carries Block, Ignore highlights, auto-saving private notes, links to the Twitch usercard and channel, the full timeout ladder (1s to 1w) with Unban and Ban, and that chatter's recent messages.
 - Twitch reconnection is required once for the new card: the app now also asks for the follower, subscription and block-list scopes.
+- Fixed the chatter card not opening: the username was wrapped in a link, but a name is a stack of per-character coloured spans and the link did not survive the rich-text import. The name is now its own marked run, the pointer turns into a hand over it, and a click that is part of a text selection is ignored.
+- Fixed emotes showing as their names. Every emote was rendered as text the first time it appeared, because the picture was only emitted once the image had finished downloading — and the chat view already downloads images itself.
+- Added an Emotes line to the diagnostics log showing what Twitch tagged on each message and how many emote pictures came out of it.
 
 ## Leapcast Studio 3.0.9.1
 

@@ -89,12 +89,14 @@ QString chatMessageBodyHtml(const ChatMessage& message) {
             const QString fallback=run.value(QStringLiteral("alt")).toString();
             const QUrl url(run.value(QStringLiteral("url")).toString());
             if(url.isValid()&&url.scheme()==QStringLiteral("https")) {
-                // Start the download on first sighting. Until it lands the
-                // emote shows as its name rather than an empty box.
-                if(EmoteImageCache::instance().ensure(url)) {
-                    html+=QStringLiteral("<img src='%1' alt='%2' title='%2' width='24' height='24' style='vertical-align:-6px;margin:0 1px'>")
-                        .arg(url.toString(QUrl::FullyEncoded).toHtmlEscaped(),fallback.toHtmlEscaped());
-                } else html+=fallback.toHtmlEscaped();
+                // Always emit the picture. ChatBrowser::loadResource fetches an
+                // https image itself and re-lays the text out once it arrives,
+                // so gating on a local cache only made the FIRST sighting of
+                // every emote fall back to its name — which is every emote, the
+                // first time you use it.
+                EmoteImageCache::instance().ensure(url);
+                html+=QStringLiteral("<img src='%1' alt='%2' title='%2' width='24' height='24' style='vertical-align:-6px;margin:0 1px'>")
+                    .arg(url.toString(QUrl::FullyEncoded).toHtmlEscaped(),fallback.toHtmlEscaped());
             } else html+=fallback.toHtmlEscaped();
         }
         if(!html.isEmpty()) return html;

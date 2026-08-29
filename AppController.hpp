@@ -69,6 +69,7 @@ signals:
     void discordNotificationResult(bool success, const QString& detail);
     void discordDiagnostic(const QString& line);
     void tiktokDiagnostic(const QString& line);
+    void emoteDiagnostic(const QString& line);
     void tiktokCollectorVisibilityChanged(bool visible);
     void discordBotStatus(bool online, const QString& detail);
 private:

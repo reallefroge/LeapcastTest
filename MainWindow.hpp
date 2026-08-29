@@ -37,6 +37,8 @@ public:
 
 protected:
     bool event(QEvent* e) override;
+    // Left-click on a username in a chat view opens that chatter's card.
+    bool eventFilter(QObject* watched, QEvent* e) override;
     void closeEvent(QCloseEvent* e) override;
     void showEvent(QShowEvent* e) override;
 
