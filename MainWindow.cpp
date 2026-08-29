@@ -323,11 +323,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(controller_, &AppController::messageReady, this, [this](const ChatMessage& m) {
         const QString badges = chatBadgeHtml(m);
         const QString icon=controller_->settings()->preference(QStringLiteral("program_popout_show_platform_icons"),true).toBool()?platformIconHtml(m.platform):QString();
-        const QString html = QStringLiteral("%1%2%3 %4")
-            .arg(icon,badges.isEmpty() ? QString() : badges + QStringLiteral(" "),chatNameHtml(m),chatMessageBodyHtml(m));
         // Stamped with an id (see appendChatMessage) so a right-click on
         // either view can be traced back to this message for moderation.
         const qint64 id = ++nextChatSeq_;
+        // The name is also an anchor carrying that id, so a plain left-click
+        // opens the chatter card without disturbing text selection anywhere
+        // else in the line.
+        const QString name = QStringLiteral("<a href='leapcast:user/%1' style='text-decoration:none'>%2</a>")
+                                 .arg(QString::number(id),chatNameHtml(m));
+        const QString html = QStringLiteral("%1%2%3 %4")
+            .arg(icon,badges.isEmpty() ? QString() : badges + QStringLiteral(" "),name,chatMessageBodyHtml(m));
         chatHistoryById_.insert(id, m);
         chatHistoryById_.remove(id - 400);
         appendChatMessage(chatViews_.value(QStringLiteral("combined")), html, id);
@@ -348,7 +353,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         appendTrimmed(chatViews_.value(m.platform), note);
         if (popout_) popout_->appendModerationNote(m.user, reason);
     });
-    connect(controller_,&AppController::tiktokActivityReady,this,[this](const StreamEvent&e){if(e.kind==QStringLiteral("tiktok_join")&&controller_->settings()->preference(QStringLiteral("tiktok_popout_activity_enabled"),true).toBool()&&popout_)popout_->showTikTokActivity(e);});
+    // Joins, likes, follows, gifts and shares all arrive on this signal now,
+    // so match the platform prefix rather than the single join kind.
+    connect(controller_,&AppController::tiktokActivityReady,this,[this](const StreamEvent&e){if(e.kind.startsWith(QStringLiteral("tiktok_"))&&controller_->settings()->preference(QStringLiteral("tiktok_popout_activity_enabled"),true).toBool()&&popout_)popout_->showTikTokActivity(e);});
     connect(controller_,&AppController::twitchAppealsUpdated,this,[this](const QJsonArray&appeals){
         overlay_->setMobileAppeals(appeals);
         if(!twitchAppeals_)return;twitchAppeals_->clear();
@@ -640,6 +647,246 @@ void MainWindow::showFirstLaunchUpdateLog(){
     auto* summary=label(QStringLiteral("A test build: automatic updates are off, TikTok chat collection is fixed, and Discord now tells you why a 403 happened."),"muted");summary->setWordWrap(true);layout->addWidget(summary);
     auto* notes=new QTextBrowser;notes->setOpenExternalLinks(true);notes->setFrameShape(QFrame::NoFrame);notes->document()->setDefaultStyleSheet(QStringLiteral("body{line-height:1.5;color:#eef2ff} h3{color:#53cdf3;margin:5px 0 10px} li{margin:0 0 12px 0} strong{color:#ffffff}"));notes->setMarkdown(QStringLiteral("### Highlights\n\n- **\U0001F6D1 Automatic updates are OFF**  \n  This is a test build. It will not contact GitHub at startup and will not replace itself with the published release. Check now is disabled too.\n\n- **\U0001F50E Discord \u2018Diagnose 403\u2019**  \n  Settings \u2192 Discord now checks your token, then the channel, then server membership, and names the step that fails. Administrator does not fix every 403, and this says which one you have.\n\n- **\U0001F4AC TikTok chat actually shows up**  \n  The hidden collector page had no viewport, so TikTok rendered zero chat rows. It now runs in a real off-screen window you can open, and sign in to, from Settings.\n\n- **\U0001F465 Sane TikTok viewer counts**  \n  The count no longer picks up numbers from recommended streams in the sidebar."));layout->addWidget(notes,1);
     auto* close=new QPushButton(QStringLiteral("Let's go!"));close->setProperty("primary",true);connect(close,&QPushButton::clicked,&dialog,&QDialog::accept);layout->addWidget(close,0,Qt::AlignRight);dialog.exec();
+}
+
+void MainWindow::showUserCard(const ChatMessage& message){
+    const bool isTwitch=message.platform==QStringLiteral("twitch");
+    const QString userId=message.userId;
+    const QString broadcasterId=isTwitch?message.metadata.value(QStringLiteral("room_id")).toString():QString();
+
+    auto* dialog=new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(message.user);
+    dialog->resize(430,660);
+    dialog->setMinimumSize(380,520);
+    // Same surfaces and accents as the main window, so the card reads as part
+    // of the program rather than as a stock dialog.
+    dialog->setStyleSheet(QStringLiteral(
+        "QDialog{background:#0b0e17;}"
+        "QLabel{color:#eef2ff;}"
+        "QLabel[role='muted']{color:#9ca7bf;}"
+        "QLabel[role='cardTitle']{color:#53cdf3;font-weight:800;letter-spacing:1px;}"
+        "QFrame[card='true']{background:#111522;border:1px solid #283149;border-radius:10px;}"
+        "QCheckBox{color:#eef2ff;}"
+        "QLineEdit,QPlainTextEdit,QTextBrowser{background:#0b0d15;color:#eef2ff;border:1px solid #283149;border-radius:8px;padding:5px;}"
+        "QPushButton{background:#20283a;color:#eef2ff;border:0;border-radius:7px;padding:5px 9px;font-weight:700;}"
+        "QPushButton:hover{background:#2b3550;}"
+        "QPushButton:disabled{background:#161c2b;color:#5b6480;}"
+        "QPushButton[danger='true']{background:#5d1f2c;color:#ffd9e0;}"
+        "QPushButton[danger='true']:hover{background:#7a2839;}"
+        "QPushButton[good='true']{background:#1d4736;color:#c9f7e4;}"));
+
+    auto* layout=new QVBoxLayout(dialog);
+    layout->setContentsMargins(14,14,14,14);
+    layout->setSpacing(9);
+
+    auto* identity=new QFrame;identity->setProperty("card",true);
+    auto* identityLayout=new QVBoxLayout(identity);
+    auto* nameRow=new QHBoxLayout;
+    auto* nameLabel=new QLabel(message.user.toHtmlEscaped());
+    nameLabel->setStyleSheet(QStringLiteral("font-size:15pt;font-weight:800;color:%1")
+                                 .arg(message.color.isValid()?message.color.name():QStringLiteral("#eef2ff")));
+    nameRow->addWidget(nameLabel,1);
+    auto* idLabel=new QLabel(userId.isEmpty()?QStringLiteral("no account id"):QStringLiteral("ID: %1").arg(userId));
+    idLabel->setProperty("role","muted");nameRow->addWidget(idLabel);
+    identityLayout->addLayout(nameRow);
+
+    const QString badgeHtml=chatBadgeHtml(message);
+    if(!badgeHtml.isEmpty()){
+        auto* badgeLabel=new QLabel(badgeHtml);badgeLabel->setTextFormat(Qt::RichText);
+        identityLayout->addWidget(badgeLabel);
+    }
+
+    auto* followersLabel=new QLabel(QStringLiteral("Followers: checking…"));followersLabel->setProperty("role","muted");
+    auto* createdLabel=new QLabel(QStringLiteral("Created: checking…"));createdLabel->setProperty("role","muted");
+    auto* followingLabel=new QLabel(QStringLiteral("Following: checking…"));followingLabel->setProperty("role","muted");
+    auto* subLabel=new QLabel(QStringLiteral("Subscription: checking…"));subLabel->setProperty("role","muted");
+    for(auto* line:{followersLabel,createdLabel,followingLabel,subLabel}){line->setWordWrap(true);identityLayout->addWidget(line);}
+    if(!isTwitch){
+        for(auto* line:{followersLabel,createdLabel,followingLabel,subLabel})line->hide();
+        auto* note=new QLabel(QStringLiteral("%1 does not expose account details to Leapcast, so only the notes and chat log below are available.")
+                                  .arg(message.platform.isEmpty()?QStringLiteral("This platform"):message.platform));
+        note->setWordWrap(true);note->setProperty("role","muted");identityLayout->addWidget(note);
+    }
+    layout->addWidget(identity);
+
+    auto* toggles=new QFrame;toggles->setProperty("card",true);
+    auto* toggleLayout=new QVBoxLayout(toggles);
+    const QString blockKey=QStringLiteral("blocked_users");
+    const QString ignoreKey=QStringLiteral("ignored_highlight_users");
+    const QString noteKey=QStringLiteral("user_notes");
+    const QString identityKey=message.platform+QLatin1Char('|')+(userId.isEmpty()?message.user.toLower():userId);
+
+    auto* blockBox=new QCheckBox(QStringLiteral("Block this user"));
+    blockBox->setChecked(controller_->settings()->preference(blockKey,QStringList{}).toStringList().contains(identityKey));
+    blockBox->setToolTip(isTwitch?QStringLiteral("Also blocks the account on Twitch.")
+                                :QStringLiteral("Blocks the user inside Leapcast only."));
+    auto* ignoreBox=new QCheckBox(QStringLiteral("Ignore highlights from this user"));
+    ignoreBox->setChecked(controller_->settings()->preference(ignoreKey,QStringList{}).toStringList().contains(identityKey));
+    toggleLayout->addWidget(blockBox);
+    toggleLayout->addWidget(ignoreBox);
+
+    auto* noteLabel=new QLabel(QStringLiteral("Notes (saved as you type)"));noteLabel->setProperty("role","muted");
+    toggleLayout->addWidget(noteLabel);
+    auto* notes=new QPlainTextEdit(controller_->settings()->preference(noteKey,QVariantMap{}).toMap().value(identityKey).toString());
+    notes->setPlaceholderText(QStringLiteral("Private notes about this chatter"));
+    notes->setFixedHeight(62);
+    toggleLayout->addWidget(notes);
+
+    auto* linkRow=new QHBoxLayout;
+    auto* usercard=new QPushButton(QStringLiteral("Twitch usercard"));
+    auto* channel=new QPushButton(QStringLiteral("Open channel"));
+    usercard->setEnabled(isTwitch&&!broadcasterId.isEmpty());
+    channel->setEnabled(isTwitch);
+    linkRow->addWidget(usercard);linkRow->addWidget(channel);linkRow->addStretch();
+    toggleLayout->addLayout(linkRow);
+    layout->addWidget(toggles);
+
+    auto* moderation=new QFrame;moderation->setProperty("card",true);
+    auto* moderationLayout=new QVBoxLayout(moderation);
+    moderationLayout->addWidget(label(QStringLiteral("MODERATION"),"cardTitle"));
+    auto* actionRow=new QHBoxLayout;actionRow->setSpacing(4);
+    auto* unban=new QPushButton(QStringLiteral("Unban"));unban->setProperty("good",true);
+    actionRow->addWidget(unban);
+    // The same ladder Twitch's own moderator card offers.
+    const QList<QPair<QString,int>> timeouts{{QStringLiteral("1s"),1},{QStringLiteral("30s"),30},
+        {QStringLiteral("1m"),60},{QStringLiteral("5m"),300},{QStringLiteral("30m"),1800},
+        {QStringLiteral("1h"),3600},{QStringLiteral("1d"),86400},{QStringLiteral("1w"),604800}};
+    QList<QPushButton*> actionButtons{unban};
+    for(const auto& entry:timeouts){
+        auto* button=new QPushButton(entry.first);
+        button->setToolTip(QStringLiteral("Time out %1 for %2").arg(message.user,entry.first));
+        connect(button,&QPushButton::clicked,dialog,[this,message,entry]{
+            controller_->moderateMessage(message,entry.second,QStringLiteral("Timeout from user card"));
+        });
+        actionRow->addWidget(button);actionButtons<<button;
+    }
+    auto* ban=new QPushButton(QStringLiteral("Ban"));ban->setProperty("danger",true);
+    actionRow->addWidget(ban);actionButtons<<ban;
+    moderationLayout->addLayout(actionRow);
+    auto* moderationStatus=new QLabel;moderationStatus->setProperty("role","muted");moderationStatus->setWordWrap(true);
+    moderationLayout->addWidget(moderationStatus);
+    const bool canModerate=isTwitch||message.platform==QStringLiteral("youtube")||message.platform==QStringLiteral("yt_shorts");
+    if(!canModerate){
+        for(auto* button:actionButtons)button->setEnabled(false);
+        moderationStatus->setText(QStringLiteral("Leapcast has no moderation API for %1.").arg(message.platform));
+    }
+    layout->addWidget(moderation);
+
+    auto* logCard=new QFrame;logCard->setProperty("card",true);
+    auto* logLayout=new QVBoxLayout(logCard);
+    logLayout->addWidget(label(QStringLiteral("RECENT MESSAGES"),"cardTitle"));
+    auto* log=new QTextBrowser;log->setOpenExternalLinks(false);
+    log->setPlaceholderText(QStringLiteral("No messages recorded for this chatter yet."));
+    logLayout->addWidget(log,1);
+    layout->addWidget(logCard,1);
+
+    auto* close=new QPushButton(QStringLiteral("Close"));
+    connect(close,&QPushButton::clicked,dialog,&QDialog::accept);
+    auto* footer=new QHBoxLayout;footer->addStretch();footer->addWidget(close);
+    layout->addLayout(footer);
+
+    connect(blockBox,&QCheckBox::toggled,dialog,[this,identityKey,userId,isTwitch,blockKey](bool on){
+        QStringList current=controller_->settings()->preference(blockKey,QStringList{}).toStringList();
+        if(on&&!current.contains(identityKey))current<<identityKey;
+        else if(!on)current.removeAll(identityKey);
+        controller_->settings()->setPreference(blockKey,current);
+        if(isTwitch&&!userId.isEmpty())controller_->setTwitchUserBlocked(userId,on);
+    });
+    connect(ignoreBox,&QCheckBox::toggled,dialog,[this,identityKey,ignoreKey](bool on){
+        QStringList current=controller_->settings()->preference(ignoreKey,QStringList{}).toStringList();
+        if(on&&!current.contains(identityKey))current<<identityKey;
+        else if(!on)current.removeAll(identityKey);
+        controller_->settings()->setPreference(ignoreKey,current);
+    });
+    // Saved on a short idle timer rather than on every keystroke, so the
+    // settings file is not rewritten once per character typed.
+    auto* noteSave=new QTimer(dialog);noteSave->setSingleShot(true);noteSave->setInterval(600);
+    connect(notes,&QPlainTextEdit::textChanged,noteSave,qOverload<>(&QTimer::start));
+    connect(noteSave,&QTimer::timeout,dialog,[this,notes,identityKey,noteKey,noteLabel]{
+        QVariantMap all=controller_->settings()->preference(noteKey,QVariantMap{}).toMap();
+        const QString text=notes->toPlainText();
+        if(text.trimmed().isEmpty())all.remove(identityKey);else all.insert(identityKey,text);
+        controller_->settings()->setPreference(noteKey,all);
+        noteLabel->setText(QStringLiteral("Notes (saved)"));
+    });
+    connect(usercard,&QPushButton::clicked,dialog,[message,broadcasterId]{
+        QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.twitch.tv/popout/moderator/%1/viewercard/%2")
+                                           .arg(broadcasterId,message.user.toLower())));
+    });
+    connect(channel,&QPushButton::clicked,dialog,[message]{
+        QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.twitch.tv/%1").arg(message.user.toLower())));
+    });
+    connect(ban,&QPushButton::clicked,dialog,[this,message,moderationStatus]{
+        if(QMessageBox::question(this,QStringLiteral("Ban %1").arg(message.user),
+                                 QStringLiteral("Permanently ban %1 from the channel?").arg(message.user))!=QMessageBox::Yes)return;
+        controller_->moderateMessage(message,0,QStringLiteral("Ban from user card"));
+        moderationStatus->setText(QStringLiteral("Ban requested."));
+    });
+    connect(unban,&QPushButton::clicked,dialog,[this,message,userId,moderationStatus]{
+        if(message.platform==QStringLiteral("twitch")&&!userId.isEmpty()){
+            controller_->unbanTwitch(userId);
+            moderationStatus->setText(QStringLiteral("Unban requested."));
+        } else moderationStatus->setText(QStringLiteral("Unban is only wired up for Twitch."));
+    });
+    connect(controller_,&AppController::moderationResult,dialog,[moderationStatus](const QString&,bool ok,const QString& detail){
+        moderationStatus->setText(ok?QStringLiteral("Done."):QStringLiteral("Failed: %1").arg(detail));
+    });
+
+    // Account details arrive asynchronously and any of them may be refused, so
+    // each line either fills in or says plainly that Twitch withheld it.
+    connect(controller_,&AppController::twitchUserCardReady,dialog,
+            [userId,followersLabel,createdLabel,followingLabel,subLabel,message](const QString& id,const QJsonObject& card){
+        if(id!=userId)return;
+        if(card.contains(QStringLiteral("followers")))
+            followersLabel->setText(QStringLiteral("Followers: %1").arg(card.value(QStringLiteral("followers")).toInt()));
+        else followersLabel->setText(QStringLiteral("Followers: Twitch does not share this for other channels"));
+
+        const QJsonObject account=card.value(QStringLiteral("account")).toObject();
+        const QDateTime created=QDateTime::fromString(account.value(QStringLiteral("created_at")).toString(),Qt::ISODate);
+        createdLabel->setText(created.isValid()
+            ? QStringLiteral("Created: %1  (%2 days old)").arg(created.toLocalTime().toString(QStringLiteral("yyyy-MM-dd")))
+                                                          .arg(created.daysTo(QDateTime::currentDateTimeUtc()))
+            : QStringLiteral("Created: unknown"));
+
+        const QDateTime followed=QDateTime::fromString(card.value(QStringLiteral("following")).toString(),Qt::ISODate);
+        followingLabel->setText(followed.isValid()
+            ? QStringLiteral("★ Following since %1").arg(followed.toLocalTime().toString(QStringLiteral("yyyy-MM-dd")))
+            : QStringLiteral("Not following"));
+
+        const QJsonObject subscription=card.value(QStringLiteral("subscription")).toObject();
+        if(subscription.isEmpty())subLabel->setText(QStringLiteral("Not subscribed"));
+        else{
+            // Helix gives the tier; the month count only exists in the IRC
+            // badge-info tag, so use that when this message carried one.
+            const QString tier=subscription.value(QStringLiteral("tier")).toString();
+            const QString tierName=tier==QStringLiteral("3000")?QStringLiteral("Tier 3")
+                                  :tier==QStringLiteral("2000")?QStringLiteral("Tier 2")
+                                                               :QStringLiteral("Tier 1");
+            QString months;
+            for(const QString& part:message.metadata.value(QStringLiteral("badge_info")).toString().split(QLatin1Char(','),Qt::SkipEmptyParts))
+                if(part.startsWith(QStringLiteral("subscriber/")))months=part.section(QLatin1Char('/'),1,1);
+            subLabel->setText(months.isEmpty()?QStringLiteral("★ %1 subscriber").arg(tierName)
+                                              :QStringLiteral("★ %1 — subscribed for %2 months").arg(tierName,months));
+        }
+    });
+    connect(controller_,&AppController::userChatHistoryReady,dialog,[log,userId](const QString& id,const QJsonArray& messages){
+        if(id!=userId)return;
+        QString html;
+        for(const auto& value:messages){
+            const QJsonObject entry=value.toObject();
+            const QDateTime when=QDateTime::fromString(entry.value(QStringLiteral("time")).toString(),Qt::ISODateWithMs);
+            html+=QStringLiteral("<div style='margin:2px 0'><span style='color:#7f8ba5'>%1</span> %2</div>")
+                      .arg(when.isValid()?when.toLocalTime().toString(QStringLiteral("HH:mm")):QString(),
+                           entry.value(QStringLiteral("text")).toString().toHtmlEscaped());
+        }
+        log->setHtml(html);
+        log->moveCursor(QTextCursor::End);
+    });
+
+    if(isTwitch&&!userId.isEmpty())controller_->loadTwitchUserCard(userId);
+    controller_->loadTwitchUserHistory(userId,message.user);
+    dialog->show();
 }
 
 void MainWindow::appendDiagnostic(const QString& source,const QString& line){
@@ -1022,7 +1269,7 @@ QWidget* MainWindow::buildSettingsPage(){
     auto* programIcons=new QCheckBox(QStringLiteral("Show platform icons in program chat and pop-out"));programIcons->setChecked(controller_->settings()->preference(QStringLiteral("program_popout_show_platform_icons"),true).toBool());popoutLayout->addWidget(programIcons);
     auto* overlayIcons=new QCheckBox(QStringLiteral("Show platform icons in OBS overlay"));overlayIcons->setChecked(controller_->settings()->preference(QStringLiteral("overlay_show_platform_icons"),true).toBool());popoutLayout->addWidget(overlayIcons);
     auto* pinnedMessages=new QCheckBox(QStringLiteral("Show pinned messages for Twitch and YouTube/Shorts (📌)"));pinnedMessages->setChecked(controller_->settings()->preference(QStringLiteral("show_pinned_messages"),true).toBool());popoutLayout->addWidget(pinnedMessages);
-    auto* tiktokActivity=new QCheckBox(QStringLiteral("Show TikTok joins in pop-out only"));tiktokActivity->setChecked(controller_->settings()->preference(QStringLiteral("tiktok_popout_activity_enabled"),true).toBool());popoutLayout->addWidget(tiktokActivity);
+    auto* tiktokActivity=new QCheckBox(QStringLiteral("Show TikTok joins, likes, follows and gifts in pop-out only"));tiktokActivity->setChecked(controller_->settings()->preference(QStringLiteral("tiktok_popout_activity_enabled"),true).toBool());popoutLayout->addWidget(tiktokActivity);
     const auto applyPopoutAppearance=[this,popoutFont,popoutSize,popoutOutline]{if(popout_)popout_->setAppearance(QColor(controller_->settings()->preference(QStringLiteral("overlay_background_color"),QStringLiteral("#000000")).toString()),popoutOutline->value(),popoutFont->currentFont().family(),popoutSize->value());};
     connect(popoutFont,&QFontComboBox::currentFontChanged,this,[this,applyPopoutAppearance](const QFont&font){controller_->settings()->setPreference(QStringLiteral("popout_font_family"),font.family());applyPopoutAppearance();});
     connect(popoutSize,&QSlider::valueChanged,this,[this,popoutSizeValue,applyPopoutAppearance](int value){popoutSizeValue->setText(QString::number(value)+QStringLiteral(" pt"));controller_->settings()->setPreference(QStringLiteral("popout_font_size"),value);applyPopoutAppearance();});
@@ -1516,6 +1763,19 @@ QWidget* MainWindow::buildChatDock() {
         const auto& tab=tabs.at(index);
         auto* chat = new ChatBrowser;
         chat->setPlaceholderText(QStringLiteral("Connected messages appear here."));
+        // Emote pictures download in the background; binding each tab's
+        // document lets them appear as soon as they land.
+        EmoteImageCache::instance().bind(chat->document());
+        // Names are anchors. Handle them here rather than letting QTextBrowser
+        // try to navigate the view to a made-up URL, and keep them looking like
+        // names rather than underlined blue links.
+        chat->setOpenLinks(false);
+        chat->document()->setDefaultStyleSheet(QStringLiteral("a{text-decoration:none}"));
+        connect(chat,&QTextBrowser::anchorClicked,this,[this](const QUrl& link){
+            if(link.scheme()!=QStringLiteral("leapcast"))return;
+            const qint64 id=link.path().section(QLatin1Char('/'),-1).toLongLong();
+            if(chatHistoryById_.contains(id))showUserCard(chatHistoryById_.value(id));
+        });
         const QIcon icon(tab.second);
         int tabIndex=-1;
         if (!icon.isNull()) {
@@ -1619,7 +1879,7 @@ void MainWindow::applyTheme() {
     const bool compact=controller_?controller_->settings()->preference(QStringLiteral("ui_compact_layout"),true).toBool():true;
     const int scale=compact?qMin(requestedScale,92):requestedScale;
     QString sheet=QStringLiteral(R"(
-        * { font-family:'__FONT__'; font-size:__SIZE__pt; color:#eef2ff; }
+        * { font-family:'__FONT__','Segoe UI Emoji','Noto Color Emoji'; font-size:__SIZE__pt; color:#eef2ff; }
         QMainWindow, QWidget { background:#090c14; }
         QFrame#navigationRail, QFrame#chatDock { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #121827,stop:1 #0e1320); border:1px solid #293451; border-radius:14px; }
         QLabel[role='brand'] { font-size:11pt; font-weight:800; color:#f8fbff; qproperty-alignment:AlignCenter; }

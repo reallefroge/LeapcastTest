@@ -15,6 +15,17 @@
 - The TikTok source status now says when the page is showing a login wall or a captcha instead of silently collecting nothing.
 - CI test builds no longer fail when the repository has no bundled Twitch application ID. Keys then shows a Twitch Application Client ID box so Twitch Connect can be pointed at your own Twitch app; releases still require the bundled ID.
 - Removed the duplicate Windows build workflow that ran a second, outdated build on every push.
+- Fixed TikTok chat posting every message twice. Rank and level chips ("No. 1", "Lv 18") are separate elements that appear and disappear as TikTok re-renders, so the same message kept producing two different texts; they are now ignored when matching a message against what was already shown.
+- Fixed TikTok chat stopping altogether, caused by reading rows from a detached copy of the page where the name and the message ran together.
+- TikTok likes, follows, gifts and shares now appear in the pop-out alongside joins.
+- Emoji in TikTok display names now survive and render, instead of arriving as replacement boxes.
+- Twitch emotes now render as images in the program chat, the pop-out and the OBS overlay, including BetterTTV, FrankerFaceZ and 7TV emotes for the connected channel.
+- YouTube custom emoji now actually load in the program and pop-out chat; they previously resolved to nothing because Qt will not fetch a remote image on its own.
+- The Discord bot now comes online automatically when a token is saved, instead of waiting for Run Bot to be pressed.
+- Live notifications now wait a full minute into the broadcast before posting, rather than five seconds, so a false start never announces a stream.
+- Left-clicking a name in the program chat opens a chatter card: account id, account age, follower count, whether they follow the channel and since when, subscription tier and months, and their Twitch badges.
+- The card carries Block, Ignore highlights, auto-saving private notes, links to the Twitch usercard and channel, the full timeout ladder (1s to 1w) with Unban and Ban, and that chatter's recent messages.
+- Twitch reconnection is required once for the new card: the app now also asks for the follower, subscription and block-list scopes.
 
 ## Leapcast Studio 3.0.9.1
 

@@ -20,6 +20,10 @@ public:
     void unbanYouTube(const QString& banId);
     void resolveTwitchAppeal(const QString& requestId, bool approved, const QString& resolutionText);
     void createTwitchClip();
+    // Backing calls for the chatter card opened by left-clicking a name.
+    void loadTwitchUserCard(const QString& userId);
+    void setTwitchUserBlocked(const QString& userId, bool blocked);
+    QString twitchBroadcasterId() const { return const_cast<AppController*>(this)->settings_.secret(QStringLiteral("twitch_broadcaster_id")); }
     void setPinnedMessagesEnabled(bool enabled);
     void testDiscordLiveNotification();
     // Walks the three Discord endpoints that can each produce an HTTP 403 on
@@ -55,6 +59,7 @@ signals:
     void bansUpdated(const QString& platform, const QJsonArray& bans);
     void twitchAppealsUpdated(const QJsonArray& appeals);
     void userChatHistoryReady(const QString& userId, const QJsonArray& messages);
+    void twitchUserCardReady(const QString& userId, const QJsonObject& card);
     void twitchClipCreated(const QUrl& editUrl);
     void twitchClipFailed(const QString& detail);
     void twitchAuthorizationUrl(const QUrl& url);
@@ -107,6 +112,7 @@ public:
     StreamlabsService streamlabs_;
     TwitchAuthService twitchAuth_;
     TwitchModerationService twitchMod_;
+    TwitchEmoteService twitchEmotes_;
     TwitchEventSubService twitchEvents_;
     YouTubeModerationService youtubeMod_;
     QJsonArray youtubeRestrictions_;
