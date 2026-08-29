@@ -13,6 +13,8 @@
 - TikTok viewer counts written as `1.234` or `1,234` are no longer read as 1.
 - Added a TikTok collector card in Settings: show the hidden page, reload it, and sign in to TikTok once, with the sign-in remembered between launches.
 - The TikTok source status now says when the page is showing a login wall or a captcha instead of silently collecting nothing.
+- CI test builds no longer fail when the repository has no bundled Twitch application ID. Keys then shows a Twitch Application Client ID box so Twitch Connect can be pointed at your own Twitch app; releases still require the bundled ID.
+- Removed the duplicate Windows build workflow that ran a second, outdated build on every push.
 
 ## Leapcast Studio 3.0.9.1
 

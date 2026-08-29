@@ -1,0 +1,15 @@
+# This workflow is superseded by main.yml, which builds and releases Leapcast
+# Studio for Windows. Both files carried the same name and the same push
+# trigger, so every push started two identical Windows builds and the older
+# copy kept failing. This one no longer runs on its own; it is safe to delete.
+name: Windows build and release (superseded)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  superseded:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain
+        run: echo "This workflow was replaced by .github/workflows/main.yml. Run that one instead."

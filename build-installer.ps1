@@ -8,7 +8,10 @@ param(
     # Automatic updates are OFF by default so a test build can never be
     # replaced by the published release. Pass -AutoUpdate to build a normal,
     # self-updating installer.
-    [switch]$AutoUpdate
+    [switch]$AutoUpdate,
+    # Test builds only: allow an empty LEAPCAST_TWITCH_CLIENT_ID instead of
+    # refusing to build. Never use this for a published release.
+    [switch]$AllowMissingTwitchClientId
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,7 +26,16 @@ if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
 }
 
 if ([string]::IsNullOrWhiteSpace($TwitchClientId)) {
-    throw "LEAPCAST_TWITCH_CLIENT_ID is required. Refusing to create an installer with a broken Twitch Connect button."
+    # A release must never ship without the bundled Twitch application ID, but a
+    # test build should not be blocked by it. Without an ID the app now shows a
+    # "Twitch application Client ID" box on the Keys page, so Twitch Connect is
+    # configurable by hand instead of dead.
+    if (-not $AllowMissingTwitchClientId) {
+        throw "LEAPCAST_TWITCH_CLIENT_ID is required. Refusing to create an installer with a broken Twitch Connect button. Pass -AllowMissingTwitchClientId to build a test installer anyway; Twitch Connect will then need a Client ID entered on the Keys page."
+    }
+    Write-Host "WARNING: building WITHOUT a bundled Twitch Client ID." -ForegroundColor Yellow
+    Write-Host "         Twitch Connect will ask for a Client ID on the Keys page." -ForegroundColor Yellow
+    Write-Host "         Do not publish this installer as a release." -ForegroundColor Yellow
 }
 
 if ([string]::IsNullOrWhiteSpace($QtRoot)) {
