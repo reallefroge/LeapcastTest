@@ -58,9 +58,14 @@ QString discordCauseFor(int httpCode,int discordCode){
 }
 
 AppController::AppController(QObject*p):QObject(p){
-    discordLiveDelay_.setSingleShot(true);discordLiveDelay_.setInterval(5000);
+    // Hold the announcement until the broadcast has been up for a minute: long
+    // enough for the other services to come online and for a false start to be
+    // cancelled, rather than firing five seconds in.
+    discordLiveDelay_.setSingleShot(true);discordLiveDelay_.setInterval(60000);
     connect(&discordLiveDelay_,&QTimer::timeout,this,[this]{const auto platforms=discordPendingPlatforms_;discordPendingPlatforms_.clear();sendDiscordLiveNotification(platforms);});
-    discordLiveReset_.setSingleShot(true);discordLiveReset_.setInterval(90000);connect(&discordLiveReset_,&QTimer::timeout,this,[this]{discordBroadcastNotificationSent_=false;discordPendingPlatforms_.clear();});
+    // Must outlast the announcement delay, or the pending platforms would be
+    // cleared while the app is still waiting to post.
+    discordLiveReset_.setSingleShot(true);discordLiveReset_.setInterval(300000);connect(&discordLiveReset_,&QTimer::timeout,this,[this]{discordBroadcastNotificationSent_=false;discordPendingPlatforms_.clear();});
     connect(&discordHeartbeat_,&QTimer::timeout,this,&AppController::sendDiscordHeartbeat);
     connect(&discordGateway_,&QWebSocket::textMessageReceived,this,[this](const QString& text){
         const auto payload=QJsonDocument::fromJson(text.toUtf8()).object();const int op=payload.value(QStringLiteral("op")).toInt(-1);if(!payload.value(QStringLiteral("s")).isNull()&&!payload.value(QStringLiteral("s")).isUndefined()){discordSequence_=payload.value(QStringLiteral("s")).toVariant().toLongLong();discordSequenceKnown_=true;}
@@ -121,6 +126,8 @@ AppController::AppController(QObject*p):QObject(p){
     connect(&rumble_,&RumbleLiveService::viewerCountChanged,this,[viewers](int n){viewers(QStringLiteral("rumble"),n);});
     connect(&tiktok_,&TikTokLiveService::activityReceived,this,&AppController::tiktokActivityReady);
     connect(&tiktok_,&TikTokLiveService::diagnostic,this,&AppController::tiktokDiagnostic);
+    connect(&twitchMod_,&TwitchModerationService::userCardReady,this,&AppController::twitchUserCardReady);
+    connect(&twitchEmotes_,&TwitchEmoteService::wordsUpdated,this,[this](int count){emit discordDiagnostic(QStringLiteral("Third-party emotes loaded: %1 words (BTTV/FFZ/7TV)").arg(count));});
     connect(&tiktok_,&TikTokLiveService::collectorVisibilityChanged,this,&AppController::tiktokCollectorVisibilityChanged);
     connect(&rumble_,&RumbleLiveService::eventReceived,this,[this](const StreamEvent&e){audit_.appendEvent(e);emit eventReady(e);});
     connect(&streamlabs_,&StreamlabsService::eventReceived,this,[this](const StreamEvent&e){audit_.appendEvent(e);emit eventReady(e);});
@@ -173,7 +180,11 @@ AppController::AppController(QObject*p):QObject(p){
 QString AppController::twitchName(const QString&l){auto m=QRegularExpression("twitch\\.tv/([A-Za-z0-9_]+)").match(l);if(m.hasMatch())return m.captured(1).toLower();return QRegularExpression("^[A-Za-z0-9_]{3,25}$").match(l).hasMatch()?l.toLower():QString();}
 QString AppController::tiktokName(const QString&l){auto m=QRegularExpression("tiktok\\.com/@([A-Za-z0-9._]+)").match(l);if(m.hasMatch())return m.captured(1);return l.startsWith('@')?l.mid(1):QString();}
 QString AppController::kickName(const QString&l){auto m=QRegularExpression("kick\\.com/([A-Za-z0-9_-]+)").match(l);if(m.hasMatch())return m.captured(1).toLower();return QRegularExpression("^[A-Za-z0-9_-]+$").match(l).hasMatch()?l.toLower():QString();}
-void AppController::startConfiguredSources(){for(const auto&p:{"twitch","youtube","yt_shorts","tiktok","kick","rumble"})if(settings_.enabled(p)&&!settings_.link(p).isEmpty())connectSource(p,settings_.link(p));const auto token=settings_.secret("streamlabs_socket_token");if(!token.isEmpty())streamlabs_.connectToken(token);}
+void AppController::startConfiguredSources(){
+    // A saved bot is a connected bot: bring it online with everything else, so
+    // the streamer never has to remember to press Run Bot before going live.
+    if(!settings_.secret(QStringLiteral("discord_bot_token")).isEmpty())startDiscordBot();
+    for(const auto&p:{"twitch","youtube","yt_shorts","tiktok","kick","rumble"})if(settings_.enabled(p)&&!settings_.link(p).isEmpty())connectSource(p,settings_.link(p));const auto token=settings_.secret("streamlabs_socket_token");if(!token.isEmpty())streamlabs_.connectToken(token);}
 void AppController::connectSource(const QString&p,const QString&l){settings_.setLink(p,l);if(p=="twitch"){const QString name=twitchName(l);twitch_.connectChannel(name);if(!settings_.secret("twitch_access_token").isEmpty()){twitchMod_.configure(configuredTwitchClientId(settings_),settings_.secret("twitch_access_token"),settings_.secret("twitch_moderator_id"));twitchMod_.resolveBroadcaster(name);}}else if(p=="youtube")youtube_.connectTarget(l);else if(p=="yt_shorts")shorts_.connectTarget(l);else if(p=="tiktok")tiktok_.connectUser(tiktokName(l));else if(p=="kick")kick_.connectChannel(kickName(l));else if(p=="rumble")rumble_.connectApi(QUrl(settings_.secret("rumble_api_url")));}
 void AppController::disconnectSource(const QString&p){
     if(p=="twitch"){twitch_.disconnectChannel();twitchEvents_.disconnectService();currentPinnedMessages_.remove(QStringLiteral("twitch"));if(pinnedMessagesEnabled_)emit pinnedMessageChanged(QStringLiteral("twitch"),ChatMessage{},false);}
@@ -215,12 +226,24 @@ QNetworkRequest AppController::discordRequest(const QString& path) const {
     return request;
 }
 
-// Step 1 of 3: is the token itself usable at all?
+// Discord permission bits used by the diagnosis below.
+namespace {
+constexpr quint64 kPermAdministrator = 0x8ULL;
+constexpr quint64 kPermViewChannel   = 0x400ULL;
+constexpr quint64 kPermSendMessages  = 0x800ULL;
+constexpr quint64 kPermMentionEveryone = 0x20000ULL;
+quint64 permissionBits(const QJsonValue& value){return value.toString().toULongLong();}
+}
+
+// Step 1: is the token usable, and which bot does it belong to? A bot token
+// cannot use the "@me" member alias, so the snowflake returned here is what the
+// guild calls below are keyed on.
 void AppController::diagnoseDiscord(){
     const QString token=settings_.secret(QStringLiteral("discord_bot_token"));
     const QString channel=normalizeDiscordId(settings_.secret(QStringLiteral("discord_channel_id")));
     if(token.isEmpty()){emit discordNotificationResult(false,QStringLiteral("No bot token saved. Paste the token from the Bot tab of your Discord application, then Save."));return;}
     if(channel.isEmpty()){emit discordNotificationResult(false,QStringLiteral("No Channel ID saved. Turn on Developer Mode in Discord, right-click the text channel, choose Copy Channel ID, then Save."));return;}
+    discordDiagnosis_=DiscordDiagnosis{};
     emit discordDiagnostic(QStringLiteral("--- Discord diagnosis started ---\nChannel ID in use: %1").arg(channel));
     auto* reply=discordNetwork_.get(discordRequest(QStringLiteral("/users/@me")));
     connect(reply,&QNetworkReply::finished,this,[this,reply,channel]{
@@ -233,14 +256,14 @@ void AppController::diagnoseDiscord(){
             emit discordNotificationResult(false,QStringLiteral("Step 1 failed: Discord would not accept the bot token (HTTP %1). %2").arg(code).arg(cause));
             return;
         }
+        discordDiagnosis_.botId=json.value(QStringLiteral("id")).toString();
         emit discordDiagnostic(QStringLiteral("Step 1 OK: token belongs to bot %1 (id %2).")
-                                   .arg(json.value(QStringLiteral("username")).toString(),json.value(QStringLiteral("id")).toString()));
+                                   .arg(json.value(QStringLiteral("username")).toString(),discordDiagnosis_.botId));
         diagnoseDiscordChannel(channel);
     });
 }
 
-// Step 2 of 3: can this bot SEE the channel? A 403/50001 here means the bot is
-// not in the channel's server at all, which no amount of Administrator fixes.
+// Step 2: can this bot see the channel, and what overwrites does it carry?
 void AppController::diagnoseDiscordChannel(const QString& channelId){
     auto* reply=discordNetwork_.get(discordRequest(QStringLiteral("/channels/%1").arg(channelId)));
     connect(reply,&QNetworkReply::finished,this,[this,reply]{
@@ -254,32 +277,34 @@ void AppController::diagnoseDiscordChannel(const QString& channelId){
             return;
         }
         const int type=json.value(QStringLiteral("type")).toInt(-1);
-        const QString guild=json.value(QStringLiteral("guild_id")).toString();
-        // 0 text, 5 announcement, 11/12 threads, 15 forum, 4 category, 2 voice.
+        discordDiagnosis_.guildId=json.value(QStringLiteral("guild_id")).toString();
+        discordDiagnosis_.channelName=json.value(QStringLiteral("name")).toString();
+        discordDiagnosis_.overwrites=json.value(QStringLiteral("permission_overwrites")).toArray();
         if(type==4||type==15||type==16){
             emit discordNotificationResult(false,QStringLiteral("Step 2 failed: that ID is a %1, which cannot receive a plain message. Copy the ID of a normal text channel instead.")
                                                      .arg(type==4?QStringLiteral("category"):QStringLiteral("forum channel")));
             return;
         }
         emit discordDiagnostic(QStringLiteral("Step 2 OK: channel #%1 (type %2) in server %3.")
-                                   .arg(json.value(QStringLiteral("name")).toString()).arg(type).arg(guild));
-        if(guild.isEmpty()){
+                                   .arg(discordDiagnosis_.channelName).arg(type).arg(discordDiagnosis_.guildId));
+        if(discordDiagnosis_.guildId.isEmpty()){
             emit discordNotificationResult(true,QStringLiteral("Token and channel both check out. Press Send test notification for the final check."));
             return;
         }
-        diagnoseDiscordGuild(guild);
+        diagnoseDiscordMember();
     });
 }
 
-// Step 3 of 3: is the bot actually a member of that server, and does the role it
-// holds carry Administrator (bit 0x8) or Send Messages (0x800)?
-void AppController::diagnoseDiscordGuild(const QString& guildId){
-    auto* reply=discordNetwork_.get(discordRequest(QStringLiteral("/guilds/%1/members/@me").arg(guildId)));
-    connect(reply,&QNetworkReply::finished,this,[this,reply,guildId]{
+// Step 3: is the bot a member, is it timed out, and which roles does it hold?
+void AppController::diagnoseDiscordMember(){
+    auto* reply=discordNetwork_.get(discordRequest(QStringLiteral("/guilds/%1/members/%2")
+                                                       .arg(discordDiagnosis_.guildId,discordDiagnosis_.botId)));
+    connect(reply,&QNetworkReply::finished,this,[this,reply]{
         const int code=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray body=reply->readAll();reply->deleteLater();
         const QJsonObject json=QJsonDocument::fromJson(body).object();
-        emit discordDiagnostic(QStringLiteral("GET /guilds/%1/members/@me -> HTTP %2\n%3").arg(guildId).arg(code).arg(QString::fromUtf8(body.left(800))));
+        emit discordDiagnostic(QStringLiteral("GET /guilds/%1/members/%2 -> HTTP %3\n%4")
+                                   .arg(discordDiagnosis_.guildId,discordDiagnosis_.botId).arg(code).arg(QString::fromUtf8(body.left(800))));
         if(code!=200){
             const QString cause=discordCauseFor(code,json.value(QStringLiteral("code")).toInt());
             emit discordNotificationResult(false,QStringLiteral("Step 3 failed: the bot is not a member of that server (HTTP %1). %2").arg(code).arg(cause));
@@ -290,8 +315,78 @@ void AppController::diagnoseDiscordGuild(const QString& guildId){
             emit discordNotificationResult(false,QStringLiteral("Step 3 failed: the bot member is timed out in that server until %1. A timed-out member gets HTTP 403 even with Administrator. Remove the timeout in the member list.").arg(until));
             return;
         }
-        emit discordNotificationResult(true,QStringLiteral("Token, channel and server membership all check out. If Send test notification still returns 403, the cause is server-side filtering: an AutoMod rule (error 200000) or a network block between this PC and Discord. The log below has the raw response."));
+        discordDiagnosis_.roleIds.clear();
+        const QJsonArray roles=json.value(QStringLiteral("roles")).toArray();
+        for(const auto& role:roles)discordDiagnosis_.roleIds<<role.toString();
+        emit discordDiagnostic(QStringLiteral("Step 3 OK: bot is a member holding %1 role(s).").arg(discordDiagnosis_.roleIds.size()));
+        diagnoseDiscordRoles();
     });
+}
+
+// Step 4: read the guild roles so the effective channel permissions can be
+// resolved the same way Discord resolves them.
+void AppController::diagnoseDiscordRoles(){
+    auto* reply=discordNetwork_.get(discordRequest(QStringLiteral("/guilds/%1/roles").arg(discordDiagnosis_.guildId)));
+    connect(reply,&QNetworkReply::finished,this,[this,reply]{
+        const int code=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body=reply->readAll();reply->deleteLater();
+        emit discordDiagnostic(QStringLiteral("GET /guilds/{id}/roles -> HTTP %1 (%2 bytes)").arg(code).arg(body.size()));
+        if(code!=200){
+            emit discordNotificationResult(true,QStringLiteral("Token, channel and membership all check out. The role list could not be read (HTTP %1), so exact permissions were not calculated. Press Send test notification.").arg(code));
+            return;
+        }
+        discordDiagnosis_.guildRoles=QJsonDocument::fromJson(body).array();
+        reportDiscordPermissions();
+    });
+}
+
+// Discord's own resolution order: base permissions from @everyone plus every
+// role the member holds; Administrator short-circuits everything; otherwise the
+// @everyone overwrite, then role overwrites, then the member overwrite.
+void AppController::reportDiscordPermissions(){
+    quint64 base=0;
+    for(const auto& value:discordDiagnosis_.guildRoles){
+        const QJsonObject role=value.toObject();
+        const QString id=role.value(QStringLiteral("id")).toString();
+        if(id==discordDiagnosis_.guildId||discordDiagnosis_.roleIds.contains(id))
+            base|=permissionBits(role.value(QStringLiteral("permissions")));
+    }
+    const bool administrator=(base&kPermAdministrator)!=0;
+    quint64 effective=base;
+    if(!administrator){
+        quint64 memberAllow=0,memberDeny=0,roleAllow=0,roleDeny=0;
+        for(const auto& value:discordDiagnosis_.overwrites){
+            const QJsonObject overwrite=value.toObject();
+            const QString id=overwrite.value(QStringLiteral("id")).toString();
+            const quint64 allow=permissionBits(overwrite.value(QStringLiteral("allow")));
+            const quint64 deny=permissionBits(overwrite.value(QStringLiteral("deny")));
+            if(id==discordDiagnosis_.guildId)effective=(effective&~deny)|allow;
+            else if(discordDiagnosis_.roleIds.contains(id)){roleAllow|=allow;roleDeny|=deny;}
+            else if(id==discordDiagnosis_.botId){memberAllow=allow;memberDeny=deny;}
+        }
+        effective=(effective&~roleDeny)|roleAllow;
+        effective=(effective&~memberDeny)|memberAllow;
+    }
+    const bool canView=administrator||(effective&kPermViewChannel)!=0;
+    const bool canSend=administrator||(effective&kPermSendMessages)!=0;
+    const bool canMention=administrator||(effective&kPermMentionEveryone)!=0;
+    emit discordDiagnostic(QStringLiteral("Effective in #%1 - Administrator:%2 View:%3 Send:%4 MentionEveryone:%5")
+                               .arg(discordDiagnosis_.channelName,
+                                    administrator?QStringLiteral("yes"):QStringLiteral("no"),
+                                    canView?QStringLiteral("yes"):QStringLiteral("no"),
+                                    canSend?QStringLiteral("yes"):QStringLiteral("no"),
+                                    canMention?QStringLiteral("yes"):QStringLiteral("no")));
+    if(!canSend){
+        emit discordNotificationResult(false,QStringLiteral("Found it: the bot cannot Send Messages in #%1. Open that channel's Edit Channel -> Permissions, add the bot's role, and allow Send Messages.").arg(discordDiagnosis_.channelName));
+        return;
+    }
+    const bool wantsMention=settings_.preference(QStringLiteral("discord_mention_everyone"),true).toBool();
+    if(wantsMention&&!canMention){
+        emit discordNotificationResult(false,QStringLiteral("The bot can post in #%1 but cannot mention @everyone there. Either allow Mention @everyone for its role in that channel, or untick the @everyone option above.").arg(discordDiagnosis_.channelName));
+        return;
+    }
+    emit discordNotificationResult(true,QStringLiteral("All checks pass: the bot can post%1 in #%2. If Send test notification still returns 403, the cause is server-side filtering - an AutoMod rule (error 200000) or a network block between this PC and Discord. The raw response is in the log.")
+                                            .arg(canMention?QStringLiteral(" and mention @everyone"):QString(),discordDiagnosis_.channelName));
 }
 
 void AppController::sendDiscordHeartbeat(){
@@ -387,6 +482,21 @@ void AppController::createTwitchClip(){
 void AppController::unbanYouTube(const QString&id){if(id.isEmpty())return;youtubeMod_.removeBan(id);for(int i=youtubeRestrictions_.size()-1;i>=0;--i)if(youtubeRestrictions_[i].toObject()["id"].toString()==id)youtubeRestrictions_.removeAt(i);QVariantList saved;for(const auto&v:youtubeRestrictions_)saved<<v.toObject().toVariantMap();settings_.setPreference("youtube_restrictions",saved);emit bansUpdated("youtube",youtubeRestrictions_);}
 void AppController::receive(const ChatMessage&m){
     ChatMessage coloured=m;
+    if(coloured.platform==QStringLiteral("twitch")){
+        // The IRC room-id tag is the broadcaster id, so the third-party emote
+        // lists can start loading off the first message with no extra Twitch
+        // API call and no access token.
+        twitchEmotes_.loadForChannel(coloured.metadata.value(QStringLiteral("room_id")).toString());
+        const QString emotesTag=coloured.metadata.value(QStringLiteral("emotes")).toString();
+        const QJsonArray runs=twitchEmotes_.buildRuns(coloured.text,emotesTag);
+        if(!runs.isEmpty())coloured.metadata[QStringLiteral("runs")]=runs;
+        // Emote trouble is otherwise invisible: this says whether Twitch tagged
+        // the line at all and how many pictures came out of it.
+        if(!emotesTag.isEmpty()||!runs.isEmpty())
+            emit emoteDiagnostic(QStringLiteral("tag[%1] -> %2 run(s), %3 third-party words loaded")
+                                     .arg(emotesTag.isEmpty()?QStringLiteral("none"):emotesTag)
+                                     .arg(runs.size()).arg(twitchEmotes_.emoteWordCount()));
+    }
     // Assign every chatter a vivid, stable pseudo-random name colour. Using
     // the platform plus account id avoids collisions between services, while
     // falling back to the displayed name still covers guests without an id.
@@ -483,6 +593,8 @@ void AppController::moderateMessage(const ChatMessage&m,int seconds,const QStrin
 }
 void AppController::refreshTwitchAppeals(){const QString id=settings_.secret("twitch_broadcaster_id");if(id.isEmpty()){emit moderationResult("twitch",false,"Connect Twitch and choose a channel first.");return;}twitchMod_.listUnbanRequests(id);}
 void AppController::loadTwitchUserHistory(const QString&userId,const QString&userName){emit userChatHistoryReady(userId,audit_.messagesForUser("twitch",userId,userName));}
+void AppController::loadTwitchUserCard(const QString&userId){twitchMod_.fetchUserCard(settings_.secret(QStringLiteral("twitch_broadcaster_id")),userId);}
+void AppController::setTwitchUserBlocked(const QString&userId,bool blocked){twitchMod_.setUserBlocked(userId,blocked);}
 void AppController::deleteChatMessage(const ChatMessage&m){
     if(m.platform=="twitch"){
         const auto broadcaster=m.metadata["room_id"].toString();

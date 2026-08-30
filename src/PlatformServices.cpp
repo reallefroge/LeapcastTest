@@ -196,21 +196,39 @@ TikTokLiveService::TikTokLiveService(QObject*p):QObject(p){
     });
     connect(page_,&TikTokPage::bridgeMessage,this,[this](const QJsonObject&o){
         const QString type=o["type"].toString();
-        if(type=="debug"){
-            emit diagnostic(QStringLiteral("chat nodes:%1 viewer node:%2 login wall:%3 url:%4")
-                                .arg(o["items"].toInt()).arg(o["viewerSource"].toString(),
-                                     o["loginWall"].toBool()?QStringLiteral("YES"):QStringLiteral("no"),
-                                     o["url"].toString()));
-            if(o["loginWall"].toBool())emit statusChanged("warn","TikTok is asking to log in — open the TikTok collector window and sign in");
-            else if(o["items"].toInt()==0)emit statusChanged("warn","TikTok page loaded but no chat rows found");
+        if(type=="discovery"){
+            emit diagnostic(QStringLiteral("Chat list found by change-detection: \"%1\" (%2 rows). Send me this line and I can target it directly.")
+                                .arg(o["label"].toString()).arg(o["children"].toInt()));
+            return;
+        }
+        if(type=="snapshot"){
+            // One line that answers "is this even a live page?" before any
+            // question about selectors is worth asking.
+            emit diagnostic(QStringLiteral("PAGE: rows:%1 nameNodes:%2 textNodes:%3 video:%4 iframes:%5 liveRoom:%6 LIVEbadge:%7 offlineText:%8 loginWall:%9 chars:%10\n  title: %11\n  body: %12")
+                                .arg(o["items"].toInt()).arg(o["users"].toInt()).arg(o["bodies"].toInt())
+                                .arg(o["videos"].toInt()).arg(o["iframes"].toInt())
+                                .arg(o["room"].toBool()?QStringLiteral("yes"):QStringLiteral("NO"),
+                                     o["liveBadge"].toBool()?QStringLiteral("yes"):QStringLiteral("no"),
+                                     o["offline"].toBool()?QStringLiteral("YES"):QStringLiteral("no"),
+                                     o["loginWall"].toBool()?QStringLiteral("YES"):QStringLiteral("no"))
+                                .arg(o["bodyChars"].toInt())
+                                .arg(o["title"].toString(),o["bodySample"].toString()));
+            if(o["loginWall"].toBool())emit statusChanged("warn","TikTok is asking to log in — open the TikTok collector and sign in");
+            else if(o["offline"].toBool())emit statusChanged("warn","TikTok says this stream is not live right now");
+            else if(o["bodyChars"].toInt()<200)emit statusChanged("warn","TikTok returned a nearly empty page — open the collector to see it");
+            else if(o["items"].toInt()==0&&o["users"].toInt()==0)emit statusChanged("warn","TikTok page loaded but no chat rows found");
             return;
         }
         if(type=="viewers"){emit diagnostic(QStringLiteral("viewers=%1 (from %2)").arg(o["count"].toInt()).arg(o["source"].toString()));emit viewerCountChanged(o["count"].toInt());return;}
         const QString id=o["id"].toString();
-        if(type=="join"){
+        if(type=="activity"||type=="join"){
             if(!id.isEmpty()&&activitySeen_.contains(id))return;
-            if(!id.isEmpty())activitySeen_.insert(id);
-            StreamEvent e;e.eventId=id;e.kind=QStringLiteral("tiktok_join");e.platform=QStringLiteral("tiktok");e.user=o["user"].toString("Someone");e.message=o["text"].toString();e.raw=o;
+            if(!id.isEmpty()){activitySeen_.insert(id);if(activitySeen_.size()>4000)activitySeen_.clear();}
+            // join / like / follow / gift / share, all from the same feed.
+            const QString kind=o["kind"].toString(QStringLiteral("join"));
+            StreamEvent e;e.eventId=id;e.kind=QStringLiteral("tiktok_")+kind;e.platform=QStringLiteral("tiktok");
+            e.user=o["user"].toString("Someone");e.message=o["text"].toString();e.raw=o;
+            emit diagnostic(QStringLiteral("%1: %2").arg(kind,e.user));
             emit activityReceived(e);return;
         }
         if(type!="comment")return;
@@ -247,8 +265,16 @@ void TikTokLiveService::setCollectorVisible(bool visible){
     emit collectorVisibilityChanged(visible);
 }
 void TikTokLiveService::installBridge(){
-    // TikTok changes its LIVE DOM frequently. V5 keeps the multi-selector
-    // discovery of V4 but fixes two things that made it misbehave:
+    // TikTok changes its LIVE DOM frequently. V7 fixes duplicate posting: rank
+    // and level chips ("No. 1", "Lv 18") are their own leaf elements that come
+    // and go as TikTok re-renders, so the same message kept producing two
+    // different texts and posted twice. Rows are now read from a cleaned copy,
+    // de-duplicated per row by content, and the profile/discovery passes only
+    // run when the selector pass found nothing, instead of alongside it. V6
+    // added two things for when the class names change again: a page snapshot in the log
+    // (so an empty result can be told apart from an offline page), and a
+    // fallback that finds the chat list by watching which container's children
+    // actually keep changing. V5's fixes were:
     //   * dedupe is keyed on user+text, not a dataset flag on the DOM node.
     //     TikTok recycles chat rows, so a flagged node silently swallowed
     //     every later message that reused it.
@@ -259,82 +285,183 @@ void TikTokLiveService::installBridge(){
     //     inside the live room element, or the current room's own serialized
     //     stats as a one-time seed.
     page_->runJavaScript(QStringLiteral(R"JS((()=>{
-if(window.__leapcastTikTokBridgeV5)return;window.__leapcastTikTokBridgeV5=true;
-let seq=0,activityReady=false,lastViewer=-1,seedUsed=false,debugTick=0;
+if(window.__leapcastTikTokBridgeV8)return;window.__leapcastTikTokBridgeV8=true;
+let seq=0,activityReady=false,lastViewer=-1,seedUsed=false,debugTick=0,discovered=null,discoveredLabel='';
 const send=o=>console.log('LEFROGE_CHAT:'+JSON.stringify(o));
 const text=n=>(n?.innerText||n?.textContent||'').trim();
 const all=(root,selector)=>{const out=[];try{if(root?.matches?.(selector))out.push(root);root?.querySelectorAll?.(selector).forEach(n=>out.push(n))}catch(e){}return out};
-// "1.2K" -> 1200, "1,234" -> 1234, "1.234" -> 1234. Only treat a dot as a
-// decimal point when a K/M/B suffix follows it.
-const compact=s=>{const raw=String(s||'').replace(/\u00a0/g,' ').trim();const m=raw.match(/^([0-9][0-9.,\s]*)\s*([KMB])?/i);if(!m)return NaN;const suffix=(m[2]||'').toUpperCase();let num=m[1].replace(/\s/g,'');if(suffix)return Math.round(parseFloat(num.replace(/,/g,''))*({K:1e3,M:1e6,B:1e9}[suffix]||1));const v=parseInt(num.replace(/[.,]/g,''),10);return Number.isFinite(v)?v:NaN};
+const sig=n=>((n?.getAttribute?.('data-e2e')||'')+' '+(typeof n?.className==='string'?n.className:'')).toLowerCase();
+const compact=s=>{const raw=String(s||'').replace(/ /g,' ').trim();const m=raw.match(/^([0-9][0-9.,\s]*)\s*([KMB])?/i);if(!m)return NaN;const suffix=(m[2]||'').toUpperCase();let num=m[1].replace(/\s/g,'');if(suffix)return Math.round(parseFloat(num.replace(/,/g,''))*({K:1e3,M:1e6,B:1e9}[suffix]||1));const v=parseInt(num.replace(/[.,]/g,''),10);return Number.isFinite(v)?v:NaN};
 const guard=v=>{if(v.dataset.leapcastGuarded)return;v.dataset.leapcastGuarded='1';v.muted=true;v.pause();v.addEventListener('play',()=>v.pause())};
-const userSel='[data-e2e="message-owner-name"],[data-e2e="chat-message-user"],[data-e2e*="user-name"],[data-e2e*="username"],[class*="SpanUserName"],[class*="UserName"],[class*="user-name"],a[href*="/@"]';
-const bodySel='[data-e2e="message-text"],[data-e2e="chat-message-comment"],[data-e2e="comment-level-1"],[data-e2e*="message-text"],[data-e2e*="comment-text"],[class*="DivComment"],[class*="CommentText"],[class*="MessageText"],[class*="message-text"]';
-const itemSel='[data-e2e="chat-message"],[data-e2e="chat-room-message"],[data-e2e="live-chat-message"],[data-e2e*="chat-message"],[data-e2e*="comment-item"],[class*="DivChatMessage"],[class*="ChatMessage"],[class*="chat-message"],[class*="CommentItem"],[class*="comment-item"]';
-const activitySel='[data-e2e*="join"],[class*="JoinMessage"]';
-// Content-keyed dedupe with a 90s window, so a recycled row is read again but
-// the 2s rescan does not repost the rows still on screen.
-const seen=new Map();
-const fresh=key=>{const now=Date.now();if(seen.size>1500){for(const [k,t] of seen)if(now-t>90000)seen.delete(k);}
-  const prior=seen.get(key);if(prior&&now-prior<90000)return false;seen.set(key,now);return true};
-const hash=s=>{let h=0;for(let i=0;i<s.length;i++){h=(h*31+s.charCodeAt(i))|0}return 'k'+(h>>>0)};
-const process=(n,allowActivity)=>{
-  if(!n||n.nodeType!==1)return;
-  const whole=text(n);if(!whole||whole.length>1200)return;
-  const structure=((n.getAttribute('data-e2e')||'')+' '+(typeof n.className==='string'?n.className:'')).toLowerCase(),lower=whole.toLowerCase();
-  const userNode=n.querySelector?.(userSel);
-  let user=text(userNode)||whole.split(/\s+joined\b/i)[0]||'Someone';
-  if(/join/.test(structure)||/\bjoined(?:\s+the\s+live)?[.!]?$/i.test(lower)){
-    const key=hash('join|'+whole);if(!fresh(key))return;
-    if(allowActivity)send({type:'join',id:key,user,text:whole});return}
-  const body=n.querySelector?.(bodySel);let message=text(body);
-  if(!message&&userNode){const uname=text(userNode);message=whole.startsWith(uname)?whole.slice(uname.length).replace(/^\s*[:·-]?\s*/,'').trim():whole.replace(uname,'').trim()}
-  if(!userNode||!message||message===user||message.length>600||/^(?:0|[0-9,.]+[kmb]?)\s+likes?$/i.test(message)||/^follow(?:ing)?$/i.test(message))return;
-  const key=hash(user+'|'+message);if(!fresh(key))return;
+const userSel='[data-e2e="message-owner-name"],[data-e2e="chat-message-user"],[data-e2e*="user-name"],[data-e2e*="username"],[class*="SpanUserName"],[class*="UserName"],[class*="user-name"],[class*="NickName"],[class*="nickname"],a[href*="/@"]';
+const bodySel='[data-e2e="message-text"],[data-e2e="chat-message-comment"],[data-e2e="comment-level-1"],[data-e2e*="message-text"],[data-e2e*="comment-text"],[class*="DivComment"],[class*="CommentText"],[class*="MessageText"],[class*="message-text"],[class*="DivChatContent"],[class*="ChatContent"]';
+const itemSel='[data-e2e="chat-message"],[data-e2e="chat-room-message"],[data-e2e="live-chat-message"],[data-e2e*="chat-message"],[data-e2e*="comment-item"],[class*="DivChatMessage"],[class*="ChatMessage"],[class*="chat-message"],[class*="CommentItem"],[class*="comment-item"],[class*="DivChatItem"],[class*="ChatItem"]';
+const activitySel='[data-e2e*="join"],[class*="JoinMessage"],[class*="DivSocialMessage"],[class*="SocialMessage"],[class*="GiftMessage"],[class*="DivGift"]';
+// A TikTok display name is full of astral emoji. An UNPAIRED surrogate is what
+// turns into U+FFFD by the time it reaches the app, so drop only those and
+// leave every properly paired emoji intact.
+const surrogateSafe=s=>String(s||'')
+  .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g,'')
+  .replace(/(^|[^\uD800-\uDBFF])([\uDC00-\uDFFF])/g,'$1');
+// Rank and level chips ("No. 1", "TOP 3", "Lv 18") are separate elements that
+// come and go as TikTok re-renders. Trim them off the ends of the strings for
+// display, and ignore them entirely when building the de-duplication key, so a
+// chip appearing does not make an old message look new.
+const chipRun='(?:no\\.?\\s*\\d+|top\\s*\\d+|lv\\.?\\s*\\d+|level\\s*\\d+|#\\d+)';
+const trimChips=s=>String(s||'')
+  .replace(new RegExp('^(?:\\s*'+chipRun+'\\b)+\\s*','i'),'')
+  .replace(new RegExp('(?:\\s*'+chipRun+'\\b)+\\s*$','i'),'')
+  .replace(/\s+/g,' ').trim();
+const clean=s=>trimChips(surrogateSafe(s));
+const normalize=s=>surrogateSafe(s).toLowerCase()
+  .replace(new RegExp(chipRun,'gi'),' ')
+  .replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+// An emoji-only message normalises to nothing, so fall back to the cleaned
+// text itself rather than collapsing every such message onto one key.
+const keyPart=s=>normalize(s)||trimChips(surrogateSafe(s));
+const keyFor=(a,b)=>{const k=keyPart(a)+'|'+keyPart(b);let h=0;for(let i=0;i<k.length;i++){h=(h*31+k.charCodeAt(i))|0}return 'k'+(h>>>0)};
+// Two layers: the row remembers the content it was last posted with (TikTok
+// recycles rows, so a plain "seen" flag was wrong), and a short global window
+// catches the same content arriving through two different elements in one
+// burst. Short on purpose, so a genuine repeat still shows.
+const recent=new Map();
+const burstFresh=key=>{const now=Date.now();
+  if(recent.size>800){for(const [k,t] of recent)if(now-t>15000)recent.delete(k)}
+  const prior=recent.get(key);if(prior&&now-prior<15000)return false;recent.set(key,now);return true};
+const claim=(row,key)=>{
+  if(row&&row.dataset&&row.dataset.leapcastKey===key)return false;
+  if(!burstFresh(key))return false;
+  if(row&&row.dataset)row.dataset.leapcastKey=key;
+  return true};
+// Activity rows carry no comment body, just a sentence about what happened.
+const activityKind=(lower,structure)=>{
+  if(/\bjoined\b/.test(lower)||/join/.test(structure))return 'join';
+  if(/\bliked\b|\bsent\s+likes?\b|\blikes?\s+the\s+live\b/.test(lower))return 'like';
+  if(/\bfollowed\b|\bstarted\s+following\b|\bis\s+now\s+following\b/.test(lower))return 'follow';
+  if(/\bsent\b.*\b(rose|roses|gift|gifts|coin|coins|heart|hearts)\b/.test(lower)||/gift/.test(structure))return 'gift';
+  if(/\bshared\b.*\blive\b/.test(lower))return 'share';
+  return ''};
+const activityUser=(row,raw)=>{
+  const node=row.querySelector?.(userSel);
+  const name=clean(text(node));
+  if(name)return name;
+  return clean(raw.split(/\s+(?:joined|liked|followed|sent|shared|started)\b/i)[0])||'Someone'};
+const emitActivity=(row,kind,user,raw)=>{
+  const key=keyFor(kind+'|'+user,raw);
+  if(!claim(row,key))return false;
+  if(!activityReady)return true;
+  send({type:'activity',kind,id:key,user,text:clean(raw)});
+  return true};
+const emitComment=(row,user,message,userNode,source)=>{
+  user=clean(user);message=clean(message);
+  if(!user||!message||message===user||message.length>600)return false;
+  if(/^(?:0|[0-9,.]+[kmb]?)\s+likes?$/i.test(message)||/^follow(?:ing)?$/i.test(message))return false;
+  const key=keyFor(user,message);
+  if(!claim(row,key))return false;
   const href=userNode?.closest?.('a[href*="/@"]')?.getAttribute('href')||userNode?.getAttribute?.('href')||'';
   const unique=(href.match(/\/@([^/?]+)/)||[])[1]||userNode?.getAttribute?.('data-unique-id')||'';
-  send({type:'comment',id:key+'-'+(++seq%4),user,text:message,userId:userNode?.getAttribute?.('data-user-id')||'',roomId:location.pathname,uniqueId:unique})};
-const profileFallback=root=>{all(root,'a[href*="/@"]').forEach(a=>{let n=a;for(let i=0;i<5&&n;i++,n=n.parentElement){const sig=((n.getAttribute?.('data-e2e')||'')+' '+(typeof n.className==='string'?n.className:'')).toLowerCase();if(/chat|comment|message/.test(sig)&&text(n).length<1200){process(n,activityReady);break}}})};
+  send({type:'comment',id:key,user,text:message,userId:userNode?.getAttribute?.('data-user-id')||'',roomId:location.pathname,uniqueId:unique,source});
+  return true};
+// Read from the LIVE node. An earlier version read from a detached clone to
+// strip badges, but innerText on a detached node collapses to textContent and
+// lost the separation between the name and the message, which stopped chat
+// working entirely. Badge trimming is done on the strings instead.
+const process=(n,source)=>{
+  if(!n||n.nodeType!==1)return false;
+  const raw=text(n);if(!raw||raw.length>1200)return false;
+  const structure=sig(n),lower=raw.toLowerCase();
+  const bodyNode=n.querySelector?.(bodySel);
+  const userNode=n.querySelector?.(userSel);
+  if(!bodyNode){
+    const kind=activityKind(lower,structure);
+    if(kind)return emitActivity(n,kind,activityUser(n,raw),raw);
+  }
+  let user=text(userNode);
+  let message=text(bodyNode);
+  if(!message&&user){message=raw.startsWith(user)?raw.slice(user.length).replace(/^\s*[:：·-]?\s*/,'').trim():raw.replace(user,'').trim()}
+  if(!user||!message)return false;
+  return emitComment(n,user,message,userNode,source||'selector')};
+const profileFallback=root=>{all(root,'a[href*="/@"]').forEach(a=>{let n=a;for(let i=0;i<5&&n;i++,n=n.parentElement){if(/chat|comment|message/.test(sig(n))&&text(n).length<1200){process(n,'profile');break}}})};
+const churn=new Map();
+const noteChurn=target=>{if(!target||target.nodeType!==1)return;const s=sig(target);
+  if(/video|player|progress|seek|caption|toolbar/.test(s))return;
+  churn.set(target,(churn.get(target)||0)+1)};
+const pickDiscovered=()=>{
+  let best=null,bestScore=0;
+  for(const [node,score] of churn){
+    if(!node.isConnected){churn.delete(node);continue}
+    const kids=node.children?node.children.length:0;
+    if(kids<3||score<3)continue;
+    const sample=text(node);
+    if(!sample||sample.length<10||sample.length>20000)continue;
+    if(score>bestScore){bestScore=score;best=node}}
+  return best};
+const scanDiscovered=()=>{
+  if(!discovered||!discovered.isConnected){discovered=pickDiscovered();
+    if(discovered){discoveredLabel=(discovered.getAttribute('data-e2e')||'')+' '+(typeof discovered.className==='string'?discovered.className:'');
+      send({type:'discovery',label:discoveredLabel.trim().slice(0,300),children:discovered.children.length})}}
+  if(!discovered)return 0;
+  let handled=0;
+  for(const row of Array.from(discovered.children)){
+    if(process(row,'discovered')){handled++;continue}
+    const raw=text(row);
+    if(!raw||raw.length>600)continue;
+    const kind=activityKind(raw.toLowerCase(),sig(row));
+    if(kind){if(emitActivity(row,kind,activityUser(row,raw),raw))handled++;continue}
+    let user='',message='';
+    const colon=raw.match(/^([^\n:：]{1,40})[:：]\s*(.+)$/s);
+    if(colon){user=colon[1].trim();message=colon[2].trim()}
+    else if(row.children&&row.children.length>=2){user=text(row.children[0]);message=raw.startsWith(user)?raw.slice(user.length).trim():text(row.children[1])}
+    if(user&&message&&emitComment(row,user,message,null,'discovered'))handled++;
+  }
+  return handled};
 const sendViewer=(count,source)=>{if(Number.isFinite(count)&&count>=0&&count!==lastViewer){lastViewer=count;send({type:'viewers',count,source})}};
-// Only ever look inside the live room itself. The old whole-document text
-// scan matched "N viewers" on recommended-stream cards in the sidebar.
 const roomRoot=()=>document.querySelector('[data-e2e="live-room"],[class*="DivLiveRoomContainer"],[class*="LiveRoomContainer"],[class*="live-room"]')||document.querySelector('main')||null;
 const scanViewers=()=>{
   const root=roomRoot();
   if(root){
-    for(const n of root.querySelectorAll('[data-e2e="live-room-viewer-count"],[data-e2e="live-viewer-count"],[data-e2e*="viewer-count"],[class*="ViewerCount"],[class*="viewer-count"]')){
-      const c=compact(text(n));if(Number.isFinite(c)){sendViewer(c,'dom');return 'dom'}}
-  }
-  // One-time seed from THIS room's serialized state only. It is a page-load
-  // snapshot, so it must never override a live DOM counter later on.
+    for(const n of root.querySelectorAll('[data-e2e="live-room-viewer-count"],[data-e2e="live-viewer-count"],[data-e2e*="viewer-count"],[class*="ViewerCount"],[class*="viewer-count"],[class*="DivWatchingCount"]')){
+      const c=compact(text(n));if(Number.isFinite(c)){sendViewer(c,'dom');return 'dom'}}}
   if(!seedUsed){
     try{
       for(const id of ['SIGI_STATE','__UNIVERSAL_DATA_FOR_REHYDRATION__']){
         const el=document.getElementById(id);if(!el||!el.textContent)continue;
-        const data=JSON.parse(el.textContent);
-        const stack=[data];let guardCount=0;
+        const data=JSON.parse(el.textContent);const stack=[data];let guardCount=0;
         while(stack.length&&guardCount++<20000){
           const cur=stack.pop();if(!cur||typeof cur!=='object')continue;
           const stats=cur.liveRoomStats||cur.stats;
           if(stats&&typeof stats==='object'&&Number.isFinite(+stats.userCount)){seedUsed=true;sendViewer(+stats.userCount,'seed');return 'seed'}
-          for(const k in cur){const v=cur[k];if(v&&typeof v==='object')stack.push(v)}
-        }
-      }
+          for(const k in cur){const v=cur[k];if(v&&typeof v==='object')stack.push(v)}}}
     }catch(e){}
-    seedUsed=true;
-  }
+    seedUsed=true;}
   return 'none'};
-const loginWall=()=>!!document.querySelector('[data-e2e="login-modal"],[id*="login-modal"],[class*="LoginModal"],[class*="login-modal"],[class*="Captcha"],[id*="captcha"]');
+const offlineWords=/(went offline|is offline|live has ended|ended the live|not live|LIVE has ended)/i;
+const loginWall=()=>!!document.querySelector('[data-e2e="login-modal"],[id*="login-modal"],[class*="LoginModal"],[class*="login-modal"],[class*="Captcha"],[id*="captcha"],[class*="verify-bar"]');
+const snapshot=()=>{
+  const body=document.body?document.body.innerText||'':'';
+  return {type:'snapshot',url:location.href,title:document.title,ready:document.readyState,
+    videos:document.querySelectorAll('video').length,
+    iframes:document.querySelectorAll('iframe').length,
+    items:document.querySelectorAll(itemSel).length,
+    users:document.querySelectorAll(userSel).length,
+    bodies:document.querySelectorAll(bodySel).length,
+    room:!!roomRoot(),liveBadge:/\bLIVE\b/.test(body),offline:offlineWords.test(body),
+    loginWall:loginWall(),discovered:discoveredLabel.trim().slice(0,200),
+    bodyChars:body.length,bodySample:body.replace(/\s+/g,' ').slice(0,400)}};
 let lastViewerSource='none';
-const scan=(root,allowActivity=true)=>{all(root,'video').forEach(guard);all(root,itemSel).forEach(n=>process(n,allowActivity));all(root,activitySel).forEach(n=>process(n,allowActivity));profileFallback(root);lastViewerSource=scanViewers()};
+const scan=(root,allowActivity=true)=>{
+  all(root,'video').forEach(guard);
+  all(root,itemSel).forEach(n=>process(n));
+  all(root,activitySel).forEach(n=>process(n));
+  profileFallback(root);
+  scanDiscovered();
+  lastViewerSource=scanViewers()};
 scan(document,false);activityReady=true;
-new MutationObserver(ms=>ms.forEach(m=>m.addedNodes.forEach(n=>{if(n.nodeType===1)scan(n,activityReady)}))).observe(document.documentElement,{childList:true,subtree:true});
-setInterval(()=>{scan(document,activityReady);
-  // One debug line every ~20s so the collector window shows whether the page
-  // is a chat page, a login wall, or a captcha, without spamming the log.
-  if(++debugTick%10===0)send({type:'debug',items:document.querySelectorAll(itemSel).length,viewerSource:lastViewerSource,loginWall:loginWall(),url:location.href});
-},2000);
-send({type:'debug',items:document.querySelectorAll(itemSel).length,viewerSource:lastViewerSource,loginWall:loginWall(),url:location.href});
+new MutationObserver(ms=>ms.forEach(m=>{
+  if(m.addedNodes&&m.addedNodes.length){noteChurn(m.target);m.addedNodes.forEach(n=>{if(n.nodeType===1)scan(n)})}
+})).observe(document.documentElement,{childList:true,subtree:true});
+setInterval(()=>{scan(document);if(++debugTick%10===0)send(snapshot())},2000);
+send(snapshot());
 })())JS"));
 }
 

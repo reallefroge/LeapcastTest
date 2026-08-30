@@ -26,7 +26,7 @@
 - Left-clicking a name in the program chat opens a chatter card: account id, account age, follower count, whether they follow the channel and since when, subscription tier and months, and their Twitch badges.
 - The card carries Block, Ignore highlights, auto-saving private notes, links to the Twitch usercard and channel, the full timeout ladder (1s to 1w) with Unban and Ban, and that chatter's recent messages.
 - Twitch reconnection is required once for the new card: the app now also asks for the follower, subscription and block-list scopes.
-- Fixed the chatter card not opening: the username was wrapped in a link, but a name is a stack of per-character coloured spans and the link did not survive the rich-text import. The name is now its own marked run, the pointer turns into a hand over it, and a click that is part of a text selection is ignored.
+- Fixed the chatter card not opening. Inserting HTML rebuilds the character formatting from the markup and discards whatever was set beforehand, so neither a link around the name nor a marker set ahead of it survived. The name is now tagged after it is inserted, by merging the marker over the range it occupies, which keeps the per-character name colours intact. The pointer turns into a hand over a name, and a click that ends a text selection is ignored.
 - Fixed emotes showing as their names. Every emote was rendered as text the first time it appeared, because the picture was only emitted once the image had finished downloading — and the chat view already downloads images itself.
 - Added an Emotes line to the diagnostics log showing what Twitch tagged on each message and how many emote pictures came out of it.
 
