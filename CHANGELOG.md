@@ -1,6 +1,6 @@
 # Leapcast Studio Changelog
 
-## Leapcast Studio 3.0.9.3
+## Leapcast Studio 3.0.9.7
 
 - **Automatic updates are switched off in this build.** The splash screen no longer contacts GitHub at startup, the background check is gone, and Check now is disabled, so a locally built test binary can never be replaced by the published release. Rebuild with `-DLEAPCAST_AUTO_UPDATE=ON` to turn updating back on.
 - Added a Diagnose 403 button to the Discord card. It checks the bot token, then whether the bot can see the channel, then whether the bot is a member of that server, and names the step that fails instead of returning a bare HTTP 403.
@@ -29,6 +29,12 @@
 - Fixed the chatter card not opening. Inserting HTML rebuilds the character formatting from the markup and discards whatever was set beforehand, so neither a link around the name nor a marker set ahead of it survived. The name is now tagged after it is inserted, by merging the marker over the range it occupies, which keeps the per-character name colours intact. The pointer turns into a hand over a name, and a click that ends a text selection is ignored.
 - Fixed emotes showing as their names. Every emote was rendered as text the first time it appeared, because the picture was only emitted once the image had finished downloading — and the chat view already downloads images itself.
 - Added an Emotes line to the diagnostics log showing what Twitch tagged on each message and how many emote pictures came out of it.
+- Channel Point redemptions are now drawn as a tinted, accented block with a CHANNEL POINTS label in the program chat, the pop-out and the OBS overlay. A chatter can type the words but cannot give their own line a background, so a redemption can no longer be faked.
+- Fixed the Twitch usercard button opening a dead page: the viewer-card popout is addressed by channel name, not by the numeric broadcaster id.
+- Blocking a user now explains that Twitch needs reconnecting once, instead of showing raw JSON, and no longer leaves the box ticked when Twitch refused.
+- Ban and Unban carry drawn icons (a cross and a back arrow) rather than relying on a font glyph that might not exist.
+- Timeout buttons are sized from their actual text so no label is clipped, and the card is wider to fit the whole ladder on one row.
+- The chat history on the card is taller, larger and now updates live as the chatter keeps talking.
 
 ## Leapcast Studio 3.0.9.1
 

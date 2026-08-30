@@ -72,6 +72,16 @@ QString chatNameHtml(const ChatMessage& message) {
     return html+QStringLiteral("</b>");
 }
 
+bool isChannelPointRedemption(const ChatMessage& message) {
+    return message.metadata.value(QStringLiteral("channel_point_redemption")).toBool();
+}
+
+QString redemptionRewardHtml(const ChatMessage& message) {
+    QString reward=message.metadata.value(QStringLiteral("reward_name")).toString().trimmed();
+    if(reward.isEmpty())reward=QStringLiteral("a Channel Point reward");
+    return reward.toHtmlEscaped();
+}
+
 QString chatMessageBodyHtml(const ChatMessage& message) {
     // "runs" carries Twitch and third-party emotes; "youtube_runs" is the older
     // YouTube-only shape. Either is a list of {text} and {url,alt} pieces.
