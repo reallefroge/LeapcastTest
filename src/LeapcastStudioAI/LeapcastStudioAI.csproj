@@ -9,7 +9,6 @@
     <AssemblyName>Leapcast Studio AI</AssemblyName>
     <Version>0.2.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
   </PropertyGroup>
   <ItemGroup>
     <!-- WASAPI mic + desktop (loopback) audio capture -->
