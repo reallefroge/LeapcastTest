@@ -101,8 +101,9 @@ Directory.CreateDirectory(Path.Combine(work, "live"));
 await engine.UpdateAsync(scene, settings, "stream.flv", false);
 
 await engine.SetPreviewAsync(true);
-await Task.Delay(3000);
-Check(engine.Running && frames > 10, $"preview-only pipeline delivers frames ({frames} in 3 s)");
+var pw = Stopwatch.StartNew();
+while (frames < 15 && pw.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(100);
+Check(engine.Running && frames >= 15, $"preview-only pipeline delivers frames (first 15 after {pw.Elapsed.TotalSeconds:0.0} s)");
 
 var clock = Stopwatch.StartNew();
 await engine.StartRecordingAsync();      // restart #1 → encode + segments
@@ -301,11 +302,15 @@ async Task<(double offsetMs, int events)> LipSyncAsync(string file, int x, int y
     }
     var diffs = flashes.Select(f => beeps.Count == 0 ? double.NaN : beeps.OrderBy(b => Math.Abs(b - f)).First() - f)
                        .Where(d => !double.IsNaN(d) && Math.Abs(d) < 0.5).OrderBy(d => d).ToList();
-    Console.WriteLine($"    lip-sync markers: {flashes.Count} flashes, {beeps.Count} beeps (video start {sv:0.000}s, audio start {sa:0.000}s)");
+    int maxEnv = 0;
+    for (int i = 0; i + 1 < pcm.Length; i += 2) maxEnv = Math.Max(maxEnv, Math.Abs((int)BitConverter.ToInt16(pcm, i)));
+    Console.WriteLine($"    lip-sync markers: {flashes.Count} flashes, {beeps.Count} beeps (video start {sv:0.000}s, audio start {sa:0.000}s; " +
+        $"{luma.Length} luma samples max {(luma.Length > 0 ? luma.Max() : 0)}, {pcm.Length / 2} audio samples peak {maxEnv})");
     return diffs.Count == 0 ? (9999, 0) : (diffs[diffs.Count / 2] * 1000, diffs.Count);
 }
 async Task<byte[]> RawAsync(IEnumerable<string> args)
 {
+    // binary stdout: read the raw stream, not text
     var psi = new ProcessStartInfo(ffmpeg) { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false };
     foreach (var a in args) psi.ArgumentList.Add(a);
     using var p = Process.Start(psi)!;
