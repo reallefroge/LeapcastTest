@@ -15,6 +15,7 @@ low-motion games like **Wizard101** plus a webcam.
 | **Webcam denoise** | Light temporal denoise after downscaling. Sensor grain in a dim room is one of the biggest bitrate wasters on a gaming stream. |
 | **Mic cleanup** | High-pass plus adaptive FFT noise reduction (fans, hum, hiss). |
 | **Reliability** | Auto-reconnect with back-off; if output falls behind real time, the bitrate cap drops 25% automatically; all inputs are wall-clock synced so game, cam, mic and desktop audio stay aligned. |
+| **Scene transitions** | Every scene stays live inside one encoder, so switching (e.g. Wizard101 → "BRB") is a smooth crossfade or a clean cut: no restart, no black frame, and the recording/replay keeps running. Audio levels crossfade too. A camera used in several scenes is opened only once. |
 | **Live stats** | Real upload (measured from the encoded output), average, % data saved vs constant bitrate, frame rate, connection health, and *why* each setting was chosen. |
 
 ### Recommended setup for Wizard101 + camera
@@ -48,7 +49,8 @@ It covers the smart tuner, encoder argument sets, a full preview → record → 
 See [docs/ENGINE.md](docs/ENGINE.md).
 
 ## Known limitations
-- Changing scenes or sources while live restarts the encoder, so the stream blinks for about a second. A future version could composite on the GPU and switch scenes seamlessly.
+- Switching scenes is seamless (fade or cut inside the running encoder). *Editing* sources while live (adding, removing, changing capture settings) still rebuilds the pipeline, so the stream blinks for about a second.
+- Every scene is composited continuously so it can be faded to at any moment; each extra scene costs some CPU.
 - No browser sources and no game-hook capture (use Display Capture; it handles fullscreen Wizard101).
 - AI background removal for the webcam isn't included.
 - H.264 over RTMP(S) only, for maximum platform compatibility.

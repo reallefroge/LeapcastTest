@@ -68,7 +68,13 @@ public sealed class StreamEngine : IDisposable
     public Func<StudioSource, InputSpec?>? InputOverride { get; set; }
     public IReadOnlyList<ProbedEncoder> Encoders { get; private set; } = Array.Empty<ProbedEncoder>();
     public bool EncodersProbed { get; private set; }
+    /// <summary>The scene currently on air.</summary>
     public StudioScene? Scene { get; private set; }
+    private List<StudioScene> _scenes = new();
+    private int _activeIndex;
+    private PipelineSpec? _runnerSpec;
+    private double _runnerOrigin;
+    private string? _runnerFingerprint;
     public StudioSettings Settings { get; private set; } = new();
     private string _streamKey = "";
 
@@ -79,6 +85,8 @@ public sealed class StreamEngine : IDisposable
     public bool Running => _runner is not null;
     public bool Reconnecting => _reconnectCts is not null;
     public EncodePlan? CurrentPlan { get; private set; }
+    /// <summary>How many times an ffmpeg pipeline has been started (diagnostics/tests: transitions must not bump it).</summary>
+    public int PipelineStarts { get; private set; }
 
     public event Action<byte[]>? FrameReady;
     public event EventHandler<EngineMessageEventArgs>? Message;
@@ -121,16 +129,62 @@ public sealed class StreamEngine : IDisposable
 
     // ------------------------------------------------------------------ public operations
 
-    public Task UpdateAsync(StudioScene scene, StudioSettings settings, string streamKey, bool restartIfRunning) => Locked(async () =>
+    public Task UpdateAsync(StudioScene scene, StudioSettings settings, string streamKey, bool restartIfRunning) =>
+        UpdateAsync(new[] { scene }, scene, settings, streamKey, restartIfRunning);
+
+    /// <summary>
+    /// Updates the scene collection / active scene / settings. Switching the active scene while running is a
+    /// seamless in-encoder transition (no restart). Editing sources, or <paramref name="restartIfRunning"/>,
+    /// rebuilds the pipeline.
+    /// </summary>
+    public Task UpdateAsync(IReadOnlyList<StudioScene> scenes, StudioScene active, StudioSettings settings, string streamKey,
+        bool restartIfRunning) => Locked(async () =>
     {
-        bool sceneChanged = !ReferenceEquals(scene, Scene);
-        Scene = scene;
+        var list = scenes.Count > 0 ? scenes.ToList() : new List<StudioScene> { active };
+        int index = list.FindIndex(s => ReferenceEquals(s, active));
+        if (index < 0) index = list.FindIndex(s => s.Id == active.Id);
+        if (index < 0) { list.Add(active); index = list.Count - 1; }
+        _scenes = list;
+        Scene = active;
         Settings = settings.Clone();
         _streamKey = streamKey ?? "";
-        // Audio devices are only opened while the engine runs (no "app is using your microphone" at idle).
-        if (_runner is not null) _audio.Configure(AudioSources());
-        if (_runner is not null && (restartIfRunning || sceneChanged)) await RestartAsync();
+
+        if (_runner is null) { _activeIndex = index; return; }
+        bool structural = Fingerprint(_scenes) != _runnerFingerprint;
+        if (restartIfRunning || structural)
+        {
+            _activeIndex = index;
+            // Audio devices are only opened while the engine runs (no "app is using your microphone" at idle).
+            _audio.Configure(AudioSources());
+            await RestartAsync();
+            return;
+        }
+        if (index != _activeIndex)
+        {
+            Transition(_activeIndex, index);
+            _activeIndex = index;
+        }
     });
+
+    private void Transition(int from, int to)
+    {
+        var r = _runner; var spec = _runnerSpec;
+        if (r is null || spec is null) return;
+        double seconds = Settings.Transition == "Cut" ? 0.001 : Math.Clamp(Settings.TransitionMs, 100, 3000) / 1000.0;
+        int lineCount = PipelineBuilder.TransitionCommands(spec, from, to, 0, seconds).Count;
+        // ffmpeg reads one command per ~100 ms; start the fade only after every line has landed.
+        double now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - _runnerOrigin;
+        double startAt = now + 0.15 * lineCount + 0.2;
+        r.SendCommands(PipelineBuilder.TransitionCommands(spec, from, to, startAt, seconds));
+    }
+
+    /// <summary>Everything about the scene collection that changes the ffmpeg graph (names excluded).</summary>
+    public static string Fingerprint(IEnumerable<StudioScene> scenes) =>
+        System.Text.Json.JsonSerializer.Serialize(scenes.Select(sc => new
+        {
+            sc.Id,
+            Sources = sc.Sources.Select(src => { var c = System.Text.Json.JsonSerializer.Deserialize<StudioSource>(System.Text.Json.JsonSerializer.Serialize(src))!; c.Name = ""; return c; }).ToList()
+        }));
 
     public Task SetPreviewAsync(bool on) => Locked(async () => { PreviewOn = on; await ReconcileAsync(); });
 
@@ -203,8 +257,7 @@ public sealed class StreamEngine : IDisposable
 
     // ------------------------------------------------------------------ pipeline management
 
-    private List<StudioSource> AudioSources() =>
-        Scene?.Sources.Where(s => s.Visible && SourceTypes.IsAudio(SourceTypes.KindOf(s.Type))).ToList() ?? new List<StudioSource>();
+    private List<StudioSource> AudioSources() => PipelineBuilder.AudioRepresentatives(_scenes);
 
     private (bool run, bool encode, bool stream) Desired()
     {
@@ -240,7 +293,7 @@ public sealed class StreamEngine : IDisposable
 
         // Pre-render text overlays.
         var rendered = new Dictionary<Guid, string>();
-        foreach (var s in Scene.Sources.Where(s => s.Visible && SourceTypes.KindOf(s.Type) == SourceKind.Text))
+        foreach (var s in _scenes.SelectMany(sc => sc.Sources).Where(s => s.Visible && SourceTypes.KindOf(s.Type) == SourceKind.Text))
         {
             try { if (_platform.RenderText(s, plan.Height) is { } png) rendered[s.Id] = png; } catch { }
         }
@@ -252,7 +305,8 @@ public sealed class StreamEngine : IDisposable
 
         var request = new PipelineRequest
         {
-            Sources = Scene.Sources.ToList(),
+            Scenes = _scenes,
+            ActiveSceneIndex = _activeIndex,
             Plan = plan,
             StreamUrl = stream ? Platforms.BuildUrl(Settings.ServerUrl, _streamKey) : null,
             SegmentPattern = segPattern,
@@ -267,8 +321,12 @@ public sealed class StreamEngine : IDisposable
             InputOverride = InputOverride,
         };
         var spec = PipelineBuilder.Build(request);
+        _runnerSpec = spec;
+        _runnerOrigin = request.WallclockOrigin;
+        _runnerFingerprint = Fingerprint(_scenes);
         foreach (var w in spec.Warnings) Message?.Invoke(this, new EngineMessageEventArgs(w, false));
 
+        PipelineStarts++;
         var runner = new FfmpegRunner(ffmpeg, spec.Args, PreviewWidth, PreviewHeight, Path.Combine(_logDir, "ffmpeg-last.log"));
         runner.Frame += f => FrameReady?.Invoke(f);
         runner.Progress += p =>
@@ -276,8 +334,9 @@ public sealed class StreamEngine : IDisposable
             _lastProgress = p;
             lock (_progressWindow)
             {
-                _progressWindow.Enqueue((DateTime.UtcNow, p));
-                while (_progressWindow.Count > 15) _progressWindow.Dequeue();
+                var nowT = DateTime.UtcNow;
+                _progressWindow.Enqueue((nowT, p));
+                while (_progressWindow.Count > 0 && nowT - _progressWindow.Peek().t > TimeSpan.FromSeconds(15)) _progressWindow.Dequeue();
             }
         };
         _runner = runner;
@@ -425,27 +484,28 @@ public sealed class StreamEngine : IDisposable
     }
 
     /// <summary>Rolling (not since-start) output fps and speed over the last ~15 s of progress reports.</summary>
-    private (double fps, double speed, int samples) WindowedRates()
+    /// <returns>fps, speed and the window length in seconds.</returns>
+    private (double fps, double speed, double span) WindowedRates()
     {
         (DateTime t, ProgressInfo p)[] w;
         lock (_progressWindow) w = _progressWindow.ToArray();
-        if (w.Length < 2) return (0, 0, w.Length);
+        if (w.Length < 2) return (0, 0, 0);
         double dt = (w[^1].t - w[0].t).TotalSeconds;
-        if (dt < 0.5) return (0, 0, w.Length);
+        if (dt < 0.5) return (0, 0, dt);
         double fps = (w[^1].p.Frame - w[0].p.Frame) / dt;
         double speed = (w[^1].p.OutTime - w[0].p.OutTime).TotalSeconds / dt;
-        return (fps, speed, w.Length);
+        return (fps, speed, dt);
     }
 
     private void EvaluateHealth()
     {
         var r = _runner;
         if (r is null) { if (!Reconnecting) _health = "Idle"; return; }
-        var (fps, speed, samples) = WindowedRates();
-        if (samples < 3) return;
+        var (fps, speed, span) = WindowedRates();
+        if (span < 2) return;
         // With wall-clock input timestamps the output can only fall behind real time when the encoder or the
         // network can't keep up, so "output seconds per real second" is the honest congestion signal.
-        bool struggling = samples >= 8 && speed > 0 && speed < 0.95;
+        bool struggling = span >= 8 && speed > 0 && speed < 0.95;
         double expected = CurrentPlan?.Fps ?? 30;
         bool bad = fps > 0 && fps < expected * 0.9;
 

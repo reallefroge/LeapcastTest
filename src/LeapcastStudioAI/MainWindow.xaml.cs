@@ -75,6 +75,14 @@ public partial class MainWindow : Window
         _uiTimer.Tick += (_, _) => OnUiTick();
         _uiTimer.Start();
         HardwareLabel.Text = $"{Environment.ProcessorCount} CPU threads · detecting encoders…";
+        // Small laptop screens: fit the work area instead of hanging off the edge.
+        var area = SystemParameters.WorkArea;
+        if (Width > area.Width || Height > area.Height)
+        {
+            Width = Math.Max(MinWidth, area.Width);
+            Height = Math.Max(MinHeight, area.Height);
+            if (Width > area.Width || Height > area.Height) WindowState = WindowState.Maximized;
+        }
         UpdatePlanDisplay();
     }
 
@@ -144,7 +152,7 @@ public partial class MainWindow : Window
     {
         var scene = SelectedScene;
         if (scene is null) return Task.CompletedTask;
-        return _engine.UpdateAsync(scene, _state.Settings, StreamKey, restart);
+        return _engine.UpdateAsync(_state.Scenes.ToList(), scene, _state.Settings, StreamKey, restart);
     }
 
     private void OnFrame(byte[] frame)
@@ -401,7 +409,11 @@ public partial class MainWindow : Window
             _mixer.Add(new MixerChannel { SourceId = s.Id, Name = s.Name });
         _state.SelectedSceneId = SelectedScene.Id;
         Save();
-        if (_ready) await ApplySceneSafelyAsync(restart: false, "Switching scene…", "Scene: " + SelectedScene.Name);
+        if (_ready)
+        {
+            string how = _state.Settings.Transition == "Cut" ? "Cut" : "Fade";
+            await ApplySceneSafelyAsync(restart: false, $"{how} to \"{SelectedScene.Name}\"…", "On air: " + SelectedScene.Name);
+        }
     }
 
     /// <summary>Scene changes are queued by the engine's own lock, so they're never dropped while another action runs.</summary>
@@ -423,7 +435,8 @@ public partial class MainWindow : Window
         Save();
         RefreshMixerOnly();
         if (!_ready) return;
-        await ApplySceneSafelyAsync(restart: true, "Updating scene…", "Scene updated.");
+        // The engine rebuilds only if the edit changes what's captured/composited.
+        await ApplySceneSafelyAsync(restart: false, "Updating scene…", "Scene updated.");
     }
 
     private void RefreshMixerOnly()
@@ -452,7 +465,7 @@ public partial class MainWindow : Window
             }
         }
         _state.Scenes.Add(scene);
-        ScenesList.SelectedItem = scene;
+        ScenesList.SelectedItem = scene; // selection change applies it (adding a scene while running rebuilds once)
         Save();
     }
 

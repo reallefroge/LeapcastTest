@@ -30,6 +30,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/build-installer.ps1
 
+      - name: Engine tests on Windows (bundled FFmpeg, real GDI capture, named pipes)
+        shell: pwsh
+        run: |
+          $env:PATH = (Resolve-Path "publish/win-x64/ffmpeg/bin").Path + ";" + $env:PATH
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          dotnet run -c Release --project tests/CoreTests 2>&1 | Tee-Object -FilePath smoke/engine-tests.txt
+          if ($LASTEXITCODE -ne 0) { throw "Engine tests failed" }
+          Get-ChildItem $env:TEMP\leapcast-tests\data\logs -ErrorAction SilentlyContinue | Copy-Item -Destination smoke/ -ErrorAction SilentlyContinue
+
       - name: Portable zip
         shell: pwsh
         run: |
@@ -70,6 +79,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "studio-ai-build-${{ github.run_number }}"
-          gh release create $tag (Get-ChildItem dist/* | ForEach-Object FullName) smoke/main-window.png `
+          gh release create $tag (Get-ChildItem dist/* | ForEach-Object FullName) smoke/main-window.png smoke/engine-tests.txt `
             --target ${{ github.sha }} --prerelease --title "Leapcast Studio AI build ${{ github.run_number }}" `
             --notes "Automated Windows build of branch leapcast-studio-ai (${{ github.sha }})."

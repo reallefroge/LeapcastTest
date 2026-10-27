@@ -136,6 +136,11 @@ public sealed class StudioSettings
     public int AudioBitrateKbps { get; set; } = 160;
     public bool LowLatencyMode { get; set; }
 
+    // Scene transitions
+    /// <summary>"Fade" (crossfade) or "Cut" (instant, still no restart/blank).</summary>
+    public string Transition { get; set; } = "Fade";
+    public int TransitionMs { get; set; } = 500;
+
     // Recording / replay
     public string RecordingFolder { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Leapcast");

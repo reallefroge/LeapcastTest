@@ -73,6 +73,7 @@ public sealed class FfmpegRunner : IDisposable
     {
         string[] lines;
         lock (_logLock) lines = _log.ToArray();
+        lines = lines.Where(l => !l.Contains("Guessed Channel Layout", StringComparison.Ordinal)).ToArray();
         var hit = lines.Reverse().FirstOrDefault(l =>
             l.Contains("Error", StringComparison.OrdinalIgnoreCase) || l.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
             l.Contains("Could not", StringComparison.OrdinalIgnoreCase) || l.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
@@ -99,7 +100,9 @@ public sealed class FfmpegRunner : IDisposable
                 }
                 _logFile?.WriteLine(line);
                 if (line.StartsWith("frame=", StringComparison.Ordinal) || line.Contains(" speed=", StringComparison.Ordinal)
-                    || string.IsNullOrWhiteSpace(line)) continue; // final stats summary, not a message
+                    || string.IsNullOrWhiteSpace(line) || line.StartsWith("Enter command", StringComparison.Ordinal)
+                    || (line.StartsWith("Command reply", StringComparison.Ordinal) && line.Contains("ret:0", StringComparison.Ordinal)))
+                    continue; // stats summary / transition-command echoes, not messages
                 lock (_logLock)
                 {
                     _log.Enqueue(line);
@@ -162,12 +165,29 @@ public sealed class FfmpegRunner : IDisposable
         catch { /* process gone */ }
     }
 
+    private readonly object _stdinLock = new();
+
+    /// <summary>Sends runtime filter commands ("target time command arg") through ffmpeg's interactive stdin.</summary>
+    public void SendCommands(IEnumerable<string> commands)
+    {
+        if (_exit.Task.IsCompleted || _stopRequested) return;
+        lock (_stdinLock)
+        {
+            try
+            {
+                foreach (var c in commands) _process.StandardInput.Write("C" + c + "\n");
+                _process.StandardInput.Flush();
+            }
+            catch { /* process exiting */ }
+        }
+    }
+
     /// <summary>Asks ffmpeg to finish cleanly ('q'), so RTMP is closed properly and the last segment is finalized.</summary>
     public async Task StopAsync(TimeSpan? timeout = null)
     {
         _stopRequested = true;
         if (_exit.Task.IsCompleted) return;
-        try { await _process.StandardInput.WriteAsync("q"); await _process.StandardInput.FlushAsync(); } catch { }
+        try { lock (_stdinLock) { _process.StandardInput.Write("q"); _process.StandardInput.Flush(); } } catch { }
         var done = await Task.WhenAny(_exit.Task, Task.Delay(timeout ?? TimeSpan.FromSeconds(6)));
         if (done != _exit.Task)
         {

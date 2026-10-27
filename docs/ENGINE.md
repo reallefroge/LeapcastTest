@@ -33,3 +33,12 @@ Because inputs are wall-clock stamped, the output can only fall behind real time
 can't keep up. The engine measures *output seconds per real second* over a rolling ~15 s window. A sustained value
 below 0.95 marks the connection as "Struggling", and if enabled, the cap drops 25% (at most once a minute).
 FFmpeg's own `speed=`/`fps=` include start-up time, so they aren't used for this.
+
+## Scene transitions
+All scenes are composited in the same filter graph from shared, de-duplicated inputs (`split` per device).
+Two `streamselect` filters pick the *from* and *to* scenes; the *to* scene is laid over the *from* scene through an
+alpha mask whose brightness is an `eq` expression of stream time `t`. A switch sends three runtime commands through
+ffmpeg's stdin (`C streamselect@from -1 map i`, `C eq@fade -1 brightness …clip((t-T1)/D,0,1)`, `C streamselect@to -1 map j`)
+with `T1` just after the last command lands, so the fade runs frame-accurately inside the encoder: no restart and no black frame.
+Per-device `volume@g*` stages crossfade audio when scenes use different levels. `-stats_period 0.1` keeps ffmpeg polling stdin
+fast enough (ffmpeg 7+ checks keyboard input once per stats period).

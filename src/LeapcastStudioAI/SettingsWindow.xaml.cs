@@ -44,6 +44,8 @@ public partial class SettingsWindow : Window
         SelectTag(AudioBox, current.AudioBitrateKbps.ToString(CultureInfo.InvariantCulture));
         LowLatencyBox.IsChecked = current.LowLatencyMode;
 
+        SelectTag(TransitionBox, current.Transition);
+        SelectTag(TransitionMsBox, current.TransitionMs.ToString(CultureInfo.InvariantCulture));
         FolderBox.Text = current.RecordingFolder;
         SelectTag(ReplayBox, current.ReplaySeconds.ToString(CultureInfo.InvariantCulture));
         ReconnectBox.IsChecked = current.AutoReconnect;
@@ -87,6 +89,8 @@ public partial class SettingsWindow : Window
         s.RateControl = TagOf(RateBox, "SmartVbr");
         s.AudioBitrateKbps = int.Parse(TagOf(AudioBox, "160"), CultureInfo.InvariantCulture);
         s.LowLatencyMode = LowLatencyBox.IsChecked == true;
+        s.Transition = TagOf(TransitionBox, "Fade");
+        s.TransitionMs = int.Parse(TagOf(TransitionMsBox, "500"), CultureInfo.InvariantCulture);
         s.RecordingFolder = string.IsNullOrWhiteSpace(FolderBox.Text) ? new StudioSettings().RecordingFolder : FolderBox.Text.Trim();
         s.ReplaySeconds = int.Parse(TagOf(ReplayBox, "60"), CultureInfo.InvariantCulture);
         s.AutoReconnect = ReconnectBox.IsChecked == true;

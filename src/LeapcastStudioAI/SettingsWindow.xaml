@@ -96,6 +96,28 @@
           </StackPanel>
         </Border>
 
+        <!-- TRANSITIONS -->
+        <Border Background="{StaticResource PanelBrush}" CornerRadius="10" Padding="12" Margin="0,0,0,10">
+          <StackPanel>
+            <TextBlock Text="SCENE TRANSITIONS" Style="{StaticResource SectionHeader}"/>
+            <TextBlock Text="Transition" Style="{StaticResource FieldLabel}"/>
+            <ComboBox x:Name="TransitionBox">
+              <ComboBoxItem Content="Fade (crossfade between scenes)" Tag="Fade"/>
+              <ComboBoxItem Content="Cut (instant)" Tag="Cut"/>
+            </ComboBox>
+            <TextBlock Text="Fade length" Style="{StaticResource FieldLabel}"/>
+            <ComboBox x:Name="TransitionMsBox">
+              <ComboBoxItem Content="0.3 s" Tag="300"/>
+              <ComboBoxItem Content="0.5 s" Tag="500"/>
+              <ComboBoxItem Content="0.8 s" Tag="800"/>
+              <ComboBoxItem Content="1 s" Tag="1000"/>
+              <ComboBoxItem Content="1.5 s" Tag="1500"/>
+            </ComboBox>
+            <TextBlock Text="Every scene stays live inside the encoder, so switching never interrupts the stream. Each extra scene adds a little CPU work."
+                       Style="{StaticResource Hint}"/>
+          </StackPanel>
+        </Border>
+
         <!-- RECORDING -->
         <Border Background="{StaticResource PanelBrush}" CornerRadius="10" Padding="12" Margin="0,0,0,10">
           <StackPanel>
