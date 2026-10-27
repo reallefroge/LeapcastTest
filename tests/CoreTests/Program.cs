@@ -175,7 +175,9 @@ sceneA.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphon
 var sceneB = new StudioScene { Name = "BRB" };
 sceneB.Sources.Add(new StudioSource { Name = "BRB card", Type = SourceTypes.Image, FilePath = redPng, Anchor = Anchors.Fill });
 sceneB.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone, VolumeDb = -12 }); // same device, quieter
-var both = new List<StudioScene> { sceneA, sceneB };
+var sceneC = new StudioScene { Name = "Starting soon" };
+sceneC.Sources.Add(new StudioSource { Name = "Card", Type = SourceTypes.Image, FilePath = png, Anchor = Anchors.Fill });
+var both = new List<StudioScene> { sceneA, sceneC, sceneB }; // B sits on top of the stack, A at the bottom
 var tset = WithEncoder(settings, "libx264"); tset.Transition = "Fade"; tset.TransitionMs = 600;
 var samples = new List<(double t, int red)>();
 var tclock = Stopwatch.StartNew();

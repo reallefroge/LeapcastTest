@@ -61,9 +61,8 @@ public static class PipelineBuilder
     private static string I(double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
     private static string I(int v) => v.ToString(CultureInfo.InvariantCulture);
 
+    /// <summary>Mask filter name prefix; scene k (k ≥ 1) is controlled by "eq@fade{k}".</summary>
     public const string FadeFilter = "eq@fade";
-    public const string FromSelect = "streamselect@from";
-    public const string ToSelect = "streamselect@to";
 
     /// <summary>Two sources that capture the same thing share one ffmpeg input (a camera can only be opened once).</summary>
     public static string InputKey(StudioSource s)
@@ -218,23 +217,24 @@ public static class PipelineBuilder
             graph.Add($"[{colorIndex}:v]split={colorUses.Count}{string.Concat(colorUses.Select(u => $"[{u}]"))}");
         graph.AddRange(sceneGraph);
 
-        // ---------- scene switcher: crossfade "from" → "to" with a runtime-controlled alpha mask ----------
+        // ---------- scene switcher ----------
+        // Scenes are stacked bottom→top; every scene above the first has its own alpha mask (an eq brightness
+        // expression of stream time t). Switching only rewrites mask expressions: no filter reconfiguration,
+        // no restart, frame-accurate fades. Invariant: every mask above the on-air scene is transparent.
         if (N == 1)
             graph.Add("[scene0]format=nv12[vfinal]");
         else
         {
-            var froms = new StringBuilder(); var tos = new StringBuilder();
-            for (int k = 0; k < N; k++)
+            string cur = "scene0";
+            for (int k = 1; k < N; k++)
             {
-                graph.Add($"[scene{k}]split=2[sf{k}][st{k}]");
-                froms.Append($"[sf{k}]"); tos.Append($"[st{k}]");
+                string initial = k == active ? "1" : "-1";
+                graph.Add($"color=c=black:s={W}x{H}:r={F},format=gray,{FadeFilter}{k}=eval=frame:brightness={initial}[m{k}]");
+                graph.Add($"[scene{k}][m{k}]alphamerge[sa{k}]");
+                graph.Add($"[{cur}][sa{k}]overlay=format=yuv420:eof_action=repeat[stack{k}]");
+                cur = $"stack{k}";
             }
-            graph.Add($"{froms}{FromSelect}=inputs={N}:map={active}[from]");
-            graph.Add($"{tos}{ToSelect}=inputs={N}:map={active}[to]");
-            // Mask is fully opaque until a transition command rewrites its brightness expression (in stream time t).
-            graph.Add($"color=c=black:s={W}x{H}:r={F},format=gray,{FadeFilter}=eval=frame:brightness=1[mask]");
-            graph.Add("[to][mask]alphamerge[toa]");
-            graph.Add("[from][toa]overlay=format=yuv420:eof_action=repeat,format=nv12[vfinal]");
+            graph.Add($"[{cur}]format=nv12[vfinal]");
         }
 
         string venc = "vfinal", vprev = "vfinal";
@@ -332,9 +332,19 @@ public static class PipelineBuilder
         if (spec.SceneCount < 2 || from == to) return lines;
         double d = Math.Max(0.001, seconds);
         string ramp = $"clip((t-{I(startAt)})/{I(d)},0,1)";
-        lines.Add($"{FromSelect} -1 map {from}");
-        lines.Add($"{FadeFilter} -1 brightness -0.1+1.1*{ramp}"); // −0.1 offset makes "off" fully transparent
-        lines.Add($"{ToSelect} -1 map {to}");
+        // brightness is added to a black mask: ≤ -0.1 → fully transparent, ≥ 1 → fully opaque
+        if (to > from)
+        {
+            // everything between is already transparent: just fade the new scene in on top
+            lines.Add($"{FadeFilter}{to} -1 brightness -0.1+1.1*{ramp}");
+        }
+        else
+        {
+            // reveal a lower scene: prepare it (hidden under the current one), then fade the current one out
+            for (int k = to + 1; k < from; k++) lines.Add($"{FadeFilter}{k} -1 brightness -1");
+            if (to > 0) lines.Add($"{FadeFilter}{to} -1 brightness 1");
+            lines.Add($"{FadeFilter}{from} -1 brightness 1-1.1*{ramp}");
+        }
         foreach (var g in spec.AudioGains)
         {
             double a = g.LinearGainPerScene[from], b = g.LinearGainPerScene[to];

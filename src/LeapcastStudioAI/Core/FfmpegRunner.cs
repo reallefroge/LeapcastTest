@@ -104,6 +104,7 @@ public sealed class FfmpegRunner : IDisposable
                     || (line.StartsWith("Command reply", StringComparison.Ordinal) && line.Contains("ret:0", StringComparison.Ordinal));
                 if (!commandEcho) _logFile?.WriteLine(line);
                 if (line.StartsWith("frame=", StringComparison.Ordinal) || line.Contains(" speed=", StringComparison.Ordinal)
+                    || System.Text.RegularExpressions.Regex.IsMatch(line, @"^\s*[a-z_]+=\s*\S*\s*$")
                     || string.IsNullOrWhiteSpace(line) || line.StartsWith("Enter command", StringComparison.Ordinal)
                     || (line.StartsWith("Command reply", StringComparison.Ordinal) && line.Contains("ret:0", StringComparison.Ordinal)))
                     continue; // stats summary / transition-command echoes, not messages
