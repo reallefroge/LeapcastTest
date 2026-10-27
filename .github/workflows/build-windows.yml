@@ -36,8 +36,20 @@ jobs:
           $env:PATH = (Resolve-Path "publish/win-x64/ffmpeg/bin").Path + ";" + $env:PATH
           New-Item -ItemType Directory -Force smoke | Out-Null
           dotnet run -c Release --project tests/CoreTests 2>&1 | Tee-Object -FilePath smoke/engine-tests.txt
-          if ($LASTEXITCODE -ne 0) { throw "Engine tests failed" }
+          $code = $LASTEXITCODE
           Get-ChildItem $env:TEMP\leapcast-tests\data\logs -ErrorAction SilentlyContinue | Copy-Item -Destination smoke/ -ErrorAction SilentlyContinue
+          # Surface results as annotations (readable without downloading logs)
+          Get-Content smoke/engine-tests.txt | Where-Object { $_ -match 'FAIL|engine:|FFmpeg under test|ddagrab|PASS.*(crossfade|restart|gameplay|gap)' } |
+            Select-Object -First 10 | ForEach-Object { Write-Host "::warning title=engine-test::$($_.Trim())" }
+          $ff = Join-Path $env:TEMP "leapcast-tests\data\logs\ffmpeg-last.log"
+          if (Test-Path $ff) {
+            Get-Content $ff | Select-Object -Skip 1 | Where-Object { $_.Trim() } | Select-Object -Last 8 |
+              ForEach-Object { Write-Host "::notice title=ffmpeg-log::$($_.Trim())" }
+          }
+          if ($code -ne 0) {
+            Get-Content smoke/engine-tests.txt | Select-Object -Last 6 | ForEach-Object { Write-Host "::error title=tail::$($_.Trim())" }
+            throw "Engine tests failed"
+          }
 
       - name: Portable zip
         shell: pwsh
