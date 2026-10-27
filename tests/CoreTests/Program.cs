@@ -70,7 +70,7 @@ await RunAsync(new[] { "-y", "-f", "lavfi", "-i", "color=c=red@0.6:s=200x80,form
 string testCapture = OperatingSystem.IsWindows() ? "GDI" : "Auto";
 var scene = new StudioScene { Name = "W101" };
 scene.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, CaptureMethod = testCapture });
-scene.Sources.Add(new StudioSource { Name = "Cam", Type = SourceTypes.Camera, DeviceName = "x", Mirror = true });
+scene.Sources.Add(new StudioSource { Name = "Cam", Type = SourceTypes.Camera, DeviceName = "x", Mirror = true, CameraDenoise = false });
 scene.Sources.Add(new StudioSource { Name = "Logo", Type = SourceTypes.Image, FilePath = png, Anchor = Anchors.TopRight, SizePercent = 0 });
 scene.Sources.Add(new StudioSource { Name = "Title", Type = SourceTypes.Text, Text = "hi" });
 scene.Sources.Add(new StudioSource { Name = "Desktop", Type = SourceTypes.DesktopAudio });
@@ -124,8 +124,9 @@ var rr = await ProbeAsync(rec);
 Check(rr.ok && rr.duration > wallRecorded - 9 && rr.duration < wallRecorded + 1, $"recording spans the restart: {rr.duration:0.0}s of {wallRecorded:0.0}s wall time (restart gaps excluded), {rr.streams}");
 var lf = await ProbeAsync(Path.Combine(work, "live", "stream.flv"));
 Check(lf.ok && lf.streams.Contains("h264") && lf.streams.Contains("aac") && lf.duration > 6, $"live FLV output valid: {lf.duration:0.0}s, {lf.streams}");
-var sync = await StartTimesAsync(rec);
-Check(Math.Abs(sync.v - sync.a) < 0.25, $"audio/video start aligned in recording (v {sync.v:0.000}s, a {sync.a:0.000}s)");
+var lip = await LipSyncAsync(rec, 1103, 610);
+Check(lip.events >= 4 && Math.Abs(lip.offsetMs) < 100,
+    $"lip sync: camera flash vs mic beep offset {lip.offsetMs:+0;-0} ms over {lip.events} events (|offset| < 100 ms)");
 var dims = await RunCaptureAsync("ffprobe", new[] { "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate", "-of", "csv=p=0", rec });
 Check(dims.Trim().StartsWith("1280,720,"), $"output is 1280x720@30 ({dims.Trim()})");
 
@@ -277,6 +278,43 @@ async Task<(bool ok, double duration, string streams)> ProbeAsync(string file)
     bool ok = double.TryParse(d.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var dur);
     return (ok, dur, string.Join("+", c.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim())));
 }
+// Finds the flash (video luma at x,y) and beep (audio envelope) onsets in a file and returns the median offset.
+async Task<(double offsetMs, int events)> LipSyncAsync(string file, int x, int y)
+{
+    var (sv, sa) = await StartTimesAsync(file);
+    byte[] luma = await RawAsync(new[] { "-v", "error", "-i", file, "-map", "0:v:0", "-vf", $"crop=8:8:{x - 4}:{y - 4},scale=1:1,format=gray", "-f", "rawvideo", "-" });
+    byte[] pcm = await RawAsync(new[] { "-v", "error", "-i", file, "-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "s16le", "-" });
+    var flashes = new List<double>();
+    for (int i = 1; i < luma.Length; i++)
+        if (luma[i] > 222 && luma[i - 1] <= 222 && (flashes.Count == 0 || sv + i / 30.0 - flashes[^1] > 1.0)) flashes.Add(sv + i / 30.0);
+    var beeps = new List<double>();
+    int win = 80; // 10 ms windows
+    double prev = 0;
+    for (int i = 0; i + win * 2 <= pcm.Length; i += win * 2)
+    {
+        double sum = 0;
+        for (int j = 0; j < win; j++) { short v = BitConverter.ToInt16(pcm, i + j * 2); sum += Math.Abs(v); }
+        double env = sum / win;
+        double tb = sa + i / 2 / 8000.0;
+        if (env > 1500 && prev <= 1500 && (beeps.Count == 0 || tb - beeps[^1] > 1.0)) beeps.Add(tb);
+        prev = env;
+    }
+    var diffs = flashes.Select(f => beeps.Count == 0 ? double.NaN : beeps.OrderBy(b => Math.Abs(b - f)).First() - f)
+                       .Where(d => !double.IsNaN(d) && Math.Abs(d) < 0.5).OrderBy(d => d).ToList();
+    Console.WriteLine($"    lip-sync markers: {flashes.Count} flashes, {beeps.Count} beeps (video start {sv:0.000}s, audio start {sa:0.000}s)");
+    return diffs.Count == 0 ? (9999, 0) : (diffs[diffs.Count / 2] * 1000, diffs.Count);
+}
+async Task<byte[]> RawAsync(IEnumerable<string> args)
+{
+    var psi = new ProcessStartInfo(ffmpeg) { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false };
+    foreach (var a in args) psi.ArgumentList.Add(a);
+    using var p = Process.Start(psi)!;
+    using var ms = new MemoryStream();
+    var copy = p.StandardOutput.BaseStream.CopyToAsync(ms);
+    _ = p.StandardError.ReadToEndAsync();
+    await copy; await p.WaitForExitAsync();
+    return ms.ToArray();
+}
 async Task<(double v, double a)> StartTimesAsync(string file)
 {
     double St(string sel)
@@ -332,6 +370,12 @@ static class PacedPipe
     }
 }
 
+/// <summary>Every 2 s (wall clock) the synthetic camera flashes white and the synthetic mics beep for 100 ms.</summary>
+static class SyncMarker
+{
+    public static bool On() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() % 2000 < 100;
+}
+
 static class VideoFifo
 {
     /// <summary>Raw yuv420p frames (moving grey stripes) at exactly fps.</summary>
@@ -347,10 +391,15 @@ static class VideoFifo
             Array.Fill(f, (byte)128, w * h, size - w * h);
             return f;
         }).ToArray();
-        string path = PacedPipe.Create(dir, ".yuv", n => frames[n % frames.Length], fps);
+        var white = new byte[size];
+        Array.Fill(white, (byte)235, 0, w * h);
+        Array.Fill(white, (byte)128, w * h, size - w * h);
+        string path = PacedPipe.Create(dir, ".yuv", n => SyncMarker.On() ? white : frames[n % frames.Length], fps);
         return new InputSpec(new[] { "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", $"{w}x{h}", "-framerate", fps.ToString(), "-thread_queue_size", "64", "-i", path }, true);
     }
 }
+
+static partial class Helpers { }
 
 sealed class FakePlatform(string png) : IPlatformServices
 {
@@ -377,9 +426,10 @@ sealed class FifoAudioBridge(string dir) : IAudioBridge
             var buf = new byte[480 * 8];
             map[s.Id] = PacedPipe.Create(dir, ".f32", _ =>
             {
+                bool on = SyncMarker.On();
                 for (int i = 0; i < 480; i++)
                 {
-                    float v = (float)(0.2 * Math.Sin(phase)); phase += 2 * Math.PI * freq / 48000;
+                    float v = (float)((on ? 0.3 : 0.0) * Math.Sin(phase)); phase += 2 * Math.PI * freq / 48000;
                     BitConverter.TryWriteBytes(buf.AsSpan(i * 8), v);
                     BitConverter.TryWriteBytes(buf.AsSpan(i * 8 + 4), v);
                 }
