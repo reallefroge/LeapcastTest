@@ -1,0 +1,187 @@
+using System.Diagnostics;
+using System.Globalization;
+
+namespace LeapcastStudioAI;
+
+public sealed record ProgressInfo(long Frame, double Fps, long DroppedFrames, long DupFrames, double Speed, TimeSpan OutTime);
+
+/// <summary>Runs one ffmpeg process: parses -progress output, reads raw preview frames from stdout, stops gracefully.</summary>
+public sealed class FfmpegRunner : IDisposable
+{
+    private readonly Process _process;
+    private readonly int _frameBytes;
+    private readonly Queue<string> _log = new();
+    private readonly object _logLock = new();
+    private readonly StreamWriter? _logFile;
+    private readonly Dictionary<string, string> _block = new();
+    private volatile bool _stopRequested;
+    private readonly TaskCompletionSource<int> _exit = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public event Action<ProgressInfo>? Progress;
+    /// <summary>Raw BGRA frame. The array is reused: copy it before returning if you need it later.</summary>
+    public event Action<byte[]>? Frame;
+    public event Action<string>? LogLine;
+
+    public bool StopRequested => _stopRequested;
+    public Task<int> Completion => _exit.Task;
+    public DateTime StartedUtc { get; } = DateTime.UtcNow;
+
+    public FfmpegRunner(string ffmpeg, IReadOnlyList<string> args, int previewWidth, int previewHeight, string? logPath)
+    {
+        _frameBytes = previewWidth * previewHeight * 4;
+        var psi = new ProcessStartInfo(ffmpeg)
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        if (logPath is not null)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+                _logFile = new StreamWriter(logPath, false) { AutoFlush = true };
+                _logFile.WriteLine("ffmpeg " + string.Join(" ", args.Select(Quote)));
+                _logFile.WriteLine();
+            }
+            catch { _logFile = null; }
+        }
+        _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        _process.Exited += (_, _) => { };
+        _process.Start();
+        try { _process.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { /* not fatal */ }
+
+        _ = Task.Run(ReadStderrAsync);
+        _ = Task.Run(ReadStdoutAsync);
+        _ = Task.Run(async () =>
+        {
+            await _process.WaitForExitAsync();
+            await Task.Delay(150); // let the readers drain the last lines
+            int code = -1;
+            try { code = _process.ExitCode; } catch { }
+            _exit.TrySetResult(code);
+        });
+    }
+
+    public string TailLog(int lines = 12)
+    {
+        lock (_logLock) return string.Join(Environment.NewLine, _log.TakeLast(lines));
+    }
+
+    /// <summary>Most relevant error line for showing to the user.</summary>
+    public string ErrorSummary()
+    {
+        string[] lines;
+        lock (_logLock) lines = _log.ToArray();
+        var hit = lines.Reverse().FirstOrDefault(l =>
+            l.Contains("Error", StringComparison.OrdinalIgnoreCase) || l.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
+            l.Contains("Could not", StringComparison.OrdinalIgnoreCase) || l.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+            l.Contains("Invalid", StringComparison.OrdinalIgnoreCase) || l.Contains("denied", StringComparison.OrdinalIgnoreCase));
+        return hit ?? lines.LastOrDefault() ?? "the encoder process stopped unexpectedly";
+    }
+
+    private async Task ReadStderrAsync()
+    {
+        try
+        {
+            var reader = _process.StandardError;
+            string? line;
+            while ((line = await reader.ReadLineAsync()) is not null)
+            {
+                int eq = line.IndexOf('=');
+                if (IsProgressLine(line, eq))
+                {
+                    var key = line[..eq];
+                    var val = line[(eq + 1)..].Trim();
+                    _block[key] = val;
+                    if (key == "progress") EmitProgress();
+                    continue;
+                }
+                _logFile?.WriteLine(line);
+                if (line.StartsWith("frame=", StringComparison.Ordinal) || line.Contains(" speed=", StringComparison.Ordinal)
+                    || string.IsNullOrWhiteSpace(line)) continue; // final stats summary, not a message
+                lock (_logLock)
+                {
+                    _log.Enqueue(line);
+                    while (_log.Count > 200) _log.Dequeue();
+                }
+                LogLine?.Invoke(line);
+            }
+        }
+        catch { /* process gone */ }
+    }
+
+    /// <summary>-progress lines are "key=value" with a lower-case key and no spaces anywhere.</summary>
+    internal static bool IsProgressLine(string line, int eq)
+    {
+        if (eq <= 0 || eq > 40 || line.IndexOf(' ') >= 0) return false;
+        for (int i = 0; i < eq; i++)
+        {
+            char c = line[i];
+            if (!(c is >= 'a' and <= 'z' or >= '0' and <= '9' or '_')) return false;
+        }
+        return true;
+    }
+
+    private void EmitProgress()
+    {
+        long L(string k) => _block.TryGetValue(k, out var v) && long.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out var r) ? r : 0;
+        double D(string k)
+        {
+            if (!_block.TryGetValue(k, out var v)) return 0;
+            v = v.TrimEnd('x');
+            return double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var r) ? r : 0;
+        }
+        var info = new ProgressInfo(L("frame"), D("fps"), L("drop_frames"), L("dup_frames"), D("speed"),
+            TimeSpan.FromMilliseconds(Math.Max(0, L("out_time_us") / 1000)));
+        try { Progress?.Invoke(info); } catch { }
+    }
+
+    private async Task ReadStdoutAsync()
+    {
+        if (_frameBytes <= 0) return;
+        var stream = _process.StandardOutput.BaseStream;
+        var buffers = new[] { new byte[_frameBytes], new byte[_frameBytes] };
+        int which = 0;
+        try
+        {
+            while (true)
+            {
+                var buf = buffers[which];
+                int got = 0;
+                while (got < _frameBytes)
+                {
+                    int n = await stream.ReadAsync(buf.AsMemory(got, _frameBytes - got));
+                    if (n <= 0) return;
+                    got += n;
+                }
+                try { Frame?.Invoke(buf); } catch { }
+                which ^= 1;
+            }
+        }
+        catch { /* process gone */ }
+    }
+
+    /// <summary>Asks ffmpeg to finish cleanly ('q'), so RTMP is closed properly and the last segment is finalized.</summary>
+    public async Task StopAsync(TimeSpan? timeout = null)
+    {
+        _stopRequested = true;
+        if (_exit.Task.IsCompleted) return;
+        try { await _process.StandardInput.WriteAsync("q"); await _process.StandardInput.FlushAsync(); } catch { }
+        var done = await Task.WhenAny(_exit.Task, Task.Delay(timeout ?? TimeSpan.FromSeconds(6)));
+        if (done != _exit.Task)
+        {
+            try { _process.Kill(true); } catch { }
+            await Task.WhenAny(_exit.Task, Task.Delay(2000));
+        }
+    }
+
+    public void Dispose()
+    {
+        try { if (!_process.HasExited) _process.Kill(true); } catch { }
+        _process.Dispose();
+        _logFile?.Dispose();
+    }
+
+    private static string Quote(string a) => a.Contains(' ') || a.Contains('"') ? "\"" + a.Replace("\"", "\\\"") + "\"" : a;
+}

@@ -1,0 +1,128 @@
+<Window x:Class="LeapcastStudioAI.SourcePropertiesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Source properties" Height="640" Width="500" MinHeight="380"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}">
+  <DockPanel Margin="18,16,18,14">
+    <StackPanel DockPanel.Dock="Top">
+      <TextBlock x:Name="HeaderText" Text="Source" FontSize="20" FontWeight="Bold" Margin="3,0,0,2"/>
+      <TextBlock x:Name="TypeText" Style="{StaticResource Hint}"/>
+    </StackPanel>
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button Content="Cancel" IsCancel="True" Click="Cancel_Click"/>
+      <Button Content="OK" IsDefault="True" MinWidth="80" Background="#5748C7" Click="Ok_Click"/>
+    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel Margin="0,6,8,0">
+        <TextBlock Text="Name" Style="{StaticResource FieldLabel}"/>
+        <TextBox x:Name="NameBox"/>
+
+        <!-- Display -->
+        <StackPanel x:Name="DisplayGroup">
+          <TextBlock Text="Monitor" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="MonitorBox"/>
+          <TextBlock Text="Capture method" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="MethodBox">
+            <ComboBoxItem Content="GPU (fast, works with fullscreen games, recommended)" Tag="Auto"/>
+            <ComboBoxItem Content="GDI (compatibility)" Tag="GDI"/>
+          </ComboBox>
+        </StackPanel>
+
+        <!-- Window -->
+        <StackPanel x:Name="WindowGroup">
+          <TextBlock Text="Window" Style="{StaticResource FieldLabel}"/>
+          <DockPanel>
+            <Button DockPanel.Dock="Right" Content="Refresh" Click="RefreshWindows_Click"/>
+            <ComboBox x:Name="WindowBox" IsEditable="True"/>
+          </DockPanel>
+          <TextBlock Text="Pick the game's window title. Wizard101 should be in windowed mode for window capture; for fullscreen use Display Capture."
+                     Style="{StaticResource Hint}"/>
+        </StackPanel>
+
+        <!-- Display + window shared -->
+        <StackPanel x:Name="CaptureGroup">
+          <CheckBox x:Name="CursorBox" Content="Show mouse cursor"/>
+          <TextBlock Text="Crop (pixels): left, top, right, bottom" Style="{StaticResource FieldLabel}"/>
+          <UniformGrid Columns="4">
+            <TextBox x:Name="CropL"/><TextBox x:Name="CropT"/><TextBox x:Name="CropR"/><TextBox x:Name="CropB"/>
+          </UniformGrid>
+          <TextBlock Text="Tip: cropping out a second monitor or taskbar is free and saves bandwidth." Style="{StaticResource Hint}"/>
+        </StackPanel>
+
+        <!-- Camera -->
+        <StackPanel x:Name="CameraGroup">
+          <TextBlock Text="Camera" Style="{StaticResource FieldLabel}"/>
+          <DockPanel>
+            <Button DockPanel.Dock="Right" Content="Refresh" Click="RefreshCameras_Click"/>
+            <ComboBox x:Name="CameraBox" IsEditable="True"/>
+          </DockPanel>
+          <TextBlock x:Name="CameraHint" Style="{StaticResource Hint}"/>
+          <TextBlock Text="Camera resolution" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="CamResBox">
+            <ComboBoxItem Content="Default" Tag="Default"/>
+            <ComboBoxItem Content="640 × 480" Tag="640x480"/>
+            <ComboBoxItem Content="1280 × 720 (recommended)" Tag="1280x720"/>
+            <ComboBoxItem Content="1920 × 1080" Tag="1920x1080"/>
+          </ComboBox>
+          <TextBlock Text="Camera frame rate" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="CamFpsBox">
+            <ComboBoxItem Content="Default" Tag="0"/>
+            <ComboBoxItem Content="15" Tag="15"/>
+            <ComboBoxItem Content="24" Tag="24"/>
+            <ComboBoxItem Content="30 (recommended)" Tag="30"/>
+            <ComboBoxItem Content="60" Tag="60"/>
+          </ComboBox>
+          <CheckBox x:Name="DenoiseBox" Content="Smart denoise (removes sensor grain: big bandwidth saver in dim rooms)"/>
+          <CheckBox x:Name="MirrorBox" Content="Mirror"/>
+        </StackPanel>
+
+        <!-- Image -->
+        <StackPanel x:Name="ImageGroup">
+          <TextBlock Text="Image file" Style="{StaticResource FieldLabel}"/>
+          <DockPanel>
+            <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseImage_Click"/>
+            <TextBox x:Name="ImageBox"/>
+          </DockPanel>
+        </StackPanel>
+
+        <!-- Text -->
+        <StackPanel x:Name="TextGroup">
+          <TextBlock Text="Text" Style="{StaticResource FieldLabel}"/>
+          <TextBox x:Name="TextContentBox" AcceptsReturn="True" MinHeight="60" TextWrapping="Wrap"/>
+          <UniformGrid Columns="2">
+            <StackPanel>
+              <TextBlock Text="Size (at 1080p)" Style="{StaticResource FieldLabel}"/>
+              <TextBox x:Name="FontSizeBox"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="Colour (#RRGGBB)" Style="{StaticResource FieldLabel}"/>
+              <TextBox x:Name="ColorBox"/>
+            </StackPanel>
+          </UniformGrid>
+        </StackPanel>
+
+        <!-- Placement (all video) -->
+        <StackPanel x:Name="PlacementGroup">
+          <TextBlock Text="Position" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="AnchorBox"/>
+          <TextBlock x:Name="SizeLabel" Text="Width (% of the stream width)" Style="{StaticResource FieldLabel}"/>
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Right" x:Name="SizeValue" Width="44" TextAlignment="Right" VerticalAlignment="Center"/>
+            <Slider x:Name="SizeSlider" Minimum="5" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True" ValueChanged="SizeSlider_ValueChanged" Margin="3,6"/>
+          </DockPanel>
+          <TextBlock Text="Margin from the edge (pixels)" Style="{StaticResource FieldLabel}"/>
+          <TextBox x:Name="MarginBox"/>
+        </StackPanel>
+
+        <!-- Audio -->
+        <StackPanel x:Name="AudioGroup">
+          <TextBlock Text="Device" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="AudioDeviceBox"/>
+          <TextBlock Text="Volume (dB, 0 = unchanged)" Style="{StaticResource FieldLabel}"/>
+          <TextBox x:Name="VolumeBox"/>
+          <CheckBox x:Name="NoiseBox" Content="Noise cleanup (removes fans, hum and keyboard hiss)"/>
+        </StackPanel>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

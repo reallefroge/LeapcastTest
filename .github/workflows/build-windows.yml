@@ -1,0 +1,75 @@
+name: Leapcast Studio AI - Windows build
+
+on:
+  push:
+    branches: [ leapcast-studio-ai ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build app, bundle FFmpeg, build installer
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/build-installer.ps1
+
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          $v = (Select-Xml -Path src/LeapcastStudioAI/LeapcastStudioAI.csproj -XPath "//Version").Node.InnerText
+          Compress-Archive -Path publish/win-x64/* -DestinationPath "dist/LeapcastStudioAI-$v-portable-win-x64.zip" -CompressionLevel Optimal
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Smoke test (launch the app, screenshot, check it stays up)
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "publish/win-x64/Leapcast Studio AI.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 25
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          $bmp.Save("smoke/main-window.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $log = Join-Path $env:LOCALAPPDATA "LeapcastStudioAI\logs\app-errors.log"
+          if (Test-Path $log) { Get-Content $log; Copy-Item $log smoke/ }
+          if ($p.HasExited) { throw "App exited during startup (code $($p.ExitCode))" }
+          Write-Host "App is running after 25 s."
+          $p | Stop-Process -Force
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: LeapcastStudioAI-windows
+          path: |
+            dist/*
+            smoke/*
+          if-no-files-found: warn
+
+      - name: Publish pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "studio-ai-build-${{ github.run_number }}"
+          gh release create $tag (Get-ChildItem dist/* | ForEach-Object FullName) smoke/main-window.png `
+            --target ${{ github.sha }} --prerelease --title "Leapcast Studio AI build ${{ github.run_number }}" `
+            --notes "Automated Windows build of branch leapcast-studio-ai (${{ github.sha }})."

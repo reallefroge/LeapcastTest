@@ -1,0 +1,105 @@
+<Application x:Class="LeapcastStudioAI.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+  <Application.Resources>
+    <Color x:Key="BgColor">#101218</Color>
+    <Color x:Key="PanelColor">#191D27</Color>
+    <Color x:Key="PanelAltColor">#222735</Color>
+    <Color x:Key="AccentColor">#8B7CFF</Color>
+    <Color x:Key="TextColor">#F2F3F8</Color>
+    <Color x:Key="MutedColor">#A2A8B8</Color>
+    <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}"/>
+    <SolidColorBrush x:Key="PanelBrush" Color="{StaticResource PanelColor}"/>
+    <SolidColorBrush x:Key="PanelAltBrush" Color="{StaticResource PanelAltColor}"/>
+    <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}"/>
+    <SolidColorBrush x:Key="TextBrush" Color="{StaticResource TextColor}"/>
+    <SolidColorBrush x:Key="MutedBrush" Color="{StaticResource MutedColor}"/>
+    <SolidColorBrush x:Key="GoodBrush" Color="#6FDB9A"/>
+    <SolidColorBrush x:Key="WarnBrush" Color="#FFC978"/>
+    <SolidColorBrush x:Key="BadBrush" Color="#FF7A7A"/>
+    <SolidColorBrush x:Key="LiveBrush" Color="#E5484D"/>
+
+    <Style TargetType="Button">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Background" Value="{StaticResource PanelAltBrush}"/>
+      <Setter Property="BorderBrush" Value="#353B4B"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="12,8"/>
+      <Setter Property="Margin" Value="3"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7" SnapsToDevicePixels="True">
+              <Grid>
+                <Border x:Name="Hover" Background="White" Opacity="0" CornerRadius="7"/>
+                <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalAlignment="Center" RecognizesAccessKey="True"/>
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Hover" Property="Opacity" Value="0.07"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Hover" Property="Opacity" Value="0.15"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.45"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource AccentBrush}"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Background" Value="{StaticResource PanelAltBrush}"/>
+      <Setter Property="BorderBrush" Value="#353B4B"/>
+      <Setter Property="CaretBrush" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Padding" Value="8,6"/>
+      <Setter Property="Margin" Value="3"/>
+    </Style>
+    <Style TargetType="PasswordBox">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Background" Value="{StaticResource PanelAltBrush}"/>
+      <Setter Property="BorderBrush" Value="#353B4B"/>
+      <Setter Property="CaretBrush" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Padding" Value="8,6"/>
+      <Setter Property="Margin" Value="3"/>
+    </Style>
+    <!-- The stock ComboBox chrome is light, so keep its text dark (white-on-white otherwise). -->
+    <Style TargetType="ComboBox">
+      <Setter Property="Foreground" Value="#15171D"/>
+      <Setter Property="Margin" Value="3"/>
+      <Setter Property="Padding" Value="7,5"/>
+    </Style>
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="#15171D"/>
+      <Setter Property="Padding" Value="6,4"/>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Margin" Value="3,7"/>
+    </Style>
+    <Style TargetType="ProgressBar">
+      <Setter Property="Background" Value="#11141B"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{StaticResource GoodBrush}"/>
+    </Style>
+    <Style x:Key="SectionHeader" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+      <Setter Property="Margin" Value="3,4,3,8"/>
+    </Style>
+    <Style x:Key="FieldLabel" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+      <Setter Property="Margin" Value="3,8,3,2"/>
+    </Style>
+    <Style x:Key="Hint" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="Margin" Value="3,2,3,4"/>
+    </Style>
+  </Application.Resources>
+</Application>

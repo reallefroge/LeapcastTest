@@ -1,0 +1,531 @@
+using System.Globalization;
+
+namespace LeapcastStudioAI;
+
+/// <summary>Captures audio devices and serves them to ffmpeg as raw 48 kHz stereo float streams (Windows: named pipes).</summary>
+public interface IAudioBridge : IDisposable
+{
+    /// <summary>Start/stop device captures so they match these sources (also drives the level meters).</summary>
+    void Configure(IReadOnlyList<StudioSource> audioSources);
+    /// <summary>Creates a fresh set of pipes for one ffmpeg run. Returns source id → ffmpeg input path.</summary>
+    IReadOnlyDictionary<Guid, string> OpenPipes();
+    void ClosePipes();
+    /// <summary>Peak level in dBFS (−60 … 0).</summary>
+    double LevelDb(Guid sourceId);
+}
+
+public interface IPlatformServices
+{
+    /// <summary>Renders a text source to a transparent PNG sized for the output height. Null if empty.</summary>
+    string? RenderText(StudioSource source, int outputHeight);
+    (int X, int Y, int W, int H)? MonitorBounds(int index);
+}
+
+public sealed record EngineStatus(
+    bool Running, bool Live, bool Recording, bool ReplayBuffer, bool Reconnecting,
+    string? PlanSummary, int CapKbps,
+    double Fps, long Dropped, long Duplicated, double Speed,
+    double RecentKbps, double AverageKbps,
+    TimeSpan LiveFor, TimeSpan RecordingFor,
+    string Health, string? LastError);
+
+public sealed class EngineMessageEventArgs(string text, bool isError) : EventArgs
+{
+    public string Text { get; } = text;
+    public bool IsError { get; } = isError;
+}
+
+/// <summary>
+/// Orchestrates one ffmpeg pipeline: capture → composite → single encode → (RTMP + segment cache) + preview.
+/// Handles reconnects, bandwidth adaptation, recording and replay. All public operations are serialized.
+/// </summary>
+public sealed class StreamEngine : IDisposable
+{
+    private readonly IAudioBridge _audio;
+    private readonly IPlatformServices _platform;
+    private readonly SegmentCache _cache;
+    private readonly string _logDir;
+    private readonly string _tempDir;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly CancellationTokenSource _life = new();
+
+    private FfmpegRunner? _runner;
+    private bool _runnerEncodes, _runnerStreams;
+    private ProgressInfo? _lastProgress;
+    private readonly Queue<(DateTime t, ProgressInfo p)> _progressWindow = new();
+    private CancellationTokenSource? _reconnectCts;
+    private int _reconnectAttempt;
+    private DateTime? _liveSince;
+    private DateTime _lastAdjust = DateTime.MinValue;
+    private double _bitrateScale = 1.0;
+    private readonly HashSet<long> _countedSegments = new();
+    private long _liveBytes;
+    private string? _lastError;
+    private string _health = "Idle";
+
+    public string? FfmpegPath { get; set; }
+    /// <summary>Optional input substitution (used by tests and non-Windows hosts).</summary>
+    public Func<StudioSource, InputSpec?>? InputOverride { get; set; }
+    public IReadOnlyList<ProbedEncoder> Encoders { get; private set; } = Array.Empty<ProbedEncoder>();
+    public bool EncodersProbed { get; private set; }
+    public StudioScene? Scene { get; private set; }
+    public StudioSettings Settings { get; private set; } = new();
+    private string _streamKey = "";
+
+    public bool PreviewOn { get; private set; }
+    public bool Live { get; private set; }
+    public bool ReplayBuffer { get; private set; }
+    public bool Recording => _cache.IsRecording;
+    public bool Running => _runner is not null;
+    public bool Reconnecting => _reconnectCts is not null;
+    public EncodePlan? CurrentPlan { get; private set; }
+
+    public event Action<byte[]>? FrameReady;
+    public event EventHandler<EngineMessageEventArgs>? Message;
+    public event Action<EngineStatus>? StatusChanged;
+    /// <summary>Raised when the engine itself turns a mode off (e.g. stream failed and won't reconnect).</summary>
+    public event Action? ModesChanged;
+
+    public int PreviewWidth => 640;
+    public int PreviewHeight => 360;
+
+    public StreamEngine(IAudioBridge audio, IPlatformServices platform, string dataRoot)
+    {
+        _audio = audio;
+        _platform = platform;
+        _cache = new SegmentCache(Path.Combine(dataRoot, "cache", "segments"));
+        _logDir = Path.Combine(dataRoot, "logs");
+        _tempDir = Path.Combine(dataRoot, "cache", "overlays");
+        Directory.CreateDirectory(_tempDir);
+        _ = Task.Run(MonitorLoopAsync);
+    }
+
+    public async Task ProbeEncodersAsync()
+    {
+        if (FfmpegPath is null) return;
+        try { Encoders = await EncoderCatalog.ProbeAsync(FfmpegPath, _life.Token); }
+        catch { Encoders = Array.Empty<ProbedEncoder>(); }
+        EncodersProbed = true;
+    }
+
+    public EncodePlan PlanFor(StudioSettings s)
+    {
+        var plan = SmartTuner.Resolve(s, Encoders, Environment.ProcessorCount);
+        if (_bitrateScale < 0.999)
+        {
+            int cap = Math.Max(1000, (int)(plan.CapKbps * _bitrateScale));
+            plan = plan with { CapKbps = cap, Reasons = plan.Reasons.Append($"Lowered to {cap} kbps because the connection was struggling.").ToList() };
+        }
+        return plan;
+    }
+
+    // ------------------------------------------------------------------ public operations
+
+    public Task UpdateAsync(StudioScene scene, StudioSettings settings, string streamKey, bool restartIfRunning) => Locked(async () =>
+    {
+        bool sceneChanged = !ReferenceEquals(scene, Scene);
+        Scene = scene;
+        Settings = settings.Clone();
+        _streamKey = streamKey ?? "";
+        // Audio devices are only opened while the engine runs (no "app is using your microphone" at idle).
+        if (_runner is not null) _audio.Configure(AudioSources());
+        if (_runner is not null && (restartIfRunning || sceneChanged)) await RestartAsync();
+    });
+
+    public Task SetPreviewAsync(bool on) => Locked(async () => { PreviewOn = on; await ReconcileAsync(); });
+
+    public Task StartLiveAsync() => Locked(async () =>
+    {
+        if (string.IsNullOrWhiteSpace(_streamKey))
+            throw new InvalidOperationException("Add your stream key in Settings first.");
+        if (string.IsNullOrWhiteSpace(Settings.ServerUrl))
+            throw new InvalidOperationException("Add the stream server URL in Settings first.");
+        Live = true;
+        _bitrateScale = 1.0;
+        _liveSince = DateTime.UtcNow;
+        _countedSegments.Clear();
+        _liveBytes = 0;
+        _reconnectAttempt = 0;
+        await ReconcileAsync(requireSuccess: true);
+    });
+
+    public Task StopLiveAsync() => Locked(async () =>
+    {
+        Live = false;
+        _liveSince = null;
+        CancelReconnect();
+        await ReconcileAsync();
+    });
+
+    public Task StartRecordingAsync() => Locked(async () =>
+    {
+        if (_cache.IsRecording) return;
+        _cache.StartRecording();
+        try { await ReconcileAsync(requireSuccess: true); }
+        catch { try { await _cache.StopRecordingAsync(FfmpegPath!, Path.Combine(_tempDir, "discard.mp4")); } catch { } throw; }
+    });
+
+    public async Task<string> StopRecordingAsync()
+    {
+        Task<string>? export = null;
+        await Locked(async () =>
+        {
+            if (!_cache.IsRecording) return;
+            Directory.CreateDirectory(Settings.RecordingFolder);
+            string file = Path.Combine(Settings.RecordingFolder, $"Leapcast {DateTime.Now:yyyy-MM-dd HH-mm-ss}.mp4");
+            export = _cache.StopRecordingAsync(RequireFfmpeg(), file); // captures the range synchronously
+            await ReconcileAsync();
+        });
+        return export is null ? "" : await export;
+    }
+
+    public Task SetReplayBufferAsync(bool on) => Locked(async () => { ReplayBuffer = on; await ReconcileAsync(requireSuccess: on); });
+
+    public async Task<string> SaveReplayAsync()
+    {
+        if (!(_runnerEncodes && _runner is not null))
+            throw new InvalidOperationException("Turn on the replay buffer (or go live / record) first. Replays are cut from the encoded stream.");
+        Directory.CreateDirectory(Settings.RecordingFolder);
+        string file = Path.Combine(Settings.RecordingFolder, $"Replay {DateTime.Now:yyyy-MM-dd HH-mm-ss}.mp4");
+        return await _cache.SaveReplayAsync(RequireFfmpeg(), Math.Clamp(Settings.ReplaySeconds, 5, 600), file);
+    }
+
+    public async Task StopAllAsync()
+    {
+        await Locked(async () =>
+        {
+            Live = false; ReplayBuffer = false; PreviewOn = false;
+            CancelReconnect();
+            await StopRunnerAsync();
+        });
+        if (_cache.IsRecording) { try { await StopRecordingAsync(); } catch { } }
+    }
+
+    // ------------------------------------------------------------------ pipeline management
+
+    private List<StudioSource> AudioSources() =>
+        Scene?.Sources.Where(s => s.Visible && SourceTypes.IsAudio(SourceTypes.KindOf(s.Type))).ToList() ?? new List<StudioSource>();
+
+    private (bool run, bool encode, bool stream) Desired()
+    {
+        bool encode = Live || ReplayBuffer || _cache.IsRecording;
+        return (PreviewOn || encode, encode, Live);
+    }
+
+    private async Task ReconcileAsync(bool requireSuccess = false)
+    {
+        var (run, encode, stream) = Desired();
+        if (!run) { await StopRunnerAsync(); _audio.Configure(Array.Empty<StudioSource>()); Publish(); return; }
+        if (_runner is not null && _runnerEncodes == encode && _runnerStreams == stream) return;
+        await StopRunnerAsync();
+        await StartRunnerAsync(requireSuccess);
+    }
+
+    private async Task RestartAsync()
+    {
+        await StopRunnerAsync();
+        if (Desired().run) await StartRunnerAsync(false);
+    }
+
+    private string RequireFfmpeg() =>
+        FfmpegPath ?? throw new InvalidOperationException("FFmpeg wasn't found. Reinstall Leapcast or set the FFmpeg path in Settings → Advanced.");
+
+    private async Task StartRunnerAsync(bool requireSuccess)
+    {
+        var ffmpeg = RequireFfmpeg();
+        if (Scene is null) throw new InvalidOperationException("No scene selected.");
+        var (_, encode, stream) = Desired();
+        var plan = PlanFor(Settings);
+        CurrentPlan = plan;
+
+        // Pre-render text overlays.
+        var rendered = new Dictionary<Guid, string>();
+        foreach (var s in Scene.Sources.Where(s => s.Visible && SourceTypes.KindOf(s.Type) == SourceKind.Text))
+        {
+            try { if (_platform.RenderText(s, plan.Height) is { } png) rendered[s.Id] = png; } catch { }
+        }
+
+        _audio.Configure(AudioSources());
+        IReadOnlyDictionary<Guid, string> pipes = new Dictionary<Guid, string>();
+        if (encode) pipes = _audio.OpenPipes();
+        string? segPattern = encode ? _cache.BeginSession() : null;
+
+        var request = new PipelineRequest
+        {
+            Sources = Scene.Sources.ToList(),
+            Plan = plan,
+            StreamUrl = stream ? Platforms.BuildUrl(Settings.ServerUrl, _streamKey) : null,
+            SegmentPattern = segPattern,
+            SegmentSeconds = _cache.SegmentSeconds,
+            Preview = true,
+            PreviewWidth = PreviewWidth, PreviewHeight = PreviewHeight,
+            AudioInputs = pipes,
+            RenderedImages = rendered,
+            MonitorBounds = _platform.MonitorBounds,
+            AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
+            WallclockOrigin = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
+            InputOverride = InputOverride,
+        };
+        var spec = PipelineBuilder.Build(request);
+        foreach (var w in spec.Warnings) Message?.Invoke(this, new EngineMessageEventArgs(w, false));
+
+        var runner = new FfmpegRunner(ffmpeg, spec.Args, PreviewWidth, PreviewHeight, Path.Combine(_logDir, "ffmpeg-last.log"));
+        runner.Frame += f => FrameReady?.Invoke(f);
+        runner.Progress += p =>
+        {
+            _lastProgress = p;
+            lock (_progressWindow)
+            {
+                _progressWindow.Enqueue((DateTime.UtcNow, p));
+                while (_progressWindow.Count > 15) _progressWindow.Dequeue();
+            }
+        };
+        _runner = runner;
+        _runnerEncodes = encode;
+        _runnerStreams = stream;
+        _lastProgress = null;
+        lock (_progressWindow) _progressWindow.Clear();
+        _health = stream ? "Connecting…" : "Running";
+        _ = runner.Completion.ContinueWith(t => OnRunnerExited(runner, t.Result), TaskScheduler.Default);
+
+        if (requireSuccess)
+        {
+            // Give ffmpeg a moment: device/encoder/RTMP errors surface within the first seconds.
+            await Task.WhenAny(runner.Completion, WaitForFirstFrameAsync(runner, TimeSpan.FromSeconds(12)));
+            if (runner.Completion.IsCompleted && !runner.StopRequested)
+            {
+                string err = Explain(runner.ErrorSummary());
+                await StopRunnerAsync();
+                if (stream) { Live = false; _liveSince = null; }
+                else if (encode) ReplayBuffer = false;
+                // If only going live failed (bad key, no internet), keep preview/recording alive.
+                if (stream && Desired().run)
+                {
+                    try { await StartRunnerAsync(false); } catch { }
+                }
+                Publish();
+                throw new InvalidOperationException(err);
+            }
+        }
+        Publish();
+    }
+
+    private async Task WaitForFirstFrameAsync(FfmpegRunner runner, TimeSpan timeout)
+    {
+        var until = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < until && !runner.Completion.IsCompleted)
+        {
+            if (_runner == runner && _lastProgress is { Frame: > 0 }) { await Task.Delay(1500); return; }
+            await Task.Delay(200);
+        }
+    }
+
+    private async Task StopRunnerAsync()
+    {
+        var r = _runner;
+        if (r is null) return;
+        _runner = null;
+        await r.StopAsync();
+        r.Dispose();
+        if (_runnerEncodes) { _cache.EndSession(); _audio.ClosePipes(); }
+        _runnerEncodes = _runnerStreams = false;
+        _lastProgress = null;
+        _health = "Idle";
+    }
+
+    private void OnRunnerExited(FfmpegRunner runner, int code)
+    {
+        if (runner.StopRequested) return;
+        _ = Locked(async () =>
+        {
+            if (_runner != runner) return; // already replaced
+            string err = Explain(runner.ErrorSummary());
+            var ranFor = DateTime.UtcNow - runner.StartedUtc;
+            bool wasStreaming = _runnerStreams;
+            await StopRunnerAsync();
+            _lastError = err;
+
+            if (wasStreaming && Live && Settings.AutoReconnect && ranFor > TimeSpan.FromSeconds(8))
+            {
+                if (ranFor > TimeSpan.FromSeconds(60)) _reconnectAttempt = 0;
+                int delay = new[] { 2, 4, 8, 15, 30 }[Math.Min(_reconnectAttempt, 4)];
+                _reconnectAttempt++;
+                Message?.Invoke(this, new EngineMessageEventArgs($"Stream dropped ({err}). Reconnecting in {delay}s…", true));
+                ScheduleReconnect(TimeSpan.FromSeconds(delay));
+            }
+            else
+            {
+                if (wasStreaming) { Live = false; _liveSince = null; }
+                Message?.Invoke(this, new EngineMessageEventArgs(err, true));
+                // keep recording/replay/preview going without the stream if possible
+                if (Desired().run && ranFor > TimeSpan.FromSeconds(8))
+                {
+                    try { await StartRunnerAsync(false); } catch (Exception ex) { Message?.Invoke(this, new EngineMessageEventArgs(ex.Message, true)); }
+                }
+                else
+                {
+                    PreviewOn = false; ReplayBuffer = false;
+                    if (!Desired().run) _audio.Configure(Array.Empty<StudioSource>());
+                }
+                ModesChanged?.Invoke();
+            }
+            Publish();
+        });
+    }
+
+    private void ScheduleReconnect(TimeSpan delay)
+    {
+        CancelReconnect();
+        var cts = new CancellationTokenSource();
+        _reconnectCts = cts;
+        _health = "Reconnecting…";
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(delay, cts.Token); } catch { return; }
+            await Locked(async () =>
+            {
+                if (cts.IsCancellationRequested || !Live) return;
+                _reconnectCts = null;
+                try { await StartRunnerAsync(false); }
+                catch (Exception ex)
+                {
+                    Message?.Invoke(this, new EngineMessageEventArgs("Reconnect failed: " + ex.Message, true));
+                    ScheduleReconnect(TimeSpan.FromSeconds(15));
+                }
+            });
+        });
+    }
+
+    private void CancelReconnect()
+    {
+        _reconnectCts?.Cancel();
+        _reconnectCts = null;
+    }
+
+    // ------------------------------------------------------------------ monitoring / adaptation
+
+    private async Task MonitorLoopAsync()
+    {
+        while (!_life.IsCancellationRequested)
+        {
+            try { await Task.Delay(1000, _life.Token); } catch { return; }
+            try
+            {
+                _cache.Housekeep(Math.Clamp(Settings.ReplaySeconds, 5, 600));
+                if (Live && _runnerStreams)
+                {
+                    foreach (var s in _cache.Scan())
+                        if (s.Closed && s.Size > 0 && _countedSegments.Add(s.Key)) _liveBytes += s.Size;
+                }
+                EvaluateHealth();
+                Publish();
+            }
+            catch { /* never let monitoring kill the app */ }
+        }
+    }
+
+    /// <summary>Rolling (not since-start) output fps and speed over the last ~15 s of progress reports.</summary>
+    private (double fps, double speed, int samples) WindowedRates()
+    {
+        (DateTime t, ProgressInfo p)[] w;
+        lock (_progressWindow) w = _progressWindow.ToArray();
+        if (w.Length < 2) return (0, 0, w.Length);
+        double dt = (w[^1].t - w[0].t).TotalSeconds;
+        if (dt < 0.5) return (0, 0, w.Length);
+        double fps = (w[^1].p.Frame - w[0].p.Frame) / dt;
+        double speed = (w[^1].p.OutTime - w[0].p.OutTime).TotalSeconds / dt;
+        return (fps, speed, w.Length);
+    }
+
+    private void EvaluateHealth()
+    {
+        var r = _runner;
+        if (r is null) { if (!Reconnecting) _health = "Idle"; return; }
+        var (fps, speed, samples) = WindowedRates();
+        if (samples < 3) return;
+        // With wall-clock input timestamps the output can only fall behind real time when the encoder or the
+        // network can't keep up, so "output seconds per real second" is the honest congestion signal.
+        bool struggling = samples >= 8 && speed > 0 && speed < 0.95;
+        double expected = CurrentPlan?.Fps ?? 30;
+        bool bad = fps > 0 && fps < expected * 0.9;
+
+        if (!struggling)
+        {
+            _health = _runnerStreams ? (bad ? "OK (frame rate dipping)" : "Excellent") : (bad ? "Running (frame rate dipping)" : "Running");
+            return;
+        }
+        _health = "Struggling: output is falling behind real time";
+        if (_runnerStreams && Live && Settings.AutoAdjustBitrate
+            && DateTime.UtcNow - r.StartedUtc > TimeSpan.FromSeconds(20)
+            && DateTime.UtcNow - _lastAdjust > TimeSpan.FromSeconds(60)
+            && (CurrentPlan?.CapKbps ?? 0) > 1200)
+        {
+            _lastAdjust = DateTime.UtcNow;
+            _bitrateScale *= 0.75;
+            _ = Locked(async () =>
+            {
+                if (!Live || _runner is null) return;
+                Message?.Invoke(this, new EngineMessageEventArgs(
+                    "Your connection or encoder couldn't keep up, so the bitrate cap was lowered 25%. The stream will blink for a second.", true));
+                await RestartAsync();
+            });
+        }
+    }
+
+    public EngineStatus Snapshot()
+    {
+        var p = _lastProgress;
+        var (wfps, wspeed, _) = WindowedRates();
+        double recent = _runnerEncodes ? _cache.RecentKbps() : 0;
+        double avg = _countedSegments.Count > 0 ? _liveBytes * 8.0 / 1000.0 / (_countedSegments.Count * _cache.SegmentSeconds) : 0;
+        return new EngineStatus(
+            _runner is not null, Live, _cache.IsRecording, ReplayBuffer, Reconnecting,
+            CurrentPlan?.Summary, CurrentPlan?.CapKbps ?? 0,
+            wfps, p?.DroppedFrames ?? 0, p?.DupFrames ?? 0, wspeed,
+            recent, avg,
+            _liveSince is { } ls ? DateTime.UtcNow - ls : TimeSpan.Zero,
+            _cache.RecordingStartedUtc is { } rs ? DateTime.UtcNow - rs : TimeSpan.Zero,
+            _health, _lastError);
+    }
+
+    private void Publish()
+    {
+        try { StatusChanged?.Invoke(Snapshot()); } catch { }
+    }
+
+    /// <summary>Turns raw ffmpeg errors into something a streamer can act on.</summary>
+    public static string Explain(string raw)
+    {
+        string r = raw.Trim();
+        if (r.Contains("Could not find video device", StringComparison.OrdinalIgnoreCase) || r.Contains("Could not enumerate video", StringComparison.OrdinalIgnoreCase))
+            return "Camera not found. Pick it again in the camera source's properties (it may be in use by another app).";
+        if (r.Contains("Could not set video options", StringComparison.OrdinalIgnoreCase))
+            return "The camera doesn't support that resolution/FPS. Choose \"Default\" in the camera's properties.";
+        if (r.Contains("Can't find window", StringComparison.OrdinalIgnoreCase) || r.Contains("title=", StringComparison.OrdinalIgnoreCase) && r.Contains("not found", StringComparison.OrdinalIgnoreCase))
+            return "Game window not found. Open Wizard101 first, or pick the window again in the source's properties.";
+        if (r.Contains("ddagrab", StringComparison.OrdinalIgnoreCase) || r.Contains("DXGI", StringComparison.OrdinalIgnoreCase) || r.Contains("Duplicat", StringComparison.OrdinalIgnoreCase))
+            return "Screen capture failed (" + r + "). Try Capture method \"GDI\" in the display source's properties.";
+        if (r.Contains("Connection refused", StringComparison.OrdinalIgnoreCase) || r.Contains("Connection reset", StringComparison.OrdinalIgnoreCase)
+            || r.Contains("Input/output error", StringComparison.OrdinalIgnoreCase) || r.Contains("Broken pipe", StringComparison.OrdinalIgnoreCase)
+            || r.Contains("Failed to connect", StringComparison.OrdinalIgnoreCase) || r.Contains("Cannot open connection", StringComparison.OrdinalIgnoreCase))
+            return "Couldn't reach the streaming server. Check your internet connection, server URL and stream key.";
+        if (r.Contains("nvenc", StringComparison.OrdinalIgnoreCase) || r.Contains("qsv", StringComparison.OrdinalIgnoreCase) || r.Contains("amf", StringComparison.OrdinalIgnoreCase))
+            return "The hardware encoder failed (" + r + "). Update your GPU driver or choose x264 in Settings.";
+        return r.Length > 300 ? r[..300] + "…" : r;
+    }
+
+    private async Task Locked(Func<Task> action)
+    {
+        await _gate.WaitAsync();
+        try { await action(); }
+        finally { _gate.Release(); }
+    }
+
+    public void Dispose()
+    {
+        _life.Cancel();
+        // Run on the thread pool so a UI SynchronizationContext can't deadlock the wait.
+        try { Task.Run(StopAllAsync).Wait(TimeSpan.FromSeconds(10)); } catch { }
+        _audio.Dispose();
+    }
+}
