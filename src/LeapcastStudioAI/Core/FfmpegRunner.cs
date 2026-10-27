@@ -40,7 +40,9 @@ public sealed class FfmpegRunner : IDisposable
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-                _logFile = new StreamWriter(logPath, false) { AutoFlush = true };
+                // Shared so the log can be opened (Settings → Open log folder) while streaming.
+                var fs = new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                _logFile = new StreamWriter(fs) { AutoFlush = true };
                 _logFile.WriteLine("ffmpeg " + string.Join(" ", args.Select(Quote)));
                 _logFile.WriteLine();
             }
@@ -98,7 +100,9 @@ public sealed class FfmpegRunner : IDisposable
                     if (key == "progress") EmitProgress();
                     continue;
                 }
-                _logFile?.WriteLine(line);
+                bool commandEcho = line.StartsWith("Enter command", StringComparison.Ordinal)
+                    || (line.StartsWith("Command reply", StringComparison.Ordinal) && line.Contains("ret:0", StringComparison.Ordinal));
+                if (!commandEcho) _logFile?.WriteLine(line);
                 if (line.StartsWith("frame=", StringComparison.Ordinal) || line.Contains(" speed=", StringComparison.Ordinal)
                     || string.IsNullOrWhiteSpace(line) || line.StartsWith("Enter command", StringComparison.Ordinal)
                     || (line.StartsWith("Command reply", StringComparison.Ordinal) && line.Contains("ret:0", StringComparison.Ordinal)))
