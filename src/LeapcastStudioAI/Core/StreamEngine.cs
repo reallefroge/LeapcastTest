@@ -7,8 +7,12 @@ public interface IAudioBridge : IDisposable
 {
     /// <summary>Start/stop device captures so they match these sources (also drives the level meters).</summary>
     void Configure(IReadOnlyList<StudioSource> audioSources);
-    /// <summary>Creates a fresh set of pipes for one ffmpeg run. Returns source id → ffmpeg input path.</summary>
-    IReadOnlyDictionary<Guid, string> OpenPipes();
+    /// <summary>
+    /// Creates a fresh set of pipes for one ffmpeg run. Returns source id → ffmpeg input path.
+    /// Each pipe's first sample corresponds to <paramref name="wallclockOrigin"/> (Unix seconds): on connect the
+    /// writer sends silence up to "now", then paces by the wall clock and never skips, so sample count == time.
+    /// </summary>
+    IReadOnlyDictionary<Guid, string> OpenPipes(double wallclockOrigin);
     void ClosePipes();
     /// <summary>Peak level in dBFS (−60 … 0).</summary>
     double LevelDb(Guid sourceId);
@@ -44,6 +48,7 @@ public sealed class StreamEngine : IDisposable
     private readonly IAudioBridge _audio;
     private readonly IPlatformServices _platform;
     private readonly SegmentCache _cache;
+    private readonly CameraBridge _cameras;
     private readonly string _logDir;
     private readonly string _tempDir;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -65,9 +70,12 @@ public sealed class StreamEngine : IDisposable
 
     public string? FfmpegPath { get; set; }
     /// <summary>Optional input substitution (used by tests and non-Windows hosts).</summary>
-    public Func<StudioSource, InputSpec?>? InputOverride { get; set; }
+    public Func<StudioSource, double, InputSpec?>? InputOverride { get; set; }
+    /// <summary>Replaces the webcam device input of the camera reader (tests / non-Windows hosts).</summary>
+    public Func<StudioSource, InputSpec?>? CameraDeviceOverride { get; set; }
     public IReadOnlyList<ProbedEncoder> Encoders { get; private set; } = Array.Empty<ProbedEncoder>();
     public bool EncodersProbed { get; private set; }
+    public bool InputThreadQueueSupported { get; private set; } = true;
     /// <summary>The scene currently on air.</summary>
     public StudioScene? Scene { get; private set; }
     private List<StudioScene> _scenes = new();
@@ -87,6 +95,7 @@ public sealed class StreamEngine : IDisposable
     public EncodePlan? CurrentPlan { get; private set; }
     /// <summary>How many times an ffmpeg pipeline has been started (diagnostics/tests: transitions must not bump it).</summary>
     public int PipelineStarts { get; private set; }
+    public string CameraStats() => _cameras.Stats();
 
     public event Action<byte[]>? FrameReady;
     public event EventHandler<EngineMessageEventArgs>? Message;
@@ -105,6 +114,8 @@ public sealed class StreamEngine : IDisposable
         _logDir = Path.Combine(dataRoot, "logs");
         _tempDir = Path.Combine(dataRoot, "cache", "overlays");
         Directory.CreateDirectory(_tempDir);
+        _cameras = new CameraBridge(Path.Combine(dataRoot, "cache", "pipes"));
+        _cameras.Error += msg => Message?.Invoke(this, new EngineMessageEventArgs(msg, true));
         _ = Task.Run(MonitorLoopAsync);
     }
 
@@ -113,6 +124,10 @@ public sealed class StreamEngine : IDisposable
         if (FfmpegPath is null) return;
         try { Encoders = await EncoderCatalog.ProbeAsync(FfmpegPath, _life.Token); }
         catch { Encoders = Array.Empty<ProbedEncoder>(); }
+        // Feature probe instead of version parsing (builds are named n9.0…, N-12345…, etc.).
+        var (code, _) = await EncoderCatalog.RunQuietAsync(FfmpegPath, new[] { "-hide_banner", "-loglevel", "error",
+            "-thread_queue_size", "16", "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.1", "-f", "null", "-" }, TimeSpan.FromSeconds(10), _life.Token);
+        InputThreadQueueSupported = code == 0;
         EncodersProbed = true;
     }
 
@@ -251,6 +266,7 @@ public sealed class StreamEngine : IDisposable
             Live = false; ReplayBuffer = false; PreviewOn = false;
             CancelReconnect();
             await StopRunnerAsync();
+            _cameras.CloseAll();
         });
         if (_cache.IsRecording) { try { await StopRecordingAsync(); } catch { } }
     }
@@ -268,7 +284,7 @@ public sealed class StreamEngine : IDisposable
     private async Task ReconcileAsync(bool requireSuccess = false)
     {
         var (run, encode, stream) = Desired();
-        if (!run) { await StopRunnerAsync(); _audio.Configure(Array.Empty<StudioSource>()); Publish(); return; }
+        if (!run) { await StopRunnerAsync(); _audio.Configure(Array.Empty<StudioSource>()); _cameras.CloseAll(); Publish(); return; }
         if (_runner is not null && _runnerEncodes == encode && _runnerStreams == stream) return;
         await StopRunnerAsync();
         await StartRunnerAsync(requireSuccess);
@@ -299,8 +315,20 @@ public sealed class StreamEngine : IDisposable
         }
 
         _audio.Configure(AudioSources());
+        double origin = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
         IReadOnlyDictionary<Guid, string> pipes = new Dictionary<Guid, string>();
-        if (encode) pipes = _audio.OpenPipes();
+        if (encode) pipes = _audio.OpenPipes(origin);
+
+        // Webcams: one warm reader per device, fed to this run through counted pipes.
+        var camUses = new Dictionary<string, (InputSpec device, List<StudioSource> uses)>();
+        foreach (var src in _scenes.SelectMany(sc => sc.Sources).Where(x => x.Visible && SourceTypes.KindOf(x.Type) == SourceKind.Camera))
+        {
+            string key = PipelineBuilder.InputKey(src);
+            if (camUses.TryGetValue(key, out var e)) { e.uses.Add(src); continue; }
+            var dev = CameraDeviceOverride?.Invoke(src) ?? PipelineBuilder.CameraDeviceInput(src);
+            if (dev is not null) camUses[key] = (dev, new List<StudioSource> { src });
+        }
+        var camFeeds = _cameras.Open(ffmpeg, camUses, plan.Width, plan.Height, plan.Fps, origin);
         string? segPattern = encode ? _cache.BeginSession() : null;
 
         var request = new PipelineRequest
@@ -317,8 +345,10 @@ public sealed class StreamEngine : IDisposable
             RenderedImages = rendered,
             MonitorBounds = _platform.MonitorBounds,
             AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
-            WallclockOrigin = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
+            WallclockOrigin = origin,
             InputOverride = InputOverride,
+            InputThreadQueueSupported = InputThreadQueueSupported,
+            CameraInputs = camFeeds,
         };
         var spec = PipelineBuilder.Build(request);
         _runnerSpec = spec;
@@ -387,6 +417,7 @@ public sealed class StreamEngine : IDisposable
         await r.StopAsync();
         r.Dispose();
         if (_runnerEncodes) { _cache.EndSession(); _audio.ClosePipes(); }
+        _cameras.ClosePipes(); // readers stay open (warm) for the next run
         _runnerEncodes = _runnerStreams = false;
         _lastProgress = null;
         _health = "Idle";
@@ -424,7 +455,7 @@ public sealed class StreamEngine : IDisposable
                 else
                 {
                     PreviewOn = false; ReplayBuffer = false;
-                    if (!Desired().run) _audio.Configure(Array.Empty<StudioSource>());
+                    if (!Desired().run) { _audio.Configure(Array.Empty<StudioSource>()); _cameras.CloseAll(); }
                 }
                 ModesChanged?.Invoke();
             }
@@ -587,5 +618,6 @@ public sealed class StreamEngine : IDisposable
         // Run on the thread pool so a UI SynchronizationContext can't deadlock the wait.
         try { Task.Run(StopAllAsync).Wait(TimeSpan.FromSeconds(10)); } catch { }
         _audio.Dispose();
+        _cameras.Dispose();
     }
 }

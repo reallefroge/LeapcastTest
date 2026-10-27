@@ -40,8 +40,13 @@ public sealed class PipelineRequest
     public double WallclockOrigin { get; init; }
 
     /// <summary>Test/alternate platform hook: return an input for a source instead of the Windows device input.</summary>
-    public Func<StudioSource, InputSpec?>? InputOverride { get; init; }
+    /// <remarks>Receives the wall-clock origin so sample/frame-counted inputs can be aligned to it.</remarks>
+    public Func<StudioSource, double, InputSpec?>? InputOverride { get; init; }
     public bool IsWindows { get; init; } = OperatingSystem.IsWindows();
+    /// <summary>Older ffmpeg needs per-input -thread_queue_size for live capture; newest builds removed the input option.</summary>
+    public bool InputThreadQueueSupported { get; init; } = true;
+    /// <summary>Camera input key → counted raw-video pipe from the <see cref="CameraBridge"/>.</summary>
+    public IReadOnlyDictionary<string, CameraBridge.CameraFeed> CameraInputs { get; init; } = new Dictionary<string, CameraBridge.CameraFeed>();
 }
 
 /// <summary>A per-device audio gain stage whose level differs between scenes (crossfaded on scene switch).</summary>
@@ -130,7 +135,7 @@ public static class PipelineBuilder
                 if (failedKeys.Contains(key)) continue;
                 if (!inputs.ContainsKey(key))
                 {
-                    var spec = r.InputOverride?.Invoke(s) ?? VideoInput(s, kind, r, warned.Add(s.Id) ? warnings : new List<string>());
+                    var spec = r.InputOverride?.Invoke(s, r.WallclockOrigin) ?? CameraFeedInput(s, kind, key, r) ?? VideoInput(s, kind, r, warned.Add(s.Id) ? warnings : new List<string>());
                     if (spec is null) { failedKeys.Add(key); continue; }
                     args.AddRange(WithWallclock(spec));
                     inputs[key] = (inputCount++, spec.Wallclock, new List<string>());
@@ -255,9 +260,11 @@ public static class PipelineBuilder
             {
                 var kind = SourceTypes.KindOf(rep.Type);
                 string key = InputKey(rep);
-                InputSpec? spec = r.InputOverride?.Invoke(rep);
+                InputSpec? spec = r.InputOverride?.Invoke(rep, r.WallclockOrigin);
+                // Audio pipes are sample-counted from the shared origin (the writer pads silence up to "now" on
+                // connect), so their timestamps stay exact even when ffmpeg pauses reading an input that runs ahead.
                 if (spec is null && r.AudioInputs.TryGetValue(rep.Id, out var path))
-                    spec = new InputSpec(new[] { "-f", "f32le", "-ar", "48000", "-ac", "2", "-thread_queue_size", "1024", "-i", path }, true);
+                    spec = new InputSpec(new[] { "-f", "f32le", "-ar", "48000", "-ac", "2", "-thread_queue_size", "1024", "-i", path }, false);
                 if (spec is null) { warnings.Add($"\"{rep.Name}\": audio device unavailable, skipped."); continue; }
                 args.AddRange(WithWallclock(spec));
                 int idx = inputCount++;
@@ -297,6 +304,11 @@ public static class PipelineBuilder
                           "alimiter=limit=0.95:level=0[aout]");
         }
 
+        if (!r.InputThreadQueueSupported)
+        {
+            for (int i = args.Count - 2; i >= 0; i--)
+                if (args[i] == "-thread_queue_size") args.RemoveRange(i, 2);
+        }
         string filterGraph = string.Join(";", graph);
         args.AddRange(new[] { "-filter_complex", filterGraph });
 
@@ -364,6 +376,28 @@ public static class PipelineBuilder
         return list;
     }
 
+    private static InputSpec? CameraFeedInput(StudioSource s, SourceKind kind, string key, PipelineRequest r)
+    {
+        if (kind != SourceKind.Camera || !r.CameraInputs.TryGetValue(key, out var feed)) return null;
+        // Frame-counted from the shared origin: exact timestamps however ffmpeg schedules its reads.
+        // Each sampled picture left the camera ~100 ms earlier (reader process + sampling, measured), so shift it back.
+        double shift = -(CameraBridge.PathLatencySeconds + s.SyncOffsetMs / 1000.0);
+        return new InputSpec(new[] { "-itsoffset", I(shift), "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", $"{feed.Width}x{feed.Height}",
+            "-framerate", I(r.Plan.Fps), "-thread_queue_size", "64", "-i", feed.Path }, false);
+    }
+
+    /// <summary>The DirectShow input for a webcam (opened by the camera reader process, not the main pipeline).</summary>
+    public static InputSpec? CameraDeviceInput(StudioSource s)
+    {
+        if (string.IsNullOrWhiteSpace(s.DeviceName) || !OperatingSystem.IsWindows()) return null;
+        var c = new List<string> { "-f", "dshow", "-rtbufsize", "64M" };
+        if (!string.IsNullOrWhiteSpace(s.CameraResolution) && s.CameraResolution != "Default")
+            c.AddRange(new[] { "-video_size", s.CameraResolution.Replace("×", "x").Replace(" ", "") });
+        if (s.CameraFps > 0) c.AddRange(new[] { "-framerate", I(s.CameraFps) });
+        c.AddRange(new[] { "-i", "video=" + s.DeviceName });
+        return new InputSpec(c, false);
+    }
+
     private static InputSpec? VideoInput(StudioSource s, SourceKind kind, PipelineRequest r, List<string> warnings)
     {
         int F = r.Plan.Fps;
@@ -405,12 +439,14 @@ public static class PipelineBuilder
             case SourceKind.Image:
                 if (string.IsNullOrWhiteSpace(s.FilePath) || !File.Exists(s.FilePath))
                 { warnings.Add($"\"{s.Name}\": image file not found, skipped."); return null; }
-                return new InputSpec(new[] { "-re", "-loop", "1", "-framerate", "2", "-i", s.FilePath }, false);
+                // A single frame; the overlay repeats it forever (eof_action=repeat). A paced image loop would make
+                // every overlay above it wait for the next image frame and stall the live layers.
+                return new InputSpec(new[] { "-i", s.FilePath }, false);
 
             case SourceKind.Text:
                 if (!r.RenderedImages.TryGetValue(s.Id, out var png) || !File.Exists(png))
                 { warnings.Add($"\"{s.Name}\": text is empty, skipped."); return null; }
-                return new InputSpec(new[] { "-re", "-loop", "1", "-framerate", "2", "-i", png }, false);
+                return new InputSpec(new[] { "-i", png }, false);
         }
         return null;
     }

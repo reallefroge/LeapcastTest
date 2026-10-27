@@ -154,7 +154,7 @@ public sealed class WasapiAudioBridge : IAudioBridge
         capture.StartRecording();
     }
 
-    public IReadOnlyDictionary<Guid, string> OpenPipes()
+    public IReadOnlyDictionary<Guid, string> OpenPipes(double wallclockOrigin)
     {
         ClosePipes();
         var cts = new CancellationTokenSource();
@@ -171,7 +171,7 @@ public sealed class WasapiAudioBridge : IAudioBridge
                     PipeOptions.Asynchronous, 0, 1 << 16);
                 feed.Pipe = pipe;
                 var f = feed;
-                feed.Writer = new Thread(() => PipeWriter(f, pipe, cts.Token))
+                feed.Writer = new Thread(() => PipeWriter(f, pipe, wallclockOrigin, cts.Token))
                 {
                     IsBackground = true, Name = "Leapcast audio " + feed.Name, Priority = ThreadPriority.AboveNormal
                 };
@@ -182,7 +182,9 @@ public sealed class WasapiAudioBridge : IAudioBridge
         return map;
     }
 
-    private static void PipeWriter(Feed feed, NamedPipeServerStream pipe, CancellationToken ct)
+    private static double NowUnix() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+
+    private static void PipeWriter(Feed feed, NamedPipeServerStream pipe, double origin, CancellationToken ct)
     {
         const int chunk = 480; // 10 ms
         var samples = new float[chunk * 2];
@@ -190,16 +192,27 @@ public sealed class WasapiAudioBridge : IAudioBridge
         {
             pipe.WaitForConnectionAsync(ct).GetAwaiter().GetResult();
             feed.Buffer?.ClearBuffer(); // don't send audio that piled up while ffmpeg was starting
+
+            // Sample 0 == the pipeline's time origin. One clock, anchored to wall time *before* padding, so the
+            // sample count equals the timeline regardless of how long ffmpeg takes to read the padding.
+            double wallAtStart = NowUnix();
             var clock = Stopwatch.StartNew();
             long written = 0;
+            long lead = Math.Max(0, (long)((wallAtStart - origin) * Rate));
+            lead -= lead % chunk;
+            var silence = new byte[chunk * 2 * sizeof(float)];
+            while (written < lead && !ct.IsCancellationRequested) { pipe.Write(silence); written += chunk; }
+            // device audio captured while the padding was going out belongs right after it: keep it
             while (!ct.IsCancellationRequested)
             {
-                long due = (long)(clock.Elapsed.TotalSeconds * Rate);
-                if (due - written > Rate / 2) written = due - chunk * 4; // stalled >0.5 s: skip ahead instead of bursting
+                // Never skip: if ffmpeg paused reading, the backlog is written later with the samples captured
+                // meanwhile, so every sample keeps its true timestamp.
+                long due = (long)((wallAtStart + clock.Elapsed.TotalSeconds - origin) * Rate);
 
-                // Device clock faster than ours? Trim the backlog so latency can't creep up over a long stream.
+                // In steady state, a growing device buffer means the device clock runs fast: trim it so latency
+                // can't creep up over a long stream. (Not while catching up: that backlog is real, timed audio.)
                 var buf = feed.Buffer;
-                if (buf is not null && buf.BufferedDuration > TimeSpan.FromMilliseconds(150))
+                if (buf is not null && due - written <= chunk * 2 && buf.BufferedDuration > TimeSpan.FromMilliseconds(150))
                 {
                     int drop = buf.WaveFormat.AverageBytesPerSecond / 20; // 50 ms
                     drop -= drop % buf.WaveFormat.BlockAlign;

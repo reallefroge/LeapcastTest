@@ -203,18 +203,48 @@ public sealed class SegmentCache
         return last.Sum(s => s.Size) * 8.0 / 1000.0 / (last.Count * SegmentSeconds);
     }
 
+    /// <summary>
+    /// Joins segments into an MP4 without touching timestamps: segments of one encoder session are appended
+    /// byte-for-byte (MPEG-TS is designed for that, and the segment muxer kept continuous timestamps), then sessions
+    /// are joined and remuxed. Re-timing every 2 s segment (concat demuxer) leaves tiny audio gaps that MP4 turns
+    /// into progressive A/V drift.
+    /// </summary>
     public static async Task ConcatAsync(string ffmpeg, IReadOnlyList<Segment> segs, string outputPath, CancellationToken ct)
     {
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(outputPath))!);
-        string list = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"leapcast-concat-{Guid.NewGuid():N}.txt");
-        await File.WriteAllLinesAsync(list, segs.Select(s => "file '" + s.Path.Replace('\\', '/').Replace("'", "'\\''") + "'"), ct);
+        string work = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"leapcast-export-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(work);
         try
         {
-            var args = new[] { "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", list,
-                "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", outputPath };
+            var sessionFiles = new List<string>();
+            foreach (var group in segs.GroupBy(x => x.Session).OrderBy(g => g.Key))
+            {
+                string joined = System.IO.Path.Combine(work, $"session_{group.Key:0000}.ts");
+                await using (var outStream = new FileStream(joined, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, true))
+                {
+                    foreach (var seg in group.OrderBy(x => x.Number))
+                    {
+                        await using var inStream = new FileStream(seg.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 20, true);
+                        await inStream.CopyToAsync(outStream, ct);
+                    }
+                }
+                sessionFiles.Add(joined);
+            }
+
+            List<string> args;
+            if (sessionFiles.Count == 1)
+                args = new() { "-hide_banner", "-loglevel", "error", "-y", "-i", sessionFiles[0] };
+            else
+            {
+                // pipeline restarts during a recording: join the (few) sessions end to end
+                string list = System.IO.Path.Combine(work, "sessions.txt");
+                await File.WriteAllLinesAsync(list, sessionFiles.Select(f => "file '" + f.Replace('\\', '/').Replace("'", "'\\''") + "'"), ct);
+                args = new() { "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", list };
+            }
+            args.AddRange(new[] { "-map", "0", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", outputPath });
             var (code, err) = await EncoderCatalog.RunQuietAsync(ffmpeg, args, TimeSpan.FromMinutes(30), ct);
             if (code != 0) throw new InvalidOperationException("Could not write the video file: " + err.Trim());
         }
-        finally { try { File.Delete(list); } catch { } }
+        finally { try { Directory.Delete(work, true); } catch { } }
     }
 }

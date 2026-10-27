@@ -74,6 +74,8 @@
           </ComboBox>
           <CheckBox x:Name="DenoiseBox" Content="Smart denoise (removes sensor grain: big bandwidth saver in dim rooms)"/>
           <CheckBox x:Name="MirrorBox" Content="Mirror"/>
+          <TextBlock Text="Sync offset (ms): raise it if your lips move after you're heard" Style="{StaticResource FieldLabel}"/>
+          <TextBox x:Name="SyncOffsetBox"/>
         </StackPanel>
 
         <!-- Image -->

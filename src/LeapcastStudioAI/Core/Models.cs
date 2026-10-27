@@ -90,6 +90,8 @@ public sealed class StudioSource
     /// <summary>Temporal denoise before encoding. Webcam sensor noise is one of the biggest bitrate wasters.</summary>
     public bool CameraDenoise { get; set; } = true;
     public bool Mirror { get; set; }
+    /// <summary>Extra camera delay compensation in ms (positive = camera shown earlier), like OBS's sync offset.</summary>
+    public int SyncOffsetMs { get; set; }
 
     // Image / text
     public string FilePath { get; set; } = "";

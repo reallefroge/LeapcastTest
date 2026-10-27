@@ -59,6 +59,7 @@ public partial class SourcePropertiesWindow : Window
         SelectTag(CamFpsBox, source.CameraFps.ToString(CultureInfo.InvariantCulture));
         DenoiseBox.IsChecked = source.CameraDenoise;
         MirrorBox.IsChecked = source.Mirror;
+        SyncOffsetBox.Text = source.SyncOffsetMs.ToString(CultureInfo.InvariantCulture);
         if (_kind == SourceKind.Camera) _ = LoadCamerasAsync();
 
         // Image / text
@@ -186,6 +187,7 @@ public partial class SourcePropertiesWindow : Window
         s.CameraFps = Int(TagOf(CamFpsBox, "0"), 0, 0, 120);
         s.CameraDenoise = DenoiseBox.IsChecked == true;
         s.Mirror = MirrorBox.IsChecked == true;
+        s.SyncOffsetMs = Int(SyncOffsetBox.Text, 0, -1000, 2000);
         s.FilePath = ImageBox.Text.Trim();
         s.Text = TextContentBox.Text;
         s.FontSize = Dbl(FontSizeBox.Text, 44, 8, 300);
