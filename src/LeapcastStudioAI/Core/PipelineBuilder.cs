@@ -15,15 +15,23 @@ public sealed class PipelineRequest
     public IReadOnlyList<StudioSource>? Sources { get; init; }
     public required EncodePlan Plan { get; init; }
 
-    /// <summary>Full RTMP(S) URL including key. Null = not live.</summary>
-    public string? StreamUrl { get; init; }
+    /// <summary>TS bus the main (horizontal) encode streams into for multistream outputs. Null = none.</summary>
+    public string? MainBusPath { get; init; }
+    /// <summary>Vertical (9:16) canvas: composited when set; encoded to <see cref="VerticalBusPath"/> when that is set.</summary>
+    public (int W, int H)? VerticalCanvas { get; init; }
+    public EncodePlan? VerticalPlan { get; init; }
+    public string? VerticalBusPath { get; init; }
+    /// <summary>Outputs with their own quality: an extra encode of a canvas at their own bitrate.</summary>
+    public IReadOnlyList<(string BusPath, bool Vertical, EncodePlan Plan)> ExtraEncodes { get; init; } = Array.Empty<(string, bool, EncodePlan)>();
+    /// <summary>Known source picture sizes (input key → w×h), for exact vertical auto-layout positions.</summary>
+    public IReadOnlyDictionary<string, (int W, int H)> KnownSizes { get; init; } = new Dictionary<string, (int, int)>();
     /// <summary>Segment file pattern (e.g. C:/…/seg_%06d.ts). Null = no recording/replay cache.</summary>
     public string? SegmentPattern { get; init; }
     public int SegmentSeconds { get; init; } = 2;
 
     public bool Preview { get; init; } = true;
-    public int PreviewWidth { get; init; } = 640;
-    public int PreviewHeight { get; init; } = 360;
+    public int PreviewWidth { get; init; } = 768;
+    public int PreviewHeight { get; init; } = 432;
     public int PreviewFps { get; init; } = 30;
 
     /// <summary>Audio source id → raw f32le 48 kHz stereo input path (Windows named pipe).
@@ -64,7 +72,14 @@ public sealed record PipelineSpec(
     bool HasPreview,
     string FilterGraph,
     int SceneCount,
-    IReadOnlyList<AudioGainStage> AudioGains);
+    IReadOnlyList<AudioGainStage> AudioGains)
+{
+    public bool HasVertical { get; init; }
+    /// <summary>ffmpeg input index → input key (to learn real picture sizes from ffmpeg's log).</summary>
+    public IReadOnlyDictionary<int, string> InputKeys { get; init; } = new Dictionary<int, string>();
+    /// <summary>Preview frame layout: horizontal part width, vertical part width (0 if none), height.</summary>
+    public (int HW, int VW, int H) PreviewLayout { get; init; }
+}
 
 public static class PipelineBuilder
 {
@@ -121,6 +136,8 @@ public static class PipelineBuilder
         return list;
     }
 
+    public static string OverlayName(Guid id, CanvasKind canvas) => (canvas == CanvasKind.Horizontal ? "overlay@h" : "overlay@v") + id.ToString("N");
+
     public static PipelineSpec Build(PipelineRequest r)
     {
         var plan = r.Plan;
@@ -130,47 +147,58 @@ public static class PipelineBuilder
             : new[] { new StudioScene { Name = "Scene", Sources = new(r.Sources ?? Array.Empty<StudioSource>()) } };
         int N = scenes.Count;
         int active = Math.Clamp(r.ActiveSceneIndex, 0, N - 1);
-        // stats_period also sets how often ffmpeg polls stdin for transition commands (ffmpeg 7: once per period).
-        var args = new List<string> { "-hide_banner", "-loglevel", "warning", "-nostats",
+        bool vertical = r.VerticalCanvas is not null;
+        int VW = r.VerticalCanvas?.W ?? 0, VH = r.VerticalCanvas?.H ?? 0;
+        // info level: ffmpeg reports each input's real picture size (used for exact layout); stats_period also sets
+        // how often ffmpeg polls stdin for runtime commands (ffmpeg 7+: once per period).
+        // "level+" tags every log line with its severity, so real errors can be told apart from information.
+        var args = new List<string> { "-hide_banner", "-loglevel", "level+info", "-nostats",
             "-progress", "pipe:2", "-stats_period", "0.1", "-copyts", "-y" };
         var warnings = new List<string>();
         var graph = new List<string>();
+        var inputKeys = new Dictionary<int, string>();
         int inputCount = 0;
-        bool encoded = r.StreamUrl is not null || r.SegmentPattern is not null;
+        bool encoded = r.SegmentPattern is not null || r.MainBusPath is not null || r.VerticalBusPath is not null || r.ExtraEncodes.Count > 0;
         string shift = "setpts=PTS-" + I(r.WallclockOrigin) + "/TB,";
 
-        // ---------- video inputs (deduplicated across scenes) ----------
+        // ---------- which sources each canvas shows ----------
+        var hLayers = scenes.Select(sc => VisibleLayers(sc.Sources)
+            .Where(s => SourceTypes.IsVideo(SourceTypes.KindOf(s.Type))).ToList()).ToList();
+        var vLayers = scenes.Select(sc => vertical ? VerticalLayers(sc.Sources) : new List<StudioSource>()).ToList();
+
+        // ---------- video inputs (deduplicated across scenes and canvases) ----------
         var inputs = new Dictionary<string, (int index, bool wall, List<string> uses)>();
-        var sceneLayers = new List<List<(StudioSource src, SourceKind kind, string key)>>();
         var warned = new HashSet<Guid>();
         var failedKeys = new HashSet<string>();
-        foreach (var sc in scenes)
+        foreach (var s in scenes.SelectMany(sc => sc.Sources).Where(s => s.Visible))
         {
-            var layers = new List<(StudioSource, SourceKind, string)>();
-            foreach (var s in VisibleLayers(sc.Sources))
+            var kind = SourceTypes.KindOf(s.Type);
+            if (kind == SourceKind.Unsupported)
             {
-                var kind = SourceTypes.KindOf(s.Type);
-                if (kind == SourceKind.Unsupported)
-                {
-                    if (warned.Add(s.Id)) warnings.Add($"\"{s.Name}\": source type \"{s.Type}\" isn't supported, skipped.");
-                    continue;
-                }
-                if (!SourceTypes.IsVideo(kind)) continue;
-                string key = InputKey(s);
-                if (failedKeys.Contains(key)) continue;
-                if (!inputs.ContainsKey(key))
-                {
-                    var spec = r.InputOverride?.Invoke(s, r.WallclockOrigin) ?? CameraFeedInput(s, kind, key, r) ?? VideoInput(s, kind, r, warned.Add(s.Id) ? warnings : new List<string>());
-                    if (spec is null) { failedKeys.Add(key); continue; }
-                    args.AddRange(WithWallclock(spec));
-                    inputs[key] = (inputCount++, spec.Wallclock, new List<string>());
-                }
-                layers.Add((s, kind, key));
+                if (warned.Add(s.Id)) warnings.Add($"\"{s.Name}\": source type \"{s.Type}\" isn't supported, skipped.");
+                continue;
             }
-            sceneLayers.Add(layers);
+        }
+        bool Ensure(StudioSource s)
+        {
+            var kind = SourceTypes.KindOf(s.Type);
+            string key = InputKey(s);
+            if (failedKeys.Contains(key)) return false;
+            if (inputs.ContainsKey(key)) return true;
+            var spec = r.InputOverride?.Invoke(s, r.WallclockOrigin) ?? CameraFeedInput(s, kind, key, r)
+                       ?? VideoInput(s, kind, r, warned.Add(s.Id) ? warnings : new List<string>());
+            if (spec is null) { failedKeys.Add(key); return false; }
+            args.AddRange(WithWallclock(spec));
+            inputKeys[inputCount] = key;
+            inputs[key] = (inputCount++, spec.Wallclock, new List<string>());
+            return true;
+        }
+        for (int k = 0; k < N; k++)
+        {
+            hLayers[k] = hLayers[k].Where(Ensure).ToList();
+            vLayers[k] = vLayers[k].Where(Ensure).ToList();
         }
 
-        // Label every use of every input; a single split per input feeds all scenes.
         string Use(string key)
         {
             var e = inputs[key];
@@ -179,62 +207,90 @@ public static class PipelineBuilder
             return label;
         }
 
-        // Shared blank canvas for scenes whose bottom layer isn't a full-screen capture.
-        var colorUses = new List<string>();
-        int colorIndex = -1;
-        string ColorUse()
+        // Shared blank canvases for scenes whose bottom layer isn't a full-screen capture.
+        var colorUses = new Dictionary<string, (int index, List<string> uses)>();
+        string ColorUse(int cw, int ch)
         {
-            if (colorIndex < 0)
+            string ck = $"{cw}x{ch}";
+            if (!colorUses.TryGetValue(ck, out var c))
             {
-                args.AddRange(new[] { "-re", "-f", "lavfi", "-i", $"color=c=0x0E1016:s={W}x{H}:r={F}" });
-                colorIndex = inputCount++;
+                args.AddRange(new[] { "-re", "-f", "lavfi", "-i", $"color=c=0x0E1016:s={cw}x{ch}:r={F}" });
+                c = (inputCount++, new List<string>());
+                colorUses[ck] = c;
             }
-            string label = $"bg{colorUses.Count}";
-            colorUses.Add(label);
+            string label = $"bg{ck.Replace('x', '_')}u{c.uses.Count}";
+            c.uses.Add(label);
             return label;
         }
 
         var sceneGraph = new List<string>();
+        // ---------- horizontal canvas, per scene ----------
         for (int k = 0; k < N; k++)
         {
-            var layers = sceneLayers[k];
+            var layers = hLayers[k];
             string p = $"s{k}";
             int start = 0;
-            if (layers.Count > 0 && Anchors.Resolve(layers[0].src) == Anchors.Fill
-                && layers[0].kind is SourceKind.Display or SourceKind.Window or SourceKind.Camera)
+            if (layers.Count > 0 && LayoutMath.IsBaseLayer(layers[0], layers))
             {
                 var b = layers[0];
-                sceneGraph.Add($"[{Use(b.key)}]{Crop(b.src)}{CameraPrep(b.src, b.kind, null)}" +
+                sceneGraph.Add($"[{Use(InputKey(b))}]{Crop(b)}{CameraPrep(b, SourceTypes.KindOf(b.Type), null)}" +
                                $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags={ScaleFlags(F)}," +
                                $"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[{p}base]");
                 start = 1;
             }
             else
             {
-                sceneGraph.Add($"[{ColorUse()}]format=yuv420p[{p}base]");
+                sceneGraph.Add($"[{ColorUse(W, H)}]format=yuv420p[{p}base]");
                 if (layers.Count == 0 && N == 1) warnings.Add("No visible video source in this scene: streaming a blank canvas.");
             }
             string cur = $"{p}base";
             for (int j = start; j < layers.Count; j++)
             {
-                var (src, kind, key) = layers[j];
-                string anchor = Anchors.Resolve(src);
+                var src = layers[j];
+                var kind = SourceTypes.KindOf(src.Type);
                 bool alpha = kind is SourceKind.Image or SourceKind.Text;
-                string scale;
-                if (anchor == Anchors.Fill)
-                    scale = $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags={ScaleFlags(F)},";
-                else if (kind == SourceKind.Text || (kind == SourceKind.Image && src.SizePercent <= 0))
-                    scale = "";
-                else
-                {
-                    int tw = Math.Max(16, SmartTuner.Even((int)Math.Round(W * Math.Clamp(src.SizePercent, 1, 100) / 100.0)));
-                    scale = $"scale={tw}:-2:flags=bicubic,";
-                }
-                sceneGraph.Add($"[{Use(key)}]{Crop(src)}{CameraPrep(src, kind, scale)}format={(alpha ? "rgba" : "yuv420p")}[{p}l{j}]");
-                sceneGraph.Add($"[{cur}][{p}l{j}]overlay={Position(anchor, src.MarginPx)}:eof_action=repeat:format=yuv420[{p}c{j}]");
+                string scale = HorizontalScale(src, W, H, F);
+                var (px, py) = HorizontalPosition(src, W, H);
+                string pos = $"x={px}:y={py}";
+                sceneGraph.Add($"[{Use(InputKey(src))}]{Crop(src)}{CameraPrep(src, kind, scale)}format={(alpha ? "rgba" : "yuv420p")}[{p}l{j}]");
+                sceneGraph.Add($"[{cur}][{p}l{j}]{OverlayName(src.Id, CanvasKind.Horizontal)}={pos}:eof_action=repeat:format=yuv420[{p}c{j}]");
                 cur = $"{p}c{j}";
             }
             sceneGraph.Add($"[{cur}]fps={F},format=yuv420p[scene{k}]");
+        }
+
+        // ---------- vertical canvas, per scene (game over a blurred copy of itself, camera on top) ----------
+        if (vertical)
+        {
+            int bw = SmartTuner.Even(Math.Max(16, VW / 4)), bh = SmartTuner.Even(Math.Max(16, VH / 4));
+            for (int k = 0; k < N; k++)
+            {
+                var layers = vLayers[k];
+                string p = $"v{k}";
+                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto);
+                var bgGame = layers.FirstOrDefault(x => LayoutMath.IsGame(SourceTypes.KindOf(x.Type)));
+                if (bgGame is not null)
+                    // blur at quarter resolution: ~1/16 of the work of a full-size blur, looks the same
+                    sceneGraph.Add($"[{Use(InputKey(bgGame))}]{Crop(bgGame)}scale={bw}:{bh}:force_original_aspect_ratio=increase:flags=fast_bilinear," +
+                                   $"crop={bw}:{bh},boxblur=6:2,scale={VW}:{VH}:flags=bilinear,setsar=1,format=yuv420p,eq=brightness=-0.08[{p}base]");
+                else
+                    sceneGraph.Add($"[{ColorUse(VW, VH)}]format=yuv420p[{p}base]");
+                string cur = $"{p}base";
+                for (int j = 0; j < layers.Count; j++)
+                {
+                    var src = layers[j];
+                    var kind = SourceTypes.KindOf(src.Type);
+                    bool alpha = kind is SourceKind.Image or SourceKind.Text;
+                    double aspect = AspectFor(src, r.KnownSizes);
+                    var rect = LayoutMath.Vertical(src, VW, VH, aspect, hasCam);
+                    int w = VerticalWidth(src, VW, VH);
+                    string pos = $"x={LayoutMath.Px(rect.X)}:y={LayoutMath.Px(rect.Y)}";
+                    sceneGraph.Add($"[{Use(InputKey(src))}]{Crop(src)}{CameraPrep(src, kind, $"scale={w}:-2:flags=bicubic,")}format={(alpha ? "rgba" : "yuv420p")}[{p}l{j}]");
+                    sceneGraph.Add($"[{cur}][{p}l{j}]{OverlayName(src.Id, CanvasKind.Vertical)}={pos}:eof_action=repeat:format=yuv420[{p}c{j}]");
+                    cur = $"{p}c{j}";
+                }
+                sceneGraph.Add($"[{cur}]fps={F},format=yuv420p[vscene{k}]");
+            }
         }
 
         // input splits (timestamp shift happens once, before the split)
@@ -243,42 +299,66 @@ public static class PipelineBuilder
             if (e.uses.Count == 0) continue;
             graph.Add($"[{e.index}:v]{(e.wall ? shift : "")}split={e.uses.Count}{string.Concat(e.uses.Select(u => $"[{u}]"))}");
         }
-        if (colorIndex >= 0)
-            graph.Add($"[{colorIndex}:v]split={colorUses.Count}{string.Concat(colorUses.Select(u => $"[{u}]"))}");
+        foreach (var (_, c) in colorUses)
+            graph.Add($"[{c.index}:v]split={c.uses.Count}{string.Concat(c.uses.Select(u => $"[{u}]"))}");
         graph.AddRange(sceneGraph);
 
-        // ---------- scene switcher ----------
+        // ---------- scene switcher (per canvas) ----------
         // Scenes are stacked bottom→top; every scene above the first has its own alpha mask (an eq brightness
         // expression of stream time t). Switching only rewrites mask expressions: no filter reconfiguration,
         // no restart, frame-accurate fades. Invariant: every mask above the on-air scene is transparent.
-        if (N == 1)
-            graph.Add("[scene0]format=nv12[vfinal]");
-        else
+        void Stack(string scenePrefix, string fadePrefix, int cw, int ch, string outLabel)
         {
-            string cur = "scene0";
+            if (N == 1) { graph.Add($"[{scenePrefix}0]format=nv12[{outLabel}]"); return; }
+            string cur = $"{scenePrefix}0";
             for (int k = 1; k < N; k++)
             {
                 string initial = k == active ? "1" : "-1";
-                graph.Add($"color=c=black:s={W}x{H}:r={F},format=gray,{FadeFilter}{k}=eval=frame:brightness={initial}[m{k}]");
-                graph.Add($"[scene{k}][m{k}]alphamerge[sa{k}]");
-                graph.Add($"[{cur}][sa{k}]overlay=format=yuv420:eof_action=repeat[stack{k}]");
-                cur = $"stack{k}";
+                graph.Add($"color=c=black:s={cw}x{ch}:r={F},format=gray,{fadePrefix}{k}=eval=frame:brightness={initial}[{scenePrefix}m{k}]");
+                graph.Add($"[{scenePrefix}{k}][{scenePrefix}m{k}]alphamerge[{scenePrefix}a{k}]");
+                graph.Add($"[{cur}][{scenePrefix}a{k}]overlay=format=yuv420:eof_action=repeat[{scenePrefix}st{k}]");
+                cur = $"{scenePrefix}st{k}";
             }
-            graph.Add($"[{cur}]format=nv12[vfinal]");
+            graph.Add($"[{cur}]format=nv12[{outLabel}]");
         }
+        Stack("scene", FadeFilter, W, H, "vfinal");
+        if (vertical) Stack("vscene", VerticalFadeFilter, VW, VH, "vvfinal");
 
-        string venc = "vfinal", vprev = "vfinal";
-        if (encoded && r.Preview)
+        // fan the composited canvases out to encodes + preview
+        var hOuts = new List<string>(); var vOuts = new List<string>();
+        bool mainEncode = r.SegmentPattern is not null || r.MainBusPath is not null;
+        if (mainEncode) hOuts.Add("venc");
+        bool vertEncode = vertical && r.VerticalBusPath is not null && r.VerticalPlan is not null;
+        if (vertEncode) vOuts.Add("vvenc");
+        for (int e = 0; e < r.ExtraEncodes.Count; e++)
+            if (r.ExtraEncodes[e].Vertical && vertical) vOuts.Add($"vxenc{e}"); else if (!r.ExtraEncodes[e].Vertical) hOuts.Add($"xenc{e}");
+        if (r.Preview) { hOuts.Add("hprevsrc"); if (vertical) vOuts.Add("vprevsrc"); }
+        void Fan(string src, List<string> outs)
         {
-            graph.Add("[vfinal]split=2[venc][vprevsrc]");
-            venc = "venc"; vprev = "vprevsrc";
+            if (outs.Count == 0) { graph.Add($"[{src}]nullsink"); return; }
+            graph.Add(outs.Count == 1 ? $"[{src}]null[{outs[0]}]" : $"[{src}]split={outs.Count}{string.Concat(outs.Select(o => $"[{o}]"))}");
         }
+        Fan("vfinal", hOuts);
+        if (vertical) Fan("vvfinal", vOuts);
+
+        int PH = r.PreviewHeight, PW = r.PreviewWidth;
+        int VPW = vertical ? SmartTuner.Even((int)Math.Round(PH * VW / (double)VH)) : 0;
         if (r.Preview)
-            graph.Add($"[{vprev}]fps={Math.Min(r.PreviewFps, F)},scale={r.PreviewWidth}:{r.PreviewHeight}:flags=bilinear,format=bgra[prev]");
+        {
+            int pf = Math.Min(r.PreviewFps, F);
+            if (vertical)
+            {
+                graph.Add($"[hprevsrc]fps={pf},scale={PW}:{PH}:flags=bilinear,format=bgra[hprev]");
+                graph.Add($"[vprevsrc]fps={pf},scale={VPW}:{PH}:flags=bilinear,format=bgra[vprev]");
+                graph.Add("[hprev][vprev]hstack=inputs=2[prev]");
+            }
+            else graph.Add($"[hprevsrc]fps={pf},scale={PW}:{PH}:flags=bilinear,format=bgra[prev]");
+        }
 
         // ---------- audio: one input per device; per-scene level via a runtime-adjustable volume stage ----------
         var gains = new List<AudioGainStage>();
-        if (encoded)
+        int audioOuts = (mainEncode ? 1 : 0) + (vertEncode ? 1 : 0) + r.ExtraEncodes.Count(x => !x.Vertical || vertical);
+        if (encoded && audioOuts > 0)
         {
             var mixInputs = new List<string>();
             foreach (var rep in AudioRepresentatives(scenes))
@@ -317,16 +397,19 @@ public static class PipelineBuilder
                 graph.Add(chain.ToString());
                 mixInputs.Add($"[a{idx}]");
             }
+            string mixed;
             if (mixInputs.Count == 0)
             {
                 args.AddRange(new[] { "-re", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo" });
-                graph.Add($"[{inputCount++}:a]aformat=sample_fmts=fltp:channel_layouts=stereo[aout]");
+                mixed = $"[{inputCount++}:a]aformat=sample_fmts=fltp:channel_layouts=stereo";
             }
             else if (mixInputs.Count == 1)
-                graph.Add($"{mixInputs[0]}alimiter=limit=0.95:level=0[aout]");
+                mixed = $"{mixInputs[0]}alimiter=limit=0.95:level=0";
             else
-                graph.Add($"{string.Concat(mixInputs)}amix=inputs={mixInputs.Count}:duration=longest:dropout_transition=0:normalize=0," +
-                          "alimiter=limit=0.95:level=0[aout]");
+                mixed = $"{string.Concat(mixInputs)}amix=inputs={mixInputs.Count}:duration=longest:dropout_transition=0:normalize=0," +
+                        "alimiter=limit=0.95:level=0";
+            graph.Add(audioOuts == 1 ? $"{mixed}[aout0]"
+                : $"{mixed},asplit={audioOuts}{string.Concat(Enumerable.Range(0, audioOuts).Select(i => $"[aout{i}]"))}");
         }
 
         if (!r.InputThreadQueueSupported)
@@ -338,25 +421,69 @@ public static class PipelineBuilder
         args.AddRange(new[] { "-filter_complex", filterGraph });
 
         // ---------- outputs ----------
-        if (encoded)
+        // Every encode repeats its stream headers on each keyframe (dump_extra) so a destination can join mid-stream.
+        int aout = 0;
+        void AudioArgs() => args.AddRange(new[] { "-c:a", "aac", "-b:a", I(r.AudioBitrateKbps) + "k", "-ar", "48000", "-ac", "2" });
+        if (mainEncode)
         {
-            args.AddRange(new[] { "-map", $"[{venc}]", "-map", "[aout]" });
+            args.AddRange(new[] { "-map", "[venc]", "-map", $"[aout{aout++}]" });
             args.AddRange(EncoderCatalog.BuildVideoArgs(plan));
-            args.AddRange(new[] { "-c:a", "aac", "-b:a", I(r.AudioBitrateKbps) + "k", "-ar", "48000", "-ac", "2",
-                "-flags", "+global_header", "-f", "tee" });
+            AudioArgs();
+            args.AddRange(new[] { "-flags", "+global_header", "-bsf:v", "dump_extra=freq=keyframe", "-f", "tee" });
             var slaves = new List<string>();
-            if (r.StreamUrl is not null)
-                slaves.Add("[f=flv:onfail=abort:flvflags=no_duration_filesize]" + TeeEscape(r.StreamUrl));
             if (r.SegmentPattern is not null)
                 slaves.Add($"[f=segment:segment_time={r.SegmentSeconds}:segment_format=mpegts:onfail=ignore]" +
                            TeeEscape(r.SegmentPattern.Replace('\\', '/')));
+            if (r.MainBusPath is not null)
+                slaves.Add("[f=mpegts:onfail=ignore]" + TeeEscape(r.MainBusPath.Replace('\\', '/')));
             args.Add(string.Join("|", slaves));
+        }
+        if (vertEncode)
+        {
+            args.AddRange(new[] { "-map", "[vvenc]", "-map", $"[aout{aout++}]" });
+            args.AddRange(EncoderCatalog.BuildVideoArgs(r.VerticalPlan!));
+            AudioArgs();
+            args.AddRange(new[] { "-flags", "+global_header", "-bsf:v", "dump_extra=freq=keyframe", "-f", "mpegts", r.VerticalBusPath! });
+        }
+        for (int e = 0; e < r.ExtraEncodes.Count; e++)
+        {
+            var x = r.ExtraEncodes[e];
+            if (x.Vertical && !vertical) continue;
+            args.AddRange(new[] { "-map", x.Vertical ? $"[vxenc{e}]" : $"[xenc{e}]", "-map", $"[aout{aout++}]" });
+            args.AddRange(EncoderCatalog.BuildVideoArgs(x.Plan));
+            AudioArgs();
+            args.AddRange(new[] { "-flags", "+global_header", "-bsf:v", "dump_extra=freq=keyframe", "-f", "mpegts", x.BusPath });
         }
         if (r.Preview)
             args.AddRange(new[] { "-map", "[prev]", "-c:v", "rawvideo", "-f", "rawvideo", "pipe:1" });
 
-        return new PipelineSpec(args, warnings, encoded, r.Preview, filterGraph, N, gains);
+        return new PipelineSpec(args, warnings, encoded, r.Preview, filterGraph, N, gains)
+        {
+            HasVertical = vertical, InputKeys = inputKeys, PreviewLayout = (PW, VPW, PH),
+        };
     }
+
+    /// <summary>Sources on the vertical canvas, bottom → top. In auto layout only the top-most game capture is used.</summary>
+    public static List<StudioSource> VerticalLayers(IEnumerable<StudioSource> sources)
+    {
+        var shown = sources.Where(LayoutMath.ShownVertical).ToList();
+        var autoGames = shown.Where(s => s.VAuto && LayoutMath.IsGame(SourceTypes.KindOf(s.Type))).ToList();
+        if (autoGames.Count > 1) shown = shown.Where(s => !autoGames.Take(autoGames.Count - 1).Contains(s)).ToList();
+        return shown;
+    }
+
+    public static double AspectFor(StudioSource s, IReadOnlyDictionary<string, (int W, int H)> known)
+    {
+        if (known.TryGetValue(InputKey(s), out var sz) && sz.W > 0 && sz.H > 0)
+        {
+            double w = sz.W - Math.Max(0, s.CropLeft) - Math.Max(0, s.CropRight);
+            double h = sz.H - Math.Max(0, s.CropTop) - Math.Max(0, s.CropBottom);
+            if (w > 0 && h > 0) return w / h;
+        }
+        return LayoutMath.EstimateAspect(s);
+    }
+
+    public const string VerticalFadeFilter = "eq@vfade";
 
     /// <summary>
     /// Runtime commands (ffmpeg stdin "C" lines) that crossfade from scene <paramref name="from"/> to <paramref name="to"/>.
@@ -370,17 +497,20 @@ public static class PipelineBuilder
         double d = Math.Max(0.001, seconds);
         string ramp = $"clip((t-{I(startAt)})/{I(d)},0,1)";
         // brightness is added to a black mask: ≤ -0.1 → fully transparent, ≥ 1 → fully opaque
-        if (to > from)
+        foreach (var fade in spec.HasVertical ? new[] { FadeFilter, VerticalFadeFilter } : new[] { FadeFilter })
         {
-            // everything between is already transparent: just fade the new scene in on top
-            lines.Add($"{FadeFilter}{to} -1 brightness -0.1+1.1*{ramp}");
-        }
-        else
-        {
-            // reveal a lower scene: prepare it (hidden under the current one), then fade the current one out
-            for (int k = to + 1; k < from; k++) lines.Add($"{FadeFilter}{k} -1 brightness -1");
-            if (to > 0) lines.Add($"{FadeFilter}{to} -1 brightness 1");
-            lines.Add($"{FadeFilter}{from} -1 brightness 1-1.1*{ramp}");
+            if (to > from)
+            {
+                // everything between is already transparent: just fade the new scene in on top
+                lines.Add($"{fade}{to} -1 brightness -0.1+1.1*{ramp}");
+            }
+            else
+            {
+                // reveal a lower scene: prepare it (hidden under the current one), then fade the current one out
+                for (int k = to + 1; k < from; k++) lines.Add($"{fade}{k} -1 brightness -1");
+                if (to > 0) lines.Add($"{fade}{to} -1 brightness 1");
+                lines.Add($"{fade}{from} -1 brightness 1-1.1*{ramp}");
+            }
         }
         foreach (var g in spec.AudioGains)
         {
@@ -506,17 +636,73 @@ public static class PipelineBuilder
         return sb.ToString();
     }
 
-    private static string Position(string anchor, int margin)
+    /// <summary>
+    /// Overlay x/y on the horizontal canvas: pixels for free placement, expressions of the overlay's own size for
+    /// anchors (exact for any source size). Also sent as live commands when a source is moved.
+    /// </summary>
+    public static (string X, string Y) HorizontalPosition(StudioSource src, int W, int H)
     {
-        string m = I(Math.Max(0, margin));
+        string anchor = Anchors.Resolve(src);
+        if (anchor == Anchors.Free) return (LayoutMath.Px(src.X * W), LayoutMath.Px(src.Y * H));
+        string m = I(Math.Max(0, src.MarginPx));
         return anchor switch
         {
-            Anchors.TopLeft => $"x={m}:y={m}",
-            Anchors.TopRight => $"x=W-w-{m}:y={m}",
-            Anchors.BottomLeft => $"x={m}:y=H-h-{m}",
-            Anchors.BottomRight => $"x=W-w-{m}:y=H-h-{m}",
-            _ => "x=(W-w)/2:y=(H-h)/2", // Center and Fill
+            Anchors.TopLeft => (m, m),
+            Anchors.TopRight => ($"W-w-{m}", m),
+            Anchors.BottomLeft => (m, $"H-h-{m}"),
+            Anchors.BottomRight => ($"W-w-{m}", $"H-h-{m}"),
+            _ => ("(W-w)/2", "(H-h)/2"), // Center and Fill
         };
+    }
+
+    /// <summary>How an overlay is scaled on the horizontal canvas ("" = natural size, for text and logos).</summary>
+    public static string HorizontalScale(StudioSource src, int W, int H, int F)
+    {
+        var kind = SourceTypes.KindOf(src.Type);
+        string anchor = Anchors.Resolve(src);
+        bool natural = kind == SourceKind.Text || kind == SourceKind.Image;
+        if (anchor == Anchors.Fill) return $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags={ScaleFlags(F)},";
+        if (anchor == Anchors.Free)
+        {
+            if (src.W <= 0 && natural) return "";
+            double frac = src.W > 0 ? src.W : 0.25;
+            return $"scale={Math.Max(16, SmartTuner.Even((int)Math.Round(frac * W)))}:-2:flags=bicubic,";
+        }
+        if (kind == SourceKind.Text || (kind == SourceKind.Image && src.SizePercent <= 0)) return "";
+        return $"scale={LayoutMath.OverlayWidth(src, W)}:-2:flags=bicubic,";
+    }
+
+    /// <summary>Overlay width on the vertical canvas (independent of the source's aspect ratio).</summary>
+    public static int VerticalWidth(StudioSource src, int VW, int VH) =>
+        Math.Max(16, SmartTuner.Even((int)Math.Round(LayoutMath.Vertical(src, VW, VH, 16.0 / 9, false).W)));
+
+    /// <summary>
+    /// What a scene collection composites, minus anything that can change live (names, positions, anchors that
+    /// keep the same size): a different value means the pipeline must be rebuilt.
+    /// </summary>
+    public static string LayoutFingerprint(IEnumerable<StudioScene> scenes, int W, int H, (int W, int H)? vertical)
+    {
+        var placement = new[] { nameof(StudioSource.Name), nameof(StudioSource.X), nameof(StudioSource.Y), nameof(StudioSource.W),
+            nameof(StudioSource.VX), nameof(StudioSource.VY), nameof(StudioSource.VW), nameof(StudioSource.VAuto), nameof(StudioSource.VShow),
+            nameof(StudioSource.Anchor), nameof(StudioSource.MarginPx), nameof(StudioSource.SizePercent) };
+        var arr = new System.Text.Json.Nodes.JsonArray();
+        foreach (var sc in scenes)
+        {
+            var sources = sc.Sources.ToList();
+            var layers = VisibleLayers(sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
+            var vLayers = vertical is null ? new List<StudioSource>() : VerticalLayers(sources);
+            var list = new System.Text.Json.Nodes.JsonArray();
+            foreach (var src in sources)
+            {
+                var o = System.Text.Json.JsonSerializer.SerializeToNode(src)!.AsObject();
+                foreach (var k in placement) o.Remove(k);
+                o["lh"] = !layers.Contains(src) ? "-" : LayoutMath.IsBaseLayer(src, layers) ? "base" : HorizontalScale(src, W, H, 30);
+                o["lv"] = vertical is { } v && vLayers.Contains(src) ? VerticalWidth(src, v.W, v.H).ToString(CultureInfo.InvariantCulture) : "-";
+                list.Add(o);
+            }
+            arr.Add(new System.Text.Json.Nodes.JsonObject { ["id"] = sc.Id.ToString(), ["s"] = list });
+        }
+        return arr.ToJsonString();
     }
 
     /// <summary>Escapes a tee slave target (the tee muxer treats \ ' | as special).</summary>

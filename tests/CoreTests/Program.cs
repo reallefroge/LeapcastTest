@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using LeapcastStudioAI;
 
 int failures = 0;
@@ -29,6 +31,47 @@ Check(plan.Encoder == "libx264", "old NVENC + 16 threads → x264");
 plan = SmartTuner.Resolve(new StudioSettings(), new List<ProbedEncoder> { new("h264_qsv", EncoderTier.Rich), new("libx264", EncoderTier.Rich) }, 8);
 Check(plan.Encoder == "h264_qsv", "QSV + 8 threads → QSV");
 Check(SmartTuner.ParseResolution("1664 × 936") == (1664, 936), "parse resolution with ×");
+
+// ---------------------------------------------------------------- multistream budget + layout math
+Console.WriteLine("Multistream budget and layout");
+var mset = new StudioSettings { UploadMbps = 10 };
+var twitchO = new StreamOutput { Name = "Twitch", Service = "Twitch" };
+var ytO = new StreamOutput { Name = "YouTube", Service = "YouTube" };
+var ttO = new StreamOutput { Name = "TikTok", Service = "TikTok", Canvas = "Vertical" };
+mset.Outputs = new() { twitchO, ytO, ttO };
+var ps = OutputBudget.Resolve(mset, mset.Outputs, true, enc, 8);
+Check(ps.UploadKbps <= 10000 * 0.75 + 50 && ps.Main.CapKbps <= 6000 && ps.Vertical is { Width: 720, Height: 1280 },
+    $"3 destinations on 10 Mbps fit 75% of the upload: main {ps.Main.CapKbps} kbps, vertical {ps.Vertical?.CapKbps} kbps, total {ps.UploadKbps} kbps");
+var solo = OutputBudget.Resolve(mset, new[] { twitchO }, false, enc, 8);
+Check(solo.Main.CapKbps > ps.Main.CapKbps, $"a single destination gets more bitrate ({solo.Main.CapKbps} vs {ps.Main.CapKbps} kbps)");
+var noTest = OutputBudget.Resolve(new StudioSettings(), new[] { twitchO, ytO }, false, enc, 8);
+Check(noTest.Main.CapKbps <= 6000, $"Twitch + YouTube share an encode capped by Twitch's limit ({noTest.Main.CapKbps} kbps)");
+var ownO = new StreamOutput { Name = "YouTube HQ", Service = "YouTube", OwnBitrateKbps = 9000 };
+var withOwn = OutputBudget.Resolve(new StudioSettings(), new[] { twitchO, ownO }, false, enc, 8);
+Check(withOwn.Own.TryGetValue(ownO.Id, out var ownPlan) && ownPlan.CapKbps == 9000, "an output with its own encode gets its own bitrate");
+
+var lcam = new StudioSource { Type = SourceTypes.Camera };
+var lgame = new StudioSource { Type = SourceTypes.Display };
+var camR = LayoutMath.Vertical(lcam, 720, 1280, 16.0 / 9, true);
+var gameR = LayoutMath.Vertical(lgame, 720, 1280, 16.0 / 9, true);
+Check(camR.Bottom <= gameR.Y && gameR.Bottom <= 1280 && camR.Y >= 0 && Math.Abs(gameR.W - 720) < 1,
+    $"vertical auto layout: camera on top ({camR.Y:0}-{camR.Bottom:0}), game full width below ({gameR.Y:0}-{gameR.Bottom:0})");
+var fpScene = new StudioScene();
+var fpCard = new StudioSource { Type = SourceTypes.Image, FilePath = "x.png", Anchor = Anchors.TopRight, SizePercent = 25 };
+fpScene.Sources.Add(new StudioSource { Type = SourceTypes.Display });
+fpScene.Sources.Add(fpCard);
+string fp0 = PipelineBuilder.LayoutFingerprint(new[] { fpScene }, 1600, 900, (720, 1280));
+var r0 = LayoutMath.Horizontal(fpCard, 1600, 900, 2.0);
+fpCard.Anchor = Anchors.Free; fpCard.X = r0.X / 1600; fpCard.Y = r0.Y / 900; fpCard.W = r0.W / 1600; // what dragging does
+string fp1 = PipelineBuilder.LayoutFingerprint(new[] { fpScene }, 1600, 900, (720, 1280));
+fpCard.X = 0.1; fpCard.Y = 0.7;
+var fpGame = fpScene.Sources[0]; fpGame.VAuto = false; fpGame.VX = 0; fpGame.VY = 0.3; fpGame.VW = 1; // dragged on the vertical canvas
+string fp2 = PipelineBuilder.LayoutFingerprint(new[] { fpScene }, 1600, 900, (720, 1280));
+fpCard.W = 0.4;
+string fp3 = PipelineBuilder.LayoutFingerprint(new[] { fpScene }, 1600, 900, (720, 1280));
+Check(fp0 == fp1 && fp1 == fp2 && fp2 != fp3, $"moving (or un-anchoring at the same size) doesn't rebuild; resizing does ({fp0 == fp1}, {fp1 == fp2}, {fp2 != fp3})");
+var snapped = LayoutMath.Snap(new LayoutRect(745, 7, 100, 50), 1600, 900, 12);
+Check(snapped == (750, 0), $"snaps to the centre line and the top edge ({snapped})");
 
 // ---------------------------------------------------------------- dshow parsing
 Console.WriteLine("Device list parsing");
@@ -91,45 +134,74 @@ var engine = new StreamEngine(audio, new FakePlatform(png), Path.Combine(work, "
     CameraDeviceOverride = src => VideoFifo.Input(work, 640, 360, 30, -1)
 };
 await engine.ProbeEncodersAsync();
-int frames = 0; engine.FrameReady += f => { if (f.Length == 640 * 360 * 4) Interlocked.Increment(ref frames); };
+int frames = 0; engine.FrameReady += f => { var pf = engine.PreviewFrame; if (f.Length == pf.Width * pf.Height * 4) Interlocked.Increment(ref frames); };
 var messages = new List<string>(); engine.Message += (_, e) => { lock (messages) messages.Add(e.Text); Console.WriteLine("    engine: " + e.Text); };
 EngineStatus? last = null; engine.StatusChanged += st => last = st;
 
+// Multistream destinations are local RTMP servers (ffmpeg -listen), one per output, like Twitch + YouTube.
+int portA = RtmpServer.FreePort(), portB = RtmpServer.FreePort(), portV = RtmpServer.FreePort();
+var outA = new StreamOutput { Name = "Twitch test", Service = "Custom", ServerUrl = $"rtmp://127.0.0.1:{portA}/live" };
+var outB = new StreamOutput { Name = "YouTube test", Service = "Custom", ServerUrl = $"rtmp://127.0.0.1:{portB}/live" };
+var outV = new StreamOutput { Name = "TikTok test", Service = "Custom", ServerUrl = $"rtmp://127.0.0.1:{portV}/live", Canvas = "Vertical", Enabled = false };
+var keys = new Dictionary<Guid, string> { [outA.Id] = "a", [outB.Id] = "b", [outV.Id] = "v" };
+engine.KeyResolver = o => keys.TryGetValue(o.Id, out var k) ? k : "";
+OutputStatus? Out(StreamOutput o) => engine.OutputStatuses().FirstOrDefault(x => x.Id == o.Id);
+string liveDir = Path.Combine(work, "live");
+Directory.CreateDirectory(liveDir);
+
 // 640×360 keeps the 2-vCPU test machines real-time, so timing measurements reflect the design, not CPU starvation.
 var settings = new StudioSettings { QualityProfile = "Custom", Resolution = "640 × 360", FrameRate = 30, MaxBitrateKbps = 1500, Encoder = "libx264", RecordingFolder = Path.Combine(work, "videos"),
-    ServerUrl = Path.Combine(work, "live"), ReplaySeconds = 6 };
-// The "server" is a local FLV file: Platforms.BuildUrl(server, key) = <work>/live/stream.flv
-Directory.CreateDirectory(Path.Combine(work, "live"));
-await engine.UpdateAsync(scene, settings, "stream.flv", false);
+    ReplaySeconds = 6, Outputs = new() { outA, outB, outV } };
+await engine.UpdateAsync(scene, settings, false);
 
 await engine.SetPreviewAsync(true);
 var pw = Stopwatch.StartNew();
 while (frames < 15 && pw.Elapsed < TimeSpan.FromSeconds(10)) await Task.Delay(100);
-Check(engine.Running && frames >= 15, $"preview-only pipeline delivers frames (first 15 after {pw.Elapsed.TotalSeconds:0.0} s)");
+Check(engine.Running && frames >= 15, $"preview-only pipeline delivers frames (first 15 after {pw.Elapsed.TotalSeconds:0.0} s, {engine.PreviewFrame.Width}x{engine.PreviewFrame.Height})");
 
 var clock = Stopwatch.StartNew();
 await engine.StartRecordingAsync();      // restart #1 → encode + segments
 await Task.Delay(5000);
-await engine.StartLiveAsync();           // restart #2 → + RTMP(FLV) output; recording continues across it
-await Task.Delay(9000);
+var srvA = RtmpServer.Start(ffmpeg, portA, "a", Path.Combine(liveDir, "a.flv"));
+var srvB = RtmpServer.Start(ffmpeg, portB, "b", Path.Combine(liveDir, "b.flv"));
+var problems = await engine.StartOutputAsync(outA.Id);   // restart #2 → + shared encode on a bus; recording continues
+Check(problems.Count == 0, "first output starts" + string.Concat(problems.Select(x => ": " + x)));
+await Task.Delay(5000);
+int startsLive = engine.PipelineStarts;
+Check(Out(outA)?.State == OutputState.Live, $"first destination is live ({Out(outA)?.State}, {Out(outA)?.Kbps:0} kbps)");
+await engine.StartOutputAsync(outB.Id);                    // joins the running encode mid-stream
+await Task.Delay(6000);
+Check(engine.PipelineStarts == startsLive, $"second destination joined without restarting the encoder (starts {startsLive} → {engine.PipelineStarts})");
+Check(Out(outA)?.State == OutputState.Live && Out(outB)?.State == OutputState.Live,
+    $"both destinations live: A {Out(outA)?.State} {Out(outA)?.Kbps:0} kbps, B {Out(outB)?.State} {Out(outB)?.Kbps:0} kbps");
 Check(last is { Live: true, Recording: true }, $"live + recording status ({last?.Health}, {last?.RecentKbps:0} kbps recent, fps {last?.Fps:0.0})");
 Check(last!.RecentKbps > 50 && last.RecentKbps <= last.CapKbps * 1.25 + 200, $"bitrate measured from segments and respects the cap: {last.RecentKbps:0} kbps (cap {last.CapKbps})");
+Check(last.UploadKbps > 2 * 50, $"upload is reported per destination: total {last.UploadKbps:0} kbps across {last.Outputs.Count} outputs");
 File.WriteAllText(Path.Combine(work, "main-run.log"), ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")));
 Console.WriteLine("    camera: " + engine.CameraStats());
 string replay = await engine.SaveReplayAsync();
+await engine.StopOutputAsync(outA.Id);                     // B must not notice
+await Task.Delay(3000);
+Check(!engine.IsOutputActive(outA.Id) && Out(outB)?.State == OutputState.Live && engine.PipelineStarts == startsLive,
+    $"stopping one destination leaves the other live, no restart (B {Out(outB)?.State}, starts {engine.PipelineStarts})");
 double wallRecorded = clock.Elapsed.TotalSeconds;
 string rec = await engine.StopRecordingAsync();
 Console.WriteLine($"    wall-clock time between Record and Stop: {wallRecorded:0.0}s");
-await engine.StopLiveAsync();
+await engine.StopOutputAsync(outB.Id);
+srvA.WaitForExit(5000); srvB.WaitForExit(5000);
 await engine.StopAllAsync();
 
 var rp = await ProbeAsync(replay);
 Check(rp.ok && rp.duration is > 4 and < 12, $"replay saved: {Path.GetFileName(replay)} {rp.duration:0.0}s, {rp.streams}");
 var rr = await ProbeAsync(rec);
 Check(rr.ok && rr.duration > wallRecorded - 9 && rr.duration < wallRecorded + 1, $"recording spans the restart: {rr.duration:0.0}s of {wallRecorded:0.0}s wall time (restart gaps excluded), {rr.streams}");
-var lf = await ProbeAsync(Path.Combine(work, "live", "stream.flv"));
-Check(lf.ok && lf.streams.Contains("h264") && lf.streams.Contains("aac") && lf.duration > 6, $"live FLV output valid: {lf.duration:0.0}s, {lf.streams}");
-var lipLive = await LipSyncAsync(Path.Combine(work, "live", "stream.flv"), 539, 293);
+var lf = await ProbeAsync(Path.Combine(liveDir, "a.flv"));
+Check(lf.ok && lf.streams.Contains("h264") && lf.streams.Contains("aac") && lf.duration > 9, $"destination A received a valid stream: {lf.duration:0.0}s, {lf.streams}");
+var lfb = await ProbeAsync(Path.Combine(liveDir, "b.flv"));
+var (_, bErr) = await RunAsync(new[] { "-hide_banner", "-v", "error", "-i", Path.Combine(liveDir, "b.flv"), "-f", "null", "-" });
+Check(lfb.ok && lfb.streams.Contains("h264") && lfb.streams.Contains("aac") && lfb.duration > 6 && bErr.Length == 0,
+    $"destination B (joined mid-stream) decodes cleanly from its first frame: {lfb.duration:0.0}s, {lfb.streams}{(bErr.Length > 0 ? " — " + bErr.Split('\n')[0] : "")}");
+var lipLive = await LipSyncAsync(Path.Combine(liveDir, "a.flv"), 539, 293);
 var lip = await LipSyncAsync(rec, 539, 293); // centre of the bottom-right camera overlay at 640×360
 // The webcam path itself adds ~0.1 s on a loaded 2-vCPU VM; the stream must be in sync within a few frames and
 // must not drift, and the exported recording must match the live stream.
@@ -138,7 +210,24 @@ Check(lipLive.events >= 4 && Math.Abs(lipLive.offsetMs) < 150 && lipLive.spreadM
 Check(lip.events >= 4 && Math.Abs(lip.offsetMs) < 150 && lip.spreadMs < 160,
     $"recording lip sync: flash vs beep {lip.offsetMs:+0;-0} ms (spread {lip.spreadMs:0} ms over {lip.events} events, no drift)");
 var dims = await RunCaptureAsync("ffprobe", new[] { "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate", "-of", "csv=p=0", rec });
-Check(dims.Trim().StartsWith("640,360,"), $"output is 1280x720@30 ({dims.Trim()})");
+Check(dims.Trim().StartsWith("640,360,"), $"output is 640x360@30 ({dims.Trim()})");
+
+// ---------------------------------------------------------------- bad destination
+Console.WriteLine("A destination that refuses the connection fails on its own");
+var badSet = settings.Clone();
+await engine.UpdateAsync(scene, badSet, false);
+var badProblems = await engine.StartOutputAsync(outA.Id); // nobody listening on port A now
+await Task.Delay(4000);
+var badStatus = Out(outA);
+Check(badProblems.Count == 0 && badStatus?.State == OutputState.Error && !engine.IsOutputActive(outA.Id),
+    $"refused destination reported as an error and stopped ({badStatus?.State}: {badStatus?.Message})");
+await Task.Delay(1500);
+Check(!engine.Running, "nothing left encoding after the only output failed");
+var missing = StreamEngine.ValidateOutput(new StreamOutput { Service = "Twitch", ServerUrl = "rtmp://live.twitch.tv/app" }, "");
+Check(missing is not null, $"missing key is caught before connecting: {missing}");
+var tiktok = new StreamOutput { Service = "TikTok", ServerUrl = "" };
+Check(StreamEngine.ValidateOutput(tiktok, "k")?.Contains("LIVE Producer") == true, "TikTok without a server URL explains where to find it");
+engine.ClearOutputError(outA.Id);
 
 // ---------------------------------------------------------------- smart VBR vs CBR on Wizard101-like content
 Console.WriteLine("Bandwidth: Smart VBR vs CBR on mostly-static game-like content (cap 3500 kbps, 1600x900@30)");
@@ -169,7 +258,7 @@ Console.WriteLine("Health monitor on a light scene (screen + mic)");
 var light = new StudioScene { Name = "light" };
 light.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, CaptureMethod = testCapture });
 light.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone });
-await engine.UpdateAsync(light, WithEncoder(settings, "libx264"), "stream.flv", false);
+await engine.UpdateAsync(light, WithEncoder(settings, "libx264"), false);
 await engine.SetReplayBufferAsync(true);
 await Task.Delay(12000);
 Check(last is { Running: true } && !last.Health.StartsWith("Struggling"), $"no false 'struggling' alarm: {last?.Health}, fps {last?.Fps:0.0}, speed {last?.Speed:0.00}");
@@ -194,18 +283,20 @@ var samples = new List<(double t, int red)>();
 var tclock = Stopwatch.StartNew();
 engine.FrameReady += f =>
 {
-    // BGRA: redness = R - G at the frame centre
-    int i = (180 * 640 + 320) * 4;
+    // BGRA: redness = R - G at the centre of the horizontal preview
+    var pf = engine.PreviewFrame;
+    if (f.Length != pf.Width * pf.Height * 4) return;
+    int i = ((pf.Height / 2) * pf.Width + pf.HorizontalWidth / 2) * 4;
     lock (samples) samples.Add((tclock.Elapsed.TotalSeconds, f[i + 2] - f[i + 1]));
 };
-await engine.UpdateAsync(both, sceneA, tset, "stream.flv", false);
+await engine.UpdateAsync(both, sceneA, tset, false);
 await engine.SetReplayBufferAsync(true);
 await Task.Delay(5000);
 int starts = engine.PipelineStarts;
 var sc0 = engine.StreamClock();
 Console.WriteLine($"    transition-debug: stream clock wall {sc0.wall:0.00}s, ffmpeg reported {sc0.reported:0.00}s");
 double switchAt = tclock.Elapsed.TotalSeconds;
-await engine.UpdateAsync(both, sceneB, tset, "stream.flv", false);
+await engine.UpdateAsync(both, sceneB, tset, false);
 await Task.Delay(3500);
 List<(double t, int red)> after;
 lock (samples) after = samples.Where(x => x.t >= switchAt - 0.5).ToList();
@@ -236,7 +327,7 @@ Check(!ff.Contains("ret:-"), "ffmpeg accepted every transition command");
 
 tset.Transition = "Cut";
 switchAt = tclock.Elapsed.TotalSeconds;
-await engine.UpdateAsync(both, sceneA, tset, "stream.flv", false);
+await engine.UpdateAsync(both, sceneA, tset, false);
 await Task.Delay(3000);
 lock (samples) after = samples.Where(x => x.t >= switchAt).ToList();
 mids = after.Count(x => x.red is > 40 and < 215);
@@ -246,11 +337,11 @@ var rp2 = await ProbeAsync(rep2);
 Check(rp2.ok && rp2.duration > 5, $"replay spanning both transitions is continuous: {rp2.duration:0.0}s");
 
 gameSrc.CropLeft = 10; // editing a source changes the graph → rebuild
-await engine.UpdateAsync(both, sceneA, tset, "stream.flv", false);
+await engine.UpdateAsync(both, sceneA, tset, false);
 await Task.Delay(1500);
 Check(engine.PipelineStarts == starts + 1, "editing a source rebuilds the pipeline (expected)");
 await engine.SetReplayBufferAsync(false);
-await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), "stream.flv", false);
+await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
 
 if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
 {
@@ -262,7 +353,7 @@ if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
     wscene.Sources.Add(new StudioSource { Name = "Notepad", Type = SourceTypes.Window, WindowTitle = title });
     int wf = 0; void Count(byte[] _) => Interlocked.Increment(ref wf);
     engine.FrameReady += Count;
-    await engine.UpdateAsync(new[] { wscene }, wscene, WithEncoder(settings, "libx264"), "stream.flv", false);
+    await engine.UpdateAsync(new[] { wscene }, wscene, WithEncoder(settings, "libx264"), false);
     try
     {
         bool sawFallback() { lock (messages) return messages.Any(m => m.Contains("switched to compatibility capture")); }
@@ -281,7 +372,7 @@ if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
         var dscene = new StudioScene { Name = "display" };
         dscene.Sources.Add(new StudioSource { Name = "Screen", Type = SourceTypes.Display, CaptureMethod = "Auto" });
         wf = 0;
-        await engine.UpdateAsync(new[] { dscene }, dscene, WithEncoder(settings, "libx264"), "stream.flv", false);
+        await engine.UpdateAsync(new[] { dscene }, dscene, WithEncoder(settings, "libx264"), false);
         try { await engine.SetPreviewAsync(true); } catch (Exception ex) { Console.WriteLine("    gpu-display: start: " + ex.Message); }
         gw.Restart();
         while (wf < 30 && gw.Elapsed < TimeSpan.FromSeconds(20)) await Task.Delay(200);
@@ -295,18 +386,117 @@ if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
     try { np.Kill(); } catch { }
 }
 
-Console.WriteLine("Auto-reconnect when the stream process dies mid-broadcast");
-await engine.StartLiveAsync();
-await Task.Delay(10000);
-if (OperatingSystem.IsWindows()) foreach (var pr in Process.GetProcessesByName("ffmpeg")) { try { pr.Kill(); } catch { } }
-else Process.Start("pkill", new[] { "-f", "-9", "f=flv:onfail=abort" }).WaitForExit();
+// ---------------------------------------------------------------- vertical canvas
+Console.WriteLine("Vertical 9:16 canvas: TikTok-style output next to a horizontal one");
+var vset = WithEncoder(settings, "libx264");
+vset.VerticalCanvas = true; vset.VerticalResolution = "360x640";
+vset.Outputs = new() { outA, new StreamOutput { Id = outV.Id, Name = outV.Name, Service = outV.Service, ServerUrl = outV.ServerUrl, Canvas = "Vertical", Enabled = true } };
+await engine.UpdateAsync(new[] { scene }, scene, vset, false);
+var srvA2 = RtmpServer.Start(ffmpeg, portA, "a", Path.Combine(liveDir, "a2.flv"));
+var srvV = RtmpServer.Start(ffmpeg, portV, "v", Path.Combine(liveDir, "v.flv"));
+var vProblems = await engine.StartAllOutputsAsync();
+await Task.Delay(9000);
+Check(vProblems.Count == 0 && Out(outA)?.State == OutputState.Live && Out(outV)?.State == OutputState.Live,
+    $"horizontal + vertical destinations live together ({Out(outA)?.State}, {Out(outV)?.State}{string.Concat(vProblems.Select(x => "; " + x))})");
+Check(engine.PreviewFrame.VerticalWidth > 0 && engine.PreviewFrame.Width == engine.PreviewFrame.HorizontalWidth + engine.PreviewFrame.VerticalWidth,
+    $"preview shows both canvases side by side ({engine.PreviewFrame})");
+var camSrc = scene.Sources.First(x => x.Type == SourceTypes.Camera);
+Check(engine.SourceSize(camSrc) is { W: > 0 }, $"real source sizes learned from ffmpeg (camera {engine.SourceSize(camSrc)})");
+Console.WriteLine("    vertical plan: " + engine.VerticalPlan?.Summary);
+File.WriteAllText(Path.Combine(work, "vertical-run.log"), ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")));
+await engine.StopAllOutputsAsync();
+srvA2.WaitForExit(5000); srvV.WaitForExit(5000);
+var vd = await RunCaptureAsync("ffprobe", new[] { "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", Path.Combine(liveDir, "v.flv") });
+var hd = await RunCaptureAsync("ffprobe", new[] { "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", Path.Combine(liveDir, "a2.flv") });
+var vp = await ProbeAsync(Path.Combine(liveDir, "v.flv"));
+Check(vd.Trim() == "360,640" && hd.Trim() == "640,360" && vp.duration > 5 && vp.streams.Contains("aac"),
+    $"vertical destination got 360x640 with audio ({vd.Trim()}, {vp.duration:0.0}s, {vp.streams}); horizontal got {hd.Trim()}");
+await engine.SetPreviewAsync(false);
+
+// ---------------------------------------------------------------- live layout editing
+Console.WriteLine("Moving a source on the preview is applied live (no restart)");
+var mscene = new StudioScene { Name = "move" };
+var movable = new StudioSource { Name = "Red card", Type = SourceTypes.Image, FilePath = redPng, Anchor = Anchors.Free, X = 0.05, Y = 0.05, W = 0.2 };
+mscene.Sources.Add(movable);
+byte[]? lastFrame = null;
+void Grab(byte[] f) { var pf = engine.PreviewFrame; if (f.Length == pf.Width * pf.Height * 4) lastFrame = (byte[])f.Clone(); }
+engine.FrameReady += Grab;
+int Red(double fx, double fy)
+{
+    var f = lastFrame; var pf = engine.PreviewFrame;
+    if (f is null) return -999;
+    int x = (int)(fx * pf.HorizontalWidth), y = (int)(fy * pf.Height);
+    int i = (y * pf.Width + x) * 4;
+    return f[i + 2] - f[i + 1];
+}
+// the 20%-wide card is 0.2 × 640 / (16/9) = 72 px tall on the 640×360 canvas: centre is 0.1 W right and 36 px down
+double CenterY(double y) => (y * 360 + 36) / 360;
+await engine.UpdateAsync(new[] { mscene }, mscene, WithEncoder(settings, "libx264"), false);
+await engine.SetPreviewAsync(true);
+await Task.Delay(3000);
+int redA = Red(0.15, CenterY(0.05)), redB = Red(0.70, CenterY(0.5));
+Check(redA > 150 && redB < 50, $"card drawn where placed (red {redA} there, {redB} at the target)");
+int moveStarts = engine.PipelineStarts;
+movable.X = 0.6; movable.Y = 0.5;
+engine.RefreshLayout();
+await Task.Delay(2000);
+redA = Red(0.15, CenterY(0.05)); redB = Red(0.70, CenterY(0.5));
+Check(redB > 150 && redA < 50 && engine.PipelineStarts == moveStarts, $"card moved live (red {redB} at the new spot, {redA} at the old), starts {moveStarts} → {engine.PipelineStarts}");
+await engine.UpdateAsync(new[] { mscene }, mscene, WithEncoder(settings, "libx264"), false);
+await Task.Delay(500);
+Check(engine.PipelineStarts == moveStarts, "saving the moved layout doesn't rebuild the pipeline");
+for (int step = 0; step < 30; step++) { movable.X = 0.05 + step * 0.01; engine.RefreshLayout(); await Task.Delay(15); } // fast drag
 await Task.Delay(1500);
-bool sawReconnect; lock (messages) sawReconnect = messages.Any(m => m.Contains("Reconnecting"));
-Check(sawReconnect && engine.Live, "drop detected, still live, reconnect scheduled");
-await Task.Delay(7000);
-Check(engine.Running && engine.Live && last is { Live: true, Running: true }, $"pipeline back up after reconnect ({last?.Health})");
+Check(Red(0.44, CenterY(0.5)) > 150, $"a fast drag settles on the final position (red {Red(0.44, CenterY(0.5))})");
+movable.SizePercent = movable.W * 100; movable.Anchor = Anchors.BottomRight; movable.MarginPx = 24; // right-click → snap to corner
+await engine.UpdateAsync(new[] { mscene }, mscene, WithEncoder(settings, "libx264"), false);
+await Task.Delay(1500);
+// 128×72 card, 24 px from the bottom-right corner of 640×360: centre at (552, 300)
+Check(Red(552 / 640.0, 300 / 360.0) > 150 && engine.PipelineStarts == moveStarts,
+    $"snapping to a corner at the same size is live too (red {Red(552 / 640.0, 300 / 360.0)}, starts {engine.PipelineStarts})");
+movable.Anchor = Anchors.Free; movable.W = 0.3; // resizing rebuilds (applied on mouse-up)
+await engine.UpdateAsync(new[] { mscene }, mscene, WithEncoder(settings, "libx264"), false);
+Check(engine.PipelineStarts == moveStarts + 1, "resizing rebuilds the pipeline once");
+engine.FrameReady -= Grab;
+await engine.SetPreviewAsync(false);
+await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
+
+// ---------------------------------------------------------------- reconnects
+Console.WriteLine("A destination that drops reconnects on its own; the others don't notice");
+var srvA3 = RtmpServer.Start(ffmpeg, portA, "a", Path.Combine(liveDir, "a3.flv"));
+var srvB3 = RtmpServer.Start(ffmpeg, portB, "b", Path.Combine(liveDir, "b3.flv"));
+await engine.StartOutputsAsync(new[] { (outA.Id, (string?)null), (outB.Id, (string?)null) });
+await Task.Delay(8000);
+int rcStarts = engine.PipelineStarts;
+var bLiveFor = Out(outB)?.LiveFor ?? TimeSpan.Zero;
+try { srvA3.Kill(true); } catch { }
+srvA3.WaitForExit(3000);
+var srvA4 = RtmpServer.Start(ffmpeg, portA, "a", Path.Combine(liveDir, "a4.flv"));
+await Task.Delay(1500);
+bool sawReconnect; lock (messages) sawReconnect = messages.Any(m => m.Contains("Twitch test") && m.Contains("Reconnecting"));
+Check(sawReconnect && engine.IsOutputActive(outA.Id), "drop detected on A, reconnect scheduled");
+await Task.Delay(8000);
+Check(Out(outA)?.State == OutputState.Live && Out(outB)?.State == OutputState.Live && (Out(outB)?.LiveFor ?? TimeSpan.Zero) > bLiveFor + TimeSpan.FromSeconds(8)
+      && engine.PipelineStarts == rcStarts,
+    $"A back live, B uninterrupted, no encoder restart (A {Out(outA)?.State}, B {Out(outB)?.State} for {Out(outB)?.LiveFor.TotalSeconds:0}s)");
+
+Console.WriteLine("Auto-restart when the encoder itself dies mid-broadcast");
+var pid = engine.PipelineProcessId;
+try { if (pid is { } id) Process.GetProcessById(id).Kill(true); } catch { }
+await Task.Delay(300);
+// the destinations see the disconnect; bring the "servers" back like a real ingest would be
+srvA4.WaitForExit(3000); srvB3.WaitForExit(3000);
+var srvA5 = RtmpServer.Start(ffmpeg, portA, "a", Path.Combine(liveDir, "a5.flv"));
+var srvB5 = RtmpServer.Start(ffmpeg, portB, "b", Path.Combine(liveDir, "b5.flv"));
+await Task.Delay(1200);
+bool sawRestart; lock (messages) sawRestart = messages.Any(m => m.Contains("Restarting in"));
+Check(sawRestart && engine.Live, "encoder death detected, outputs kept, restart scheduled");
+await Task.Delay(10000);
+Check(engine.Running && Out(outA)?.State == OutputState.Live && Out(outB)?.State == OutputState.Live && last is { Live: true, Running: true },
+    $"pipeline and both destinations back up ({last?.Health}; A {Out(outA)?.State}, B {Out(outB)?.State})");
 await engine.StopAllAsync();
-Check(!engine.Running && !engine.Live, "stop all leaves nothing running");
+Check(!engine.Running && !engine.Live && engine.OutputStatuses().Count == 0, "stop all leaves nothing running");
+foreach (var srv in new[] { srvA5, srvB5 }) { srv.WaitForExit(4000); try { srv.Kill(true); } catch { } }
 
 engine.Dispose();
 Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(S)");
@@ -486,6 +676,30 @@ static class VideoFifo
 }
 
 static partial class Helpers { }
+
+/// <summary>A local stand-in for Twitch/YouTube/TikTok ingest: ffmpeg in RTMP server mode, saving what it receives.</summary>
+static class RtmpServer
+{
+    public static int FreePort()
+    {
+        var l = new TcpListener(IPAddress.Loopback, 0);
+        l.Start();
+        int p = ((IPEndPoint)l.LocalEndpoint).Port;
+        l.Stop();
+        return p;
+    }
+
+    public static Process Start(string ffmpeg, int port, string key, string file)
+    {
+        var psi = new ProcessStartInfo(ffmpeg) { RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false };
+        foreach (var a in new[] { "-hide_banner", "-loglevel", "error", "-y", "-listen", "1", "-i", $"rtmp://127.0.0.1:{port}/live/{key}", "-c", "copy", file })
+            psi.ArgumentList.Add(a);
+        var p = Process.Start(psi)!;
+        _ = p.StandardError.ReadToEndAsync();
+        Thread.Sleep(500); // listening before the first publish attempt
+        return p;
+    }
+}
 
 static class WinApi
 {

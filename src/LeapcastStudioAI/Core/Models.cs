@@ -45,7 +45,9 @@ public static class Anchors
     public const string BottomLeft = "Bottom left";
     public const string BottomRight = "Bottom right";
     public const string Center = "Center";
-    public static readonly string[] All = { Auto, Fill, TopLeft, TopRight, BottomLeft, BottomRight, Center };
+    /// <summary>Positioned by dragging on the preview (X/Y/W fractions of the canvas).</summary>
+    public const string Free = "Free";
+    public static readonly string[] All = { Auto, Fill, TopLeft, TopRight, BottomLeft, BottomRight, Center, Free };
 
     public static string Resolve(StudioSource s)
     {
@@ -71,6 +73,19 @@ public sealed class StudioSource
     /// <summary>Width as a percentage of the output width (overlays only).</summary>
     public double SizePercent { get; set; } = 24;
     public int MarginPx { get; set; } = 24;
+    /// <summary>Free placement on the horizontal canvas (fractions of canvas width/height), used when Anchor is Free.</summary>
+    public double X { get; set; }
+    public double Y { get; set; }
+    public double W { get; set; } = 0.25;
+
+    // Vertical (9:16) canvas placement
+    /// <summary>Shown on the vertical canvas.</summary>
+    public bool VShow { get; set; } = true;
+    /// <summary>Automatic vertical layout (camera on top, game below over a blurred copy of itself).</summary>
+    public bool VAuto { get; set; } = true;
+    public double VX { get; set; }
+    public double VY { get; set; }
+    public double VW { get; set; } = 1;
 
     // Display / window capture
     public int MonitorIndex { get; set; }
@@ -113,9 +128,38 @@ public sealed class StudioScene
     public ObservableCollection<StudioSource> Sources { get; set; } = new();
 }
 
+/// <summary>One multistream destination (Aitum-style output row).</summary>
+public sealed class StreamOutput
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = "Twitch";
+    /// <summary>Twitch | YouTube | TikTok | Kick | Custom</summary>
+    public string Service { get; set; } = "Twitch";
+    public string ServerUrl { get; set; } = "rtmp://live.twitch.tv/app";
+    /// <summary>Stream key encrypted for the current Windows user (DPAPI).</summary>
+    public string StreamKeyProtected { get; set; } = "";
+    /// <summary>"Horizontal" (main canvas) or "Vertical" (9:16 canvas).</summary>
+    public string Canvas { get; set; } = "Horizontal";
+    /// <summary>Included in "Start all".</summary>
+    public bool Enabled { get; set; } = true;
+    /// <summary>Prompt for a fresh key when starting (TikTok issues a new key for most sessions).</summary>
+    public bool AskKeyEachTime { get; set; }
+    /// <summary>0 = share the canvas encode (no extra GPU/CPU). Otherwise this output gets its own encode at this bitrate.</summary>
+    public int OwnBitrateKbps { get; set; }
+
+    public bool IsVertical => string.Equals(Canvas, "Vertical", StringComparison.OrdinalIgnoreCase);
+}
+
 public sealed class StudioSettings
 {
-    // Destination
+    // Multistream outputs (replaces the single destination below, which is kept only to migrate old settings)
+    public List<StreamOutput> Outputs { get; set; } = new();
+    /// <summary>Second, 9:16 canvas for TikTok / Shorts / Reels outputs.</summary>
+    public bool VerticalCanvas { get; set; }
+    /// <summary>"720x1280" or "1080x1920".</summary>
+    public string VerticalResolution { get; set; } = "720x1280";
+
+    // Legacy single destination (migrated into Outputs on load)
     public string Platform { get; set; } = "Twitch";
     public string ServerUrl { get; set; } = "rtmp://live.twitch.tv/app";
     /// <summary>Stream key encrypted for the current Windows user (DPAPI). Never stored in plain text.</summary>
@@ -177,7 +221,10 @@ public static class StateStore
             {
                 var state = JsonSerializer.Deserialize<StudioState>(File.ReadAllText(FilePath));
                 if (state is not null && state.Scenes.Count > 0)
+                {
+                    Migrate(state);
                     return state;
+                }
             }
         }
         catch { /* Corrupt settings should never prevent launch. */ }
@@ -190,6 +237,21 @@ public static class StateStore
         initial.Scenes.Add(scene);
         initial.SelectedSceneId = scene.Id;
         return initial;
+    }
+
+    /// <summary>Older versions had one destination: turn it into the first output.</summary>
+    public static void Migrate(StudioState state)
+    {
+        var s = state.Settings;
+        if (s.Outputs.Count == 0 && !string.IsNullOrEmpty(s.StreamKeyProtected))
+        {
+            s.Outputs.Add(new StreamOutput
+            {
+                Name = s.Platform, Service = Platforms.Get(s.Platform).Name, ServerUrl = s.ServerUrl,
+                StreamKeyProtected = s.StreamKeyProtected, Canvas = "Horizontal", Enabled = true
+            });
+            s.StreamKeyProtected = "";
+        }
     }
 
     public static void Save(StudioState state)

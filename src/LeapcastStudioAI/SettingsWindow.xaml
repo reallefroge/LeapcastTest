@@ -1,45 +1,19 @@
 <Window x:Class="LeapcastStudioAI.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Studio settings" Height="760" Width="560" MinHeight="500"
+        Title="Studio settings" Height="720" Width="620" MinHeight="480"
         WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}">
   <DockPanel Margin="18,16,18,14">
-    <TextBlock DockPanel.Dock="Top" Text="Studio settings" FontSize="22" FontWeight="Bold" Margin="3,0,0,10"/>
+    <TextBlock DockPanel.Dock="Top" Text="Studio settings" FontSize="22" FontWeight="Bold" Margin="3,0,0,6"/>
     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
       <Button Content="Cancel" IsCancel="True" Click="Cancel_Click"/>
-      <Button Content="Save settings" IsDefault="True" Background="#5748C7" Click="Save_Click"/>
+      <Button Content="Save settings" IsDefault="True" Style="{StaticResource PrimaryButton}" Click="Save_Click"/>
     </StackPanel>
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-      <StackPanel Margin="0,0,8,0">
-
-        <!-- STREAM -->
-        <Border Background="{StaticResource PanelBrush}" CornerRadius="10" Padding="12" Margin="0,0,0,10">
-          <StackPanel>
-            <TextBlock Text="STREAM DESTINATION" Style="{StaticResource SectionHeader}"/>
-            <TextBlock Text="Platform" Style="{StaticResource FieldLabel}"/>
-            <ComboBox x:Name="PlatformBox" SelectionChanged="PlatformBox_SelectionChanged"/>
-            <TextBlock Text="Server URL" Style="{StaticResource FieldLabel}"/>
-            <TextBox x:Name="ServerBox" TextChanged="AnyChanged"/>
-            <TextBlock Text="Stream key" Style="{StaticResource FieldLabel}"/>
-            <PasswordBox x:Name="KeyBox"/>
-            <TextBlock x:Name="KeyHint" Style="{StaticResource Hint}"/>
-            <TextBlock Text="Stored encrypted for your Windows account only." Style="{StaticResource Hint}"/>
-            <DockPanel Margin="0,8,0,0">
-              <Button x:Name="TestButton" DockPanel.Dock="Left" Content="Test my connection" Click="Test_Click"/>
-              <TextBlock x:Name="TestResult" VerticalAlignment="Center" TextWrapping="Wrap" Margin="8,0,0,0"
-                         Foreground="{StaticResource MutedBrush}" FontSize="11"/>
-            </DockPanel>
-            <TextBlock Text="Upload speed (Mbps)" Style="{StaticResource FieldLabel}"/>
-            <TextBox x:Name="UploadBox" TextChanged="AnyChanged"/>
-            <TextBlock Text="Filled in by the test (Twitch), or type the upload from any speed test. Auto quality never plans more than 75% of it."
-                       Style="{StaticResource Hint}"/>
-          </StackPanel>
-        </Border>
-
-        <!-- QUALITY -->
-        <Border Background="{StaticResource PanelBrush}" CornerRadius="10" Padding="12" Margin="0,0,0,10">
-          <StackPanel>
-            <TextBlock Text="SMART QUALITY" Style="{StaticResource SectionHeader}"/>
+    <TabControl>
+      <TabItem Header="Quality">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <Border Style="{StaticResource Card}" Margin="0,4,8,0">
+            <StackPanel>
             <TextBlock Text="What are you streaming?" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="ContentBox" SelectionChanged="AnyChanged">
               <ComboBoxItem Content="Low-motion game: Wizard101, card or turn-based games" Tag="LowMotion"/>
@@ -93,13 +67,25 @@
                 <TextBlock x:Name="PlanReasons" Style="{StaticResource Hint}" Margin="0"/>
               </StackPanel>
             </Border>
-          </StackPanel>
-        </Border>
-
-        <!-- TRANSITIONS -->
-        <Border Background="{StaticResource PanelBrush}" CornerRadius="10" Padding="12" Margin="0,0,0,10">
-          <StackPanel>
-            <TextBlock Text="SCENE TRANSITIONS" Style="{StaticResource SectionHeader}"/>
+          
+            </StackPanel>
+          </Border>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Canvas &amp; scenes">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <Border Style="{StaticResource Card}" Margin="0,4,8,0">
+            <StackPanel>
+            <TextBlock Text="VERTICAL CANVAS (TIKTOK, SHORTS, REELS)" Style="{StaticResource SectionHeader}"/>
+            <CheckBox x:Name="VerticalBox" Content="Second 9:16 canvas with its own layout" Click="AnyChanged"/>
+            <TextBlock Text="Vertical resolution" Style="{StaticResource FieldLabel}"/>
+            <ComboBox x:Name="VerticalResBox" SelectionChanged="AnyChanged">
+              <ComboBoxItem Content="720 × 1280 (recommended, light on upload)" Tag="720x1280"/>
+              <ComboBoxItem Content="1080 × 1920" Tag="1080x1920"/>
+            </ComboBox>
+            <TextBlock Text="The vertical canvas places your camera on top and the game below it automatically. Drag things on the vertical preview to change it."
+                       Style="{StaticResource Hint}"/>
+            <TextBlock Text="SCENE TRANSITIONS" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
             <TextBlock Text="Transition" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="TransitionBox">
               <ComboBoxItem Content="Fade (crossfade between scenes)" Tag="Fade"/>
@@ -115,13 +101,36 @@
             </ComboBox>
             <TextBlock Text="Every scene stays live inside the encoder, so switching never interrupts the stream. Each extra scene adds a little CPU work."
                        Style="{StaticResource Hint}"/>
-          </StackPanel>
-        </Border>
-
-        <!-- RECORDING -->
-        <Border Background="{StaticResource PanelBrush}" CornerRadius="10" Padding="12" Margin="0,0,0,10">
-          <StackPanel>
-            <TextBlock Text="RECORDINGS &amp; REPLAYS" Style="{StaticResource SectionHeader}"/>
+          
+            </StackPanel>
+          </Border>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Connection">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <Border Style="{StaticResource Card}" Margin="0,4,8,0">
+            <StackPanel>
+            <TextBlock Text="Upload speed (Mbps)" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="UploadBox" TextChanged="AnyChanged"/>
+            <TextBlock Text="Type the upload from any speed test, or measure it with your Twitch output below. Leapcast never plans more than 75% of it, split across every destination you stream to at once."
+                       Style="{StaticResource Hint}"/>
+            <DockPanel Margin="0,8,0,0">
+              <Button x:Name="TestButton" DockPanel.Dock="Left" Content="Test my connection" Click="Test_Click"/>
+              <TextBlock x:Name="TestResult" VerticalAlignment="Center" TextWrapping="Wrap" Margin="8,0,0,0"
+                         Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+            </DockPanel>
+            <TextBlock Text="RELIABILITY" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
+            <CheckBox x:Name="ReconnectBox" Content="Reconnect automatically if the stream drops"/>
+            <CheckBox x:Name="AdjustBox" Content="Lower the bitrate automatically if my connection can't keep up"/>
+          
+            </StackPanel>
+          </Border>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Recording">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <Border Style="{StaticResource Card}" Margin="0,4,8,0">
+            <StackPanel>
             <TextBlock Text="Save to folder" Style="{StaticResource FieldLabel}"/>
             <DockPanel>
               <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseFolder_Click"/>
@@ -137,31 +146,26 @@
             </ComboBox>
             <TextBlock Text="Recordings reuse the stream's encode, so recording while live costs no extra GPU/CPU."
                        Style="{StaticResource Hint}"/>
-          </StackPanel>
-        </Border>
-
-        <!-- RELIABILITY -->
-        <Border Background="{StaticResource PanelBrush}" CornerRadius="10" Padding="12" Margin="0,0,0,10">
-          <StackPanel>
-            <TextBlock Text="RELIABILITY" Style="{StaticResource SectionHeader}"/>
-            <CheckBox x:Name="ReconnectBox" Content="Reconnect automatically if the stream drops"/>
-            <CheckBox x:Name="AdjustBox" Content="Lower the bitrate automatically if my connection can't keep up"/>
-          </StackPanel>
-        </Border>
-
-        <!-- ADVANCED -->
-        <Border Background="{StaticResource PanelBrush}" CornerRadius="10" Padding="12">
-          <StackPanel>
-            <TextBlock Text="ADVANCED" Style="{StaticResource SectionHeader}"/>
+          
+            </StackPanel>
+          </Border>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Advanced">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <Border Style="{StaticResource Card}" Margin="0,4,8,0">
+            <StackPanel>
             <TextBlock Text="FFmpeg location (leave empty to use the bundled copy)" Style="{StaticResource FieldLabel}"/>
             <DockPanel>
               <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseFfmpeg_Click"/>
               <TextBox x:Name="FfmpegBox"/>
             </DockPanel>
             <Button Content="Open log folder" HorizontalAlignment="Left" Click="OpenLogs_Click" Margin="3,8,3,3"/>
-          </StackPanel>
-        </Border>
-      </StackPanel>
-    </ScrollViewer>
+          
+            </StackPanel>
+          </Border>
+        </ScrollViewer>
+      </TabItem>
+    </TabControl>
   </DockPanel>
 </Window>

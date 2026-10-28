@@ -44,6 +44,7 @@ public sealed class SegmentCache
             _activeSession = ++_sessionCounter;
             _activeDir = System.IO.Path.Combine(_root, "s" + _activeSession.ToString("0000", CultureInfo.InvariantCulture));
             Directory.CreateDirectory(_activeDir);
+            _scanCache = null;
             return System.IO.Path.Combine(_activeDir, "seg_%06d.ts").Replace('\\', '/');
         }
     }
@@ -55,43 +56,86 @@ public sealed class SegmentCache
             if (_activeSession > 0) _endedSessions.Add(_activeSession);
             _activeSession = -1;
             _activeDir = null;
+            _scanCache = null;
         }
     }
 
     public bool HasActiveSession { get { lock (_lock) return _activeSession > 0; } }
 
+    private List<Segment>? _scanCache;
+    private DateTime _scanAt;
+    /// <summary>Closed segments never change: their size/time is read once (a long recording has thousands).</summary>
+    private readonly Dictionary<string, (long size, DateTime written)> _closedInfo = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>All segments in order. Results are reused for 250 ms (the monitor, stats and housekeeping share one scan).</summary>
     public List<Segment> Scan()
     {
+        lock (_lock)
+        {
+            if (_scanCache is not null && DateTime.UtcNow - _scanAt < TimeSpan.FromMilliseconds(250)) return new List<Segment>(_scanCache);
+        }
         var result = new List<Segment>();
         if (!Directory.Exists(_root)) return result;
         HashSet<int> ended;
         lock (_lock) ended = new HashSet<int>(_endedSessions);
-        foreach (var dir in Directory.GetDirectories(_root, "s*"))
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var dir in Directory.EnumerateDirectories(_root, "s*"))
         {
             if (!int.TryParse(System.IO.Path.GetFileName(dir)[1..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var session)) continue;
             var files = new List<(int n, FileInfo f)>();
-            foreach (var path in Directory.GetFiles(dir, "seg_*.ts"))
+            try
             {
-                var name = System.IO.Path.GetFileNameWithoutExtension(path);
-                if (int.TryParse(name.AsSpan(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
-                    files.Add((n, new FileInfo(path)));
+                // DirectoryInfo enumeration carries size + time from the directory listing: no per-file stat call
+                foreach (var f in new DirectoryInfo(dir).EnumerateFiles("seg_*.ts"))
+                {
+                    var name = System.IO.Path.GetFileNameWithoutExtension(f.Name);
+                    if (int.TryParse(name.AsSpan(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
+                        files.Add((n, f));
+                }
             }
+            catch { continue; }
             files.Sort((a, b) => a.n.CompareTo(b.n));
             for (int i = 0; i < files.Count; i++)
             {
                 bool closed = i < files.Count - 1 || ended.Contains(session);
                 var f = files[i].f;
+                string path = f.FullName;
+                seen.Add(path);
                 long size = 0; DateTime written = DateTime.UtcNow;
-                try { f.Refresh(); size = f.Length; written = f.LastWriteTimeUtc; } catch { }
-                result.Add(new Segment(f.FullName, session, files[i].n, size, written, closed));
+                bool cached;
+                (long size, DateTime written) info;
+                lock (_lock) cached = _closedInfo.TryGetValue(path, out info);
+                if (cached) { size = info.size; written = info.written; }
+                else
+                {
+                    try
+                    {
+                        if (!closed) f.Refresh(); // the segment being written: the listing may lag behind
+                        size = f.Length; written = f.LastWriteTimeUtc;
+                    }
+                    catch { }
+                    if (closed && size > 0) lock (_lock) _closedInfo[path] = (size, written);
+                }
+                result.Add(new Segment(path, session, files[i].n, size, written, closed));
             }
         }
         result.Sort((a, b) => a.Key.CompareTo(b.Key));
-        return result;
+        lock (_lock)
+        {
+            if (_closedInfo.Count > seen.Count + 64)
+                foreach (var k in _closedInfo.Keys.Where(k => !seen.Contains(k)).ToList()) _closedInfo.Remove(k);
+            _scanCache = result;
+            _scanAt = DateTime.UtcNow;
+        }
+        return new List<Segment>(result);
     }
+
+    /// <summary>Forget the memoized scan (after deleting files or ending a session).</summary>
+    private void InvalidateScan() { lock (_lock) _scanCache = null; }
 
     private long CurrentKey()
     {
+        InvalidateScan();
         var segs = Scan();
         lock (_lock)
         {
@@ -151,6 +195,7 @@ public sealed class SegmentCache
 
     private long LastExistingKey()
     {
+        InvalidateScan();
         var segs = Scan();
         return segs.Count == 0 ? long.MinValue : segs[^1].Key;
     }
@@ -160,6 +205,7 @@ public sealed class SegmentCache
         var until = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < until)
         {
+            InvalidateScan();
             var seg = Scan().FirstOrDefault(s => s.Key == key);
             if (seg is null || seg.Closed) return;
             await Task.Delay(250, ct);
@@ -172,13 +218,15 @@ public sealed class SegmentCache
         var cutoff = DateTime.UtcNow - TimeSpan.FromSeconds(replaySeconds + SegmentSeconds * 3 + 5);
         long? rec; List<(long from, long to)> pins;
         lock (_lock) { rec = _recordingFrom; pins = _pinned.ToList(); }
+        bool deleted = false;
         foreach (var s in Scan())
         {
             if (!s.Closed || s.WrittenUtc >= cutoff) continue;
             if (rec is not null && s.Key >= rec) continue;
             if (pins.Any(p => s.Key >= p.from && s.Key <= p.to)) continue;
-            try { File.Delete(s.Path); } catch { }
+            try { File.Delete(s.Path); deleted = true; } catch { }
         }
+        if (deleted) InvalidateScan();
         // remove empty finished session folders
         lock (_lock)
         {
@@ -186,7 +234,7 @@ public sealed class SegmentCache
             {
                 try
                 {
-                    if (dir != _activeDir && Directory.GetFiles(dir).Length == 0) Directory.Delete(dir);
+                    if (dir != _activeDir && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
                 }
                 catch { }
             }

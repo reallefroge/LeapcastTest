@@ -75,7 +75,31 @@ jobs:
         shell: pwsh
         run: |
           $exe = Resolve-Path "publish/win-x64/Leapcast Studio AI.exe"
-          $p = Start-Process -FilePath $exe -PassThru
+          # Demo studio: a game scene + BRB scene, three outputs (Twitch, YouTube, TikTok) and the vertical canvas
+          $stateDir = Join-Path $env:LOCALAPPDATA "LeapcastStudioAI"
+          New-Item -ItemType Directory -Force $stateDir | Out-Null
+          @'
+          {
+            "Scenes": [
+              { "Name": "Wizard101", "Sources": [
+                { "Name": "Wizard101 (screen)", "Type": "Display Capture", "CaptureMethod": "GDI" },
+                { "Name": "Title", "Type": "Text", "Text": "Leapcast multistream", "Anchor": "Free", "X": 0.04, "Y": 0.05, "W": 0 }
+              ] },
+              { "Name": "Be right back", "Sources": [
+                { "Name": "BRB", "Type": "Text", "Text": "Be right back", "Anchor": "Center", "FontSize": 80 }
+              ] }
+            ],
+            "Settings": {
+              "VerticalCanvas": true,
+              "Outputs": [
+                { "Name": "Twitch", "Service": "Twitch", "ServerUrl": "rtmp://live.twitch.tv/app" },
+                { "Name": "YouTube", "Service": "YouTube", "ServerUrl": "rtmp://a.rtmp.youtube.com/live2" },
+                { "Name": "TikTok", "Service": "TikTok", "ServerUrl": "", "Canvas": "Vertical", "AskKeyEachTime": true }
+              ]
+            }
+          }
+          '@ | Set-Content -Encoding utf8 (Join-Path $stateDir "studio-state.json")
+          $p = Start-Process -FilePath $exe -ArgumentList "--preview" -PassThru
           Start-Sleep -Seconds 25
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds

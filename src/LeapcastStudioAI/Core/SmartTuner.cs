@@ -8,6 +8,7 @@ public static class Platforms
     {
         new("Twitch", "rtmp://live.twitch.tv/app", 6000, true, "Twitch dashboard → Settings → Stream → Primary Stream key"),
         new("YouTube", "rtmp://a.rtmp.youtube.com/live2", 9000, false, "YouTube Studio → Go live → Stream → Stream key"),
+        new("TikTok", "", 6000, false, "TikTok LIVE Producer → Go LIVE → Stream settings: paste the Server URL and Stream key. TikTok usually issues a new key every stream."),
         new("Kick", "", 8000, false, "Kick dashboard → Settings → Stream URL & Key (paste both)"),
         new("Custom", "", 9000, false, "Any RTMP/RTMPS server URL and key"),
     };
@@ -198,4 +199,98 @@ public static class SmartTuner
     }
 
     public static int Even(int v) => v % 2 == 0 ? v : v - 1;
+}
+
+/// <summary>Every encode the engine runs for one set of outputs.</summary>
+public sealed record PlanSet(EncodePlan Main, EncodePlan? Vertical, IReadOnlyDictionary<Guid, EncodePlan> Own)
+{
+    /// <summary>Total upload (video + audio) if every destination in the pool is live.</summary>
+    public int UploadKbps { get; init; }
+}
+
+/// <summary>
+/// Splits the measured upload between multistream destinations. A shared canvas encode is uploaded once per
+/// destination that uses it, so 3 destinations of 4 Mbps need 12 Mbps of upload even though only one encode runs.
+/// </summary>
+public static class OutputBudget
+{
+    /// <summary>A vertical (9:16 720p) destination gets about this share of the main destination's bitrate.</summary>
+    public const double VerticalShare = 0.6;
+
+    public static PlanSet Resolve(StudioSettings s, IReadOnlyList<StreamOutput> pool, bool verticalCanvas,
+        IReadOnlyList<ProbedEncoder> encoders, int cpuThreads, double scale = 1.0)
+    {
+        var hShared = pool.Where(o => !o.IsVertical && o.OwnBitrateKbps <= 0).ToList();
+        var vShared = verticalCanvas ? pool.Where(o => o.IsVertical && o.OwnBitrateKbps <= 0).ToList() : new List<StreamOutput>();
+        var own = pool.Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || verticalCanvas)).ToList();
+        int audio = Math.Clamp(s.AudioBitrateKbps, 64, 320);
+
+        // The strictest horizontal service sets the main cap (e.g. Twitch 6000 while also on YouTube).
+        string platform = hShared.Count > 0
+            ? hShared.OrderBy(o => Platforms.Get(o.Service).MaxKbps).First().Service
+            : (s.Outputs.FirstOrDefault(o => !o.IsVertical)?.Service ?? s.Platform);
+        var tuned = s.Clone();
+        tuned.Platform = platform;
+
+        int nh = Math.Max(1, hShared.Count), nv = vShared.Count;
+        int destinations = hShared.Count + nv + own.Count;
+        int perMain = int.MaxValue;
+        if (s.UploadMbps > 0 && destinations > 1)
+        {
+            int safe = (int)(s.UploadMbps * 1000 * 0.75) - own.Sum(o => o.OwnBitrateKbps + audio);
+            perMain = (int)((safe - audio * (nh + nv)) / (nh + VerticalShare * nv));
+            perMain = Math.Max(800, perMain);
+            // let the tuner pick the profile that fits one destination's share
+            tuned.UploadMbps = (perMain + audio) / 750.0;
+        }
+        var main = SmartTuner.Resolve(tuned, encoders, cpuThreads);
+        if (perMain != int.MaxValue)
+        {
+            var reasons = main.Reasons.Where(r => !r.Contains("Mbps upload", StringComparison.Ordinal)).ToList();
+            reasons.Add($"Multistream: {destinations} destinations share your {s.UploadMbps:0.#} Mbps upload, so each horizontal one gets up to {main.CapKbps} kbps.");
+            main = main with { Reasons = reasons };
+        }
+        if (scale < 0.999)
+        {
+            int cap = Math.Max(1000, (int)(main.CapKbps * scale));
+            main = main with { CapKbps = cap, Reasons = main.Reasons.Append($"Lowered to {cap} kbps because a destination's upload was struggling.").ToList() };
+        }
+
+        EncodePlan? vertical = null;
+        if (verticalCanvas)
+        {
+            var (vw, vh) = LayoutMath.VerticalSize(s.VerticalResolution);
+            int platformCap = vShared.Count > 0 ? vShared.Min(o => Platforms.Get(o.Service).MaxKbps) : 6000;
+            double pixels = vw * (double)vh / (main.Width * (double)main.Height);
+            int cap = (int)Math.Clamp(main.CapKbps * pixels * 1.1, 1500, platformCap);
+            if (s.UploadMbps > 0)
+            {
+                // whatever the horizontal destinations leave of the safe upload is shared by the vertical ones
+                int safe = (int)(s.UploadMbps * 1000 * 0.75) - own.Sum(o => o.OwnBitrateKbps + audio);
+                int left = safe - hShared.Count * (main.CapKbps + audio) - Math.Max(1, nv) * audio;
+                cap = Math.Min(cap, Math.Max(800, left / Math.Max(1, nv)));
+            }
+            if (scale < 0.999) cap = Math.Max(800, (int)(cap * scale));
+            vertical = main with
+            {
+                Width = vw, Height = vh, CapKbps = cap, ProfileName = "Vertical",
+                Reasons = new[] { $"Vertical canvas {vw}×{vh} for TikTok/Shorts: up to {cap} kbps." },
+            };
+        }
+
+        var ownPlans = new Dictionary<Guid, EncodePlan>();
+        foreach (var o in own)
+        {
+            var basePlan = o.IsVertical && vertical is not null ? vertical : main;
+            ownPlans[o.Id] = basePlan with
+            {
+                CapKbps = Math.Clamp(o.OwnBitrateKbps, 500, 50000),
+                Reasons = new[] { $"{o.Name}: its own encode at up to {o.OwnBitrateKbps} kbps." },
+            };
+        }
+
+        int upload = hShared.Count * (main.CapKbps + audio) + nv * ((vertical?.CapKbps ?? 0) + audio)
+                     + own.Sum(o => o.OwnBitrateKbps + audio);
+        return new PlanSet(main, vertical, ownPlans) { UploadKbps = upload };
+    }
 }

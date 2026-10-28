@@ -13,16 +13,16 @@ public partial class SettingsWindow : Window
 
     public StudioSettings Result { get; private set; }
 
-    public SettingsWindow(StudioSettings current, string streamKey, StreamEngine engine)
+    /// <summary>The Twitch output used for the connection test (Twitch has a private bandwidth-test mode).</summary>
+    private readonly StreamOutput? _twitch;
+
+    public SettingsWindow(StudioSettings current, StreamEngine engine)
     {
         InitializeComponent();
         _engine = engine;
         Result = current.Clone();
+        _twitch = current.Outputs.FirstOrDefault(o => o.Service == "Twitch" && SecretStore.Unprotect(o.StreamKeyProtected).Length > 0);
 
-        foreach (var p in Platforms.All) PlatformBox.Items.Add(new ComboBoxItem { Content = p.Name, Tag = p.Name });
-        SelectTag(PlatformBox, Platforms.Get(current.Platform).Name);
-        ServerBox.Text = current.ServerUrl;
-        KeyBox.Password = streamKey;
         UploadBox.Text = current.UploadMbps > 0 ? current.UploadMbps.ToString("0.#", CultureInfo.CurrentCulture) : "";
         if (current.UploadMeasuredUtc is { } when)
             TestResult.Text = $"Last measured {when.ToLocalTime():g}.";
@@ -51,9 +51,14 @@ public partial class SettingsWindow : Window
         ReconnectBox.IsChecked = current.AutoReconnect;
         AdjustBox.IsChecked = current.AutoAdjustBitrate;
         FfmpegBox.Text = current.FfmpegPath;
+        VerticalBox.IsChecked = current.VerticalCanvas;
+        SelectTag(VerticalResBox, current.VerticalResolution.Replace(" ", "").Replace("×", "x"));
+
+        TestButton.IsEnabled = _twitch is not null;
+        if (_twitch is null && current.UploadMeasuredUtc is null)
+            TestResult.Text = "Add a Twitch output with its key to measure your upload (Twitch's private test mode, nothing is shown to viewers).";
 
         _loaded = true;
-        UpdatePlatformUi(setServer: false);
         UpdatePlan();
         Closed += (_, _) => _testCts?.Cancel();
     }
@@ -77,8 +82,6 @@ public partial class SettingsWindow : Window
     private StudioSettings Collect()
     {
         var s = Result.Clone();
-        s.Platform = TagOf(PlatformBox, "Custom");
-        s.ServerUrl = ServerBox.Text.Trim();
         s.UploadMbps = double.TryParse(UploadBox.Text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var up) ? Math.Max(0, up) : 0;
         s.ContentType = TagOf(ContentBox, "LowMotion");
         s.QualityProfile = TagOf(ProfileBox, "Auto");
@@ -96,6 +99,8 @@ public partial class SettingsWindow : Window
         s.AutoReconnect = ReconnectBox.IsChecked == true;
         s.AutoAdjustBitrate = AdjustBox.IsChecked == true;
         s.FfmpegPath = FfmpegBox.Text.Trim();
+        s.VerticalCanvas = VerticalBox.IsChecked == true;
+        s.VerticalResolution = TagOf(VerticalResBox, "720x1280");
         return s;
     }
 
@@ -107,33 +112,15 @@ public partial class SettingsWindow : Window
     private void UpdatePlan()
     {
         CustomPanel.Visibility = TagOf(ProfileBox, "Auto") == "Custom" ? Visibility.Visible : Visibility.Collapsed;
-        var plan = _engine.PlanFor(Collect());
-        PlanPreview.Text = plan.Summary;
-        PlanReasons.Text = string.Join(Environment.NewLine, plan.Reasons.Select(r => "• " + r));
-    }
-
-    private void PlatformBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_loaded) return;
-        UpdatePlatformUi(setServer: true);
-        UpdatePlan();
-    }
-
-    private void UpdatePlatformUi(bool setServer)
-    {
-        var p = Platforms.Get(TagOf(PlatformBox, "Custom"));
-        if (setServer && !string.IsNullOrEmpty(p.ServerUrl)) ServerBox.Text = p.ServerUrl;
-        if (setServer && string.IsNullOrEmpty(p.ServerUrl) && Platforms.All.Any(x => x.ServerUrl == ServerBox.Text)) ServerBox.Text = "";
-        KeyHint.Text = p.KeyHint;
-        TestButton.IsEnabled = p.SupportsBandwidthTest;
-        if (!p.SupportsBandwidthTest)
-            TestResult.Text = "The connection test runs against Twitch's private test mode. For other platforms, type your upload speed below.";
+        var plans = _engine.PlansFor(Collect());
+        PlanPreview.Text = plans.Main.Summary + (plans.Vertical is not null && VerticalBox.IsChecked == true ? $"   +   vertical {plans.Vertical.Width}×{plans.Vertical.Height} ≤ {plans.Vertical.CapKbps} kbps" : "");
+        PlanReasons.Text = string.Join(Environment.NewLine, plans.Main.Reasons.Select(r => "• " + r));
     }
 
     private async void Test_Click(object sender, RoutedEventArgs e)
     {
         if (_engine.FfmpegPath is null) { TestResult.Text = "FFmpeg not found."; return; }
-        if (string.IsNullOrWhiteSpace(KeyBox.Password)) { TestResult.Text = "Paste your Twitch stream key first."; return; }
+        if (_twitch is null) { TestResult.Text = "Add a Twitch output with its stream key first."; return; }
         if (_engine.Live) { TestResult.Text = "End your stream before testing (the test would compete for upload)."; return; }
         TestButton.IsEnabled = false;
         _testCts = new CancellationTokenSource();
@@ -141,7 +128,7 @@ public partial class SettingsWindow : Window
         try
         {
             TestResult.Text = "Connecting to Twitch (test mode: nothing is shown to viewers)…";
-            var r = await BandwidthTester.RunAsync(_engine.FfmpegPath, ServerBox.Text, KeyBox.Password, 9000, 12, progress, _testCts.Token);
+            var r = await BandwidthTester.RunAsync(_engine.FfmpegPath, _twitch.ServerUrl, SecretStore.Unprotect(_twitch.StreamKeyProtected), 9000, 12, progress, _testCts.Token);
             double mbps = r.MeasuredKbps / 1000.0;
             UploadBox.Text = mbps.ToString("0.#", CultureInfo.CurrentCulture);
             Result.UploadMeasuredUtc = DateTime.UtcNow;
@@ -181,7 +168,6 @@ public partial class SettingsWindow : Window
             MessageBox.Show(this, "Enter the resolution as width × height, e.g. 1600 × 900.", "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        s.StreamKeyProtected = SecretStore.Protect(KeyBox.Password.Trim());
         Result = s;
         _testCts?.Cancel();
         DialogResult = true;
