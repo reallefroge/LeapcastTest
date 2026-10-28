@@ -314,7 +314,9 @@ Check(dims.Trim().StartsWith("640,360,"), $"output is 640x360@30 ({dims.Trim()})
 
 // ---------------------------------------------------------------- performance guard
 var heavy = WithEncoder(settings, "libx264"); heavy.Resolution = "1600 × 900"; heavy.FrameRate = 60;
-Check(engine.PlanFor(heavy) is { Fps: 60, Width: 1600 }, "custom 1600×900 @ 60 is honoured while the PC keeps up");
+// (the Windows CI scene captures with GDI, which Leapcast always caps at 30 FPS)
+int honoured = OperatingSystem.IsWindows() ? 30 : 60;
+Check(engine.PlanFor(heavy).Fps == honoured && engine.PlanFor(heavy).Width == 1600, $"custom 1600×900 @ 60 is honoured while the PC keeps up ({engine.PlanFor(heavy).Summary})");
 engine.SimulatePerformanceGuard(1);
 Check(engine.PlanFor(heavy) is { Fps: 30, Width: 1600 }, "falling behind: the guard drops to 30 FPS first");
 engine.SimulatePerformanceGuard(2);
