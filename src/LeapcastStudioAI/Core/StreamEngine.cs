@@ -195,6 +195,9 @@ public sealed class StreamEngine : IDisposable
     {
         _audio = audio;
         _platform = platform;
+        // ffmpeg readers/writers (preview, progress, outputs) must never queue behind each other on a small pool
+        ThreadPool.GetMinThreads(out int workers, out int io);
+        ThreadPool.SetMinThreads(Math.Max(workers, 32), Math.Max(io, 32));
         _cache = new SegmentCache(Path.Combine(dataRoot, "cache", "segments"));
         _logDir = Path.Combine(dataRoot, "logs");
         _tempDir = Path.Combine(dataRoot, "cache", "overlays");
@@ -405,7 +408,7 @@ public sealed class StreamEngine : IDisposable
         string url = o.ServerUrl.Trim();
         if (url.Length == 0)
             return o.Service == "TikTok"
-                ? "paste the Server URL from TikTok LIVE Producer (Go LIVE → Stream settings)."
+                ? "paste the Server URL from TikTok LIVE Producer (livecenter.tiktok.com/producer → Save & Go LIVE)."
                 : "add the server URL.";
         if (!url.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("rtmps://", StringComparison.OrdinalIgnoreCase))
             return "the server URL must start with rtmp:// or rtmps://.";
@@ -998,7 +1001,9 @@ public sealed class StreamEngine : IDisposable
             return "Screen capture failed (" + r + "). Try Capture method \"GDI\" in the display source's properties.";
         if (r.Contains("Connection refused", StringComparison.OrdinalIgnoreCase) || r.Contains("Connection reset", StringComparison.OrdinalIgnoreCase)
             || r.Contains("Input/output error", StringComparison.OrdinalIgnoreCase) || r.Contains("Broken pipe", StringComparison.OrdinalIgnoreCase)
-            || r.Contains("Failed to connect", StringComparison.OrdinalIgnoreCase) || r.Contains("Cannot open connection", StringComparison.OrdinalIgnoreCase))
+            || r.Contains("Failed to connect", StringComparison.OrdinalIgnoreCase) || r.Contains("Cannot open connection", StringComparison.OrdinalIgnoreCase)
+            || r.Contains("Error opening output", StringComparison.OrdinalIgnoreCase) || r.Contains("Error number -138", StringComparison.Ordinal)
+            || r.Contains("Error number -10061", StringComparison.Ordinal) || r.Contains("Error number -10054", StringComparison.Ordinal))
             return "Couldn't reach the streaming server. Check your internet connection, server URL and stream key.";
         if (r.Contains("403", StringComparison.Ordinal) || r.Contains("Forbidden", StringComparison.OrdinalIgnoreCase) || r.Contains("NetStream.Publish.BadName", StringComparison.OrdinalIgnoreCase))
             return "The server rejected the stream key. Copy a fresh key (TikTok issues a new one every stream).";

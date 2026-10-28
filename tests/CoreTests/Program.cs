@@ -217,7 +217,8 @@ Console.WriteLine("A destination that refuses the connection fails on its own");
 var badSet = settings.Clone();
 await engine.UpdateAsync(scene, badSet, false);
 var badProblems = await engine.StartOutputAsync(outA.Id); // nobody listening on port A now
-await Task.Delay(4000);
+var badWait = Stopwatch.StartNew();
+while (Out(outA)?.State != OutputState.Error && badWait.Elapsed < TimeSpan.FromSeconds(15)) await Task.Delay(250);
 var badStatus = Out(outA);
 Check(badProblems.Count == 0 && badStatus?.State == OutputState.Error && !engine.IsOutputActive(outA.Id),
     $"refused destination reported as an error and stopped ({badStatus?.State}: {badStatus?.Message})");

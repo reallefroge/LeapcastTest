@@ -8,7 +8,7 @@ public static class Platforms
     {
         new("Twitch", "rtmp://live.twitch.tv/app", 6000, true, "Twitch dashboard → Settings → Stream → Primary Stream key"),
         new("YouTube", "rtmp://a.rtmp.youtube.com/live2", 9000, false, "YouTube Studio → Go live → Stream → Stream key"),
-        new("TikTok", "", 6000, false, "TikTok LIVE Producer → Go LIVE → Stream settings: paste the Server URL and Stream key. TikTok usually issues a new key every stream."),
+        new("TikTok", "", 6000, false, "TikTok LIVE Producer (livecenter.tiktok.com/producer in a desktop browser) → Save & Go LIVE: copy the Server URL and Stream key shown there. TikTok issues a new key every stream."),
         new("Kick", "", 8000, false, "Kick dashboard → Settings → Stream URL & Key (paste both)"),
         new("Custom", "", 9000, false, "Any RTMP/RTMPS server URL and key"),
     };

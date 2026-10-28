@@ -317,8 +317,9 @@ public sealed class OutputManager : IDisposable
         lock (p.Window) p.Window.Clear();
         var sub = p.Sub;
 
-        // feed: bus → pusher stdin
-        _ = Task.Run(() =>
+        // feed: bus → pusher stdin. A dedicated thread: this loop blocks on the pusher's stdin, and blocking
+        // thread-pool threads (one per destination) starves the async readers that drain the preview pipe.
+        new Thread(() =>
         {
             var stdin = proc.StandardInput.BaseStream;
             try
@@ -331,7 +332,7 @@ public sealed class OutputManager : IDisposable
             }
             catch { }
             try { stdin.Close(); } catch { }
-        });
+        }) { IsBackground = true, Name = "Leapcast output " + p.Output.Name, Priority = ThreadPriority.AboveNormal }.Start();
         _ = proc.StandardOutput.ReadToEndAsync();
 
         // progress + errors
