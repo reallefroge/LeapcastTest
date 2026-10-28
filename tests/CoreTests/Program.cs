@@ -866,7 +866,9 @@ static class VideoFifo
         {
             double t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - lagSeconds;
             long ms = (long)Math.Round(t * 1000) % 2000;
-            return ms < 300 ? Fade(Math.Min(9, (int)(ms / 30)), frames[n % frames.Length]) : frames[n % frames.Length];
+            // 100 ms of full white (the lip-sync marker), then a 200 ms fade back (only the start is sudden, like a clap)
+            return ms < 100 ? Fade(0, frames[n % frames.Length])
+                 : ms < 300 ? Fade(Math.Min(9, 1 + (int)((ms - 100) / 22)), frames[n % frames.Length]) : frames[n % frames.Length];
         }, fps, -1, () => frames[0]);
         return new InputSpec(new[] { "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", $"{w}x{h}", "-framerate", fps.ToString(), "-thread_queue_size", "64", "-i", path }, true);
     }
