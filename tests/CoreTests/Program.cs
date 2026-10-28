@@ -769,7 +769,7 @@ static class PacedPipe
                 try { server.WaitForConnection(); Pump(server, chunk, chunksPerSecond, origin, pad, ct); }
                 catch { }
                 finally { server.Dispose(); }
-            }) { IsBackground = true }.Start();
+            }) { IsBackground = true, Priority = ThreadPriority.Highest }.Start(); // devices deliver on time whatever the CPU load
             return @"\\.\pipe\" + name;
         }
         string path = Path.Combine(dir, name + ext);
@@ -779,7 +779,7 @@ static class PacedPipe
             try { using var fs = new FileStream(path, FileMode.Open, FileAccess.Write); Pump(fs, chunk, chunksPerSecond, origin, pad, ct); }
             catch { }
             finally { try { File.Delete(path); } catch { } }
-        }) { IsBackground = true }.Start();
+        }) { IsBackground = true, Priority = ThreadPriority.Highest }.Start();
         return path;
     }
 

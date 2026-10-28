@@ -635,7 +635,12 @@ public static class PipelineBuilder
     public static InputSpec? CameraDeviceInput(StudioSource s)
     {
         if (string.IsNullOrWhiteSpace(s.DeviceName) || !OperatingSystem.IsWindows()) return null;
-        var c = new List<string> { "-f", "dshow", "-rtbufsize", "64M" };
+        // A small real-time buffer: if the reader ever falls behind, DirectShow drops a frame instead of queueing
+        // seconds of them (64 MB holds several seconds of a compressed webcam: that backlog is pure camera delay).
+        string rtbuf = "16M";
+        if (SmartTuner.TryParseResolution(s.CameraResolution, out var bw, out var bh))
+            rtbuf = Math.Clamp(bw * bh * 2 * 6 / (1024 * 1024) + 1, 4, 32) + "M"; // ~6 raw frames
+        var c = new List<string> { "-f", "dshow", "-rtbufsize", rtbuf };
         if (!string.IsNullOrWhiteSpace(s.CameraResolution) && s.CameraResolution != "Default")
             c.AddRange(new[] { "-video_size", s.CameraResolution.Replace("×", "x").Replace(" ", "") });
         if (s.CameraFps > 0) c.AddRange(new[] { "-framerate", I(s.CameraFps) });
