@@ -30,6 +30,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/build-installer.ps1
 
+      - name: FFmpeg capture capabilities
+        shell: pwsh
+        run: |
+          $ff = Resolve-Path "publish/win-x64/ffmpeg/bin/ffmpeg.exe"
+          foreach ($f in 'gfxcapture','ddagrab','scale_d3d11','hwdownload') {
+            $t = (& $ff -hide_banner -h "filter=$f" 2>&1 | Out-String)
+            $t = $t -replace '%','%25' -replace "`r",'' -replace "`n",'%0A'
+            if ($t.Length -gt 3800) { $t = $t.Substring(0,3800) }
+            Write-Host "::notice title=filter-$f::$t"
+          }
+
       - name: Engine tests on Windows (bundled FFmpeg, real GDI capture, named pipes)
         shell: pwsh
         run: |
