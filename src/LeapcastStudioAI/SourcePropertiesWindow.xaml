@@ -21,11 +21,6 @@
         <StackPanel x:Name="DisplayGroup">
           <TextBlock Text="Monitor" Style="{StaticResource FieldLabel}"/>
           <ComboBox x:Name="MonitorBox"/>
-          <TextBlock Text="Capture method" Style="{StaticResource FieldLabel}"/>
-          <ComboBox x:Name="MethodBox">
-            <ComboBoxItem Content="GPU (fast, works with fullscreen games, recommended)" Tag="Auto"/>
-            <ComboBoxItem Content="GDI (compatibility)" Tag="GDI"/>
-          </ComboBox>
         </StackPanel>
 
         <!-- Window -->
@@ -35,12 +30,17 @@
             <Button DockPanel.Dock="Right" Content="Refresh" Click="RefreshWindows_Click"/>
             <ComboBox x:Name="WindowBox" IsEditable="True"/>
           </DockPanel>
-          <TextBlock Text="Pick the game's window title. Wizard101 should be in windowed mode for window capture; for fullscreen use Display Capture."
+          <TextBlock Text="Pick the game's window. GPU window capture works in windowed or borderless mode, even when other windows cover it; for exclusive fullscreen use Display Capture."
                      Style="{StaticResource Hint}"/>
         </StackPanel>
 
         <!-- Display + window shared -->
         <StackPanel x:Name="CaptureGroup">
+          <TextBlock Text="Capture method" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="MethodBox">
+            <ComboBoxItem Content="GPU (smooth, works with DirectX games, recommended)" Tag="Auto"/>
+            <ComboBoxItem Content="GDI (old compatibility mode: slow, 30 FPS max)" Tag="GDI"/>
+          </ComboBox>
           <CheckBox x:Name="CursorBox" Content="Show mouse cursor"/>
           <TextBlock Text="Crop (pixels): left, top, right, bottom" Style="{StaticResource FieldLabel}"/>
           <UniformGrid Columns="4">

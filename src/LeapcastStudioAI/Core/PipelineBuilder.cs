@@ -24,7 +24,7 @@ public sealed class PipelineRequest
     public bool Preview { get; init; } = true;
     public int PreviewWidth { get; init; } = 640;
     public int PreviewHeight { get; init; } = 360;
-    public int PreviewFps { get; init; } = 15;
+    public int PreviewFps { get; init; } = 30;
 
     /// <summary>Audio source id → raw f32le 48 kHz stereo input path (Windows named pipe).
     /// Keys are the representatives returned by <see cref="PipelineBuilder.AudioRepresentatives"/>.</summary>
@@ -33,6 +33,9 @@ public sealed class PipelineRequest
     public IReadOnlyDictionary<Guid, string> RenderedImages { get; init; } = new Dictionary<Guid, string>();
     /// <summary>Monitor index → virtual-desktop rectangle (only needed for GDI display capture).</summary>
     public Func<int, (int X, int Y, int W, int H)?>? MonitorBounds { get; init; }
+    /// <summary>Window title → HWND (for GPU window capture).</summary>
+    public Func<string, long?>? FindWindow { get; init; }
+    public bool GpuWindowCapture { get; init; }
     public int AudioBitrateKbps { get; init; } = 160;
 
     /// <summary>Common time origin (Unix seconds). Every live input is wall-clock stamped and shifted by this,
@@ -85,6 +88,26 @@ public static class PipelineBuilder
         };
     }
 
+    /// <summary>
+    /// Visible sources minus anything completely hidden: a full-screen (Fill) capture covers every layer below it,
+    /// so those are never captured at all (capturing a hidden 1080p60 desktop costs as much as the visible one).
+    /// </summary>
+    public static IEnumerable<StudioSource> VisibleLayers(IEnumerable<StudioSource> sources)
+    {
+        var list = sources.Where(s => s.Visible).ToList();
+        int cover = list.FindLastIndex(s => SourceTypes.KindOf(s.Type) is SourceKind.Display or SourceKind.Window or SourceKind.Camera
+                                            && Anchors.Resolve(s) == Anchors.Fill);
+        for (int i = 0; i < list.Count; i++)
+        {
+            bool isVideo = SourceTypes.IsVideo(SourceTypes.KindOf(list[i].Type));
+            if (isVideo && i < cover) continue;
+            yield return list[i];
+        }
+    }
+
+    /// <summary>Lanczos is the sharpest downscale (good for Wizard101's UI text) but costs ~3× bicubic per frame.</summary>
+    private static string ScaleFlags(int fps) => fps > 30 ? "bicubic" : "lanczos";
+
     /// <summary>One representative source per distinct audio device across all scenes (first occurrence wins).</summary>
     public static List<StudioSource> AudioRepresentatives(IEnumerable<StudioScene> scenes)
     {
@@ -122,7 +145,7 @@ public static class PipelineBuilder
         foreach (var sc in scenes)
         {
             var layers = new List<(StudioSource, SourceKind, string)>();
-            foreach (var s in sc.Sources.Where(s => s.Visible))
+            foreach (var s in VisibleLayers(sc.Sources))
             {
                 var kind = SourceTypes.KindOf(s.Type);
                 if (kind == SourceKind.Unsupported)
@@ -180,7 +203,7 @@ public static class PipelineBuilder
             {
                 var b = layers[0];
                 sceneGraph.Add($"[{Use(b.key)}]{Crop(b.src)}{CameraPrep(b.src, b.kind, null)}" +
-                               $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos," +
+                               $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags={ScaleFlags(F)}," +
                                $"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[{p}base]");
                 start = 1;
             }
@@ -197,7 +220,7 @@ public static class PipelineBuilder
                 bool alpha = kind is SourceKind.Image or SourceKind.Text;
                 string scale;
                 if (anchor == Anchors.Fill)
-                    scale = $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,";
+                    scale = $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags={ScaleFlags(F)},";
                 else if (kind == SourceKind.Text || (kind == SourceKind.Image && src.SizePercent <= 0))
                     scale = "";
                 else
@@ -249,7 +272,7 @@ public static class PipelineBuilder
             venc = "venc"; vprev = "vprevsrc";
         }
         if (r.Preview)
-            graph.Add($"[{vprev}]fps={r.PreviewFps},scale={r.PreviewWidth}:{r.PreviewHeight}:flags=fast_bilinear,format=bgra[prev]");
+            graph.Add($"[{vprev}]fps={Math.Min(r.PreviewFps, F)},scale={r.PreviewWidth}:{r.PreviewHeight}:flags=bilinear,format=bgra[prev]");
 
         // ---------- audio: one input per device; per-scene level via a runtime-adjustable volume stage ----------
         var gains = new List<AudioGainStage>();
@@ -424,6 +447,19 @@ public static class PipelineBuilder
 
             case SourceKind.Window:
                 if (string.IsNullOrWhiteSpace(s.WindowTitle)) { warnings.Add($"\"{s.Name}\": no window chosen, skipped."); return null; }
+                if (r.GpuWindowCapture && !string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Windows.Graphics.Capture: the GPU copies the game's own frames (DirectX-friendly, works when the
+                    // window is covered, steady frame pacing). Targeted by handle, so no title escaping is needed.
+                    var hwnd = r.FindWindow?.Invoke(s.WindowTitle.Trim());
+                    if (hwnd is null or 0)
+                    {
+                        warnings.Add($"\"{s.Name}\": window \"{s.WindowTitle}\" isn't open. Start the game, then refresh the scene.");
+                        return null;
+                    }
+                    return new InputSpec(new[] { "-thread_queue_size", "512", "-f", "lavfi", "-i",
+                        $"gfxcapture=hwnd={hwnd}:max_framerate={F}:capture_cursor={mouse},hwdownload,format=bgra" }, true);
+                }
                 return new InputSpec(new[] { "-thread_queue_size", "512", "-f", "gdigrab", "-framerate", I(F),
                     "-draw_mouse", mouse, "-i", "title=" + s.WindowTitle.Trim() }, true);
 

@@ -130,8 +130,8 @@ public static class EncoderCatalog
             cts.CancelAfter(timeout);
             try { await p.WaitForExitAsync(cts.Token); }
             catch (OperationCanceledException) { try { p.Kill(true); } catch { } return (-1, "timeout"); }
-            string err = await errTask; await outTask;
-            return (p.ExitCode, err);
+            string err = await errTask; string output = await outTask;
+            return (p.ExitCode, err + output); // some ffmpeg output (e.g. -h) goes to stdout
         }
         catch (Exception ex) { return (-1, ex.Message); }
     }

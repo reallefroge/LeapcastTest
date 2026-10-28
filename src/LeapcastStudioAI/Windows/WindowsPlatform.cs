@@ -58,6 +58,25 @@ public sealed class WindowsPlatform : IPlatformServices
         return path;
     }
 
+    public long? FindWindow(string title)
+    {
+        long? found = null;
+        uint self = (uint)Environment.ProcessId;
+        EnumWindows((h, lParam) =>
+        {
+            if (!IsWindowVisible(h)) return true;
+            GetWindowThreadProcessId(h, out uint pid);
+            if (pid == self) return true;
+            int len = GetWindowTextLength(h);
+            if (len <= 0) return true;
+            var sb = new StringBuilder(len + 1);
+            GetWindowText(h, sb, sb.Capacity);
+            if (string.Equals(sb.ToString().Trim(), title, StringComparison.Ordinal)) { found = h.ToInt64(); return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     public (int X, int Y, int W, int H)? MonitorBounds(int index)
     {
         var mons = Monitors();

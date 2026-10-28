@@ -71,7 +71,7 @@ public partial class MainWindow : Window
         var selected = _state.Scenes.FirstOrDefault(s => s.Id == _state.SelectedSceneId) ?? _state.Scenes.FirstOrDefault();
         if (selected is not null) ScenesList.SelectedItem = selected;
 
-        _uiTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(66) };
+        _uiTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(33) }; // 30 FPS preview
         _uiTimer.Tick += (_, _) => OnUiTick();
         _uiTimer.Start();
         HardwareLabel.Text = $"{Environment.ProcessorCount} CPU threads · detecting encoders…";

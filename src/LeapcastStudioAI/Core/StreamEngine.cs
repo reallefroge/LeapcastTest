@@ -23,6 +23,8 @@ public interface IPlatformServices
     /// <summary>Renders a text source to a transparent PNG sized for the output height. Null if empty.</summary>
     string? RenderText(StudioSource source, int outputHeight);
     (int X, int Y, int W, int H)? MonitorBounds(int index);
+    /// <summary>Handle of the visible top-level window with exactly this title (null if not open).</summary>
+    long? FindWindow(string title) => null;
 }
 
 public sealed record EngineStatus(
@@ -76,6 +78,8 @@ public sealed class StreamEngine : IDisposable
     public IReadOnlyList<ProbedEncoder> Encoders { get; private set; } = Array.Empty<ProbedEncoder>();
     public bool EncodersProbed { get; private set; }
     public bool InputThreadQueueSupported { get; private set; } = true;
+    /// <summary>FFmpeg 8+ "gfxcapture" (Windows.Graphics.Capture): GPU window capture that works with DirectX games.</summary>
+    public bool GpuWindowCaptureSupported { get; private set; }
     /// <summary>The scene currently on air.</summary>
     public StudioScene? Scene { get; private set; }
     private List<StudioScene> _scenes = new();
@@ -128,12 +132,30 @@ public sealed class StreamEngine : IDisposable
         var (code, _) = await EncoderCatalog.RunQuietAsync(FfmpegPath, new[] { "-hide_banner", "-loglevel", "error",
             "-thread_queue_size", "16", "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.1", "-f", "null", "-" }, TimeSpan.FromSeconds(10), _life.Token);
         InputThreadQueueSupported = code == 0;
+        var (_, help) = await EncoderCatalog.RunQuietAsync(FfmpegPath, new[] { "-hide_banner", "-h", "filter=gfxcapture" },
+            TimeSpan.FromSeconds(10), _life.Token);
+        GpuWindowCaptureSupported = help.Contains("gfxcapture AVOptions", StringComparison.Ordinal);
         EncodersProbed = true;
     }
 
     public EncodePlan PlanFor(StudioSettings s)
     {
         var plan = SmartTuner.Resolve(s, Encoders, Environment.ProcessorCount);
+        var reasons = plan.Reasons.ToList();
+        var shown = _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)).ToList();
+        // Old-style (GDI) window capture can't deliver 60 smooth frames from a DirectX game; 60 FPS output would
+        // just repeat frames unevenly (judder). Cap at 30 when it's in use.
+        bool gdiWindow = shown.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Window
+                                        && (!GpuWindowCaptureSupported || string.Equals(x.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase)));
+        if (gdiWindow && plan.Fps > 30)
+        {
+            plan = plan with { Fps = 30 };
+            reasons.Add("Window capture is using the slower GDI method, so the stream runs at 30 FPS to stay smooth.");
+        }
+        bool wizard = shown.Any(x => x.WindowTitle.Contains("Wizard101", StringComparison.OrdinalIgnoreCase) || x.Name.Contains("Wizard101", StringComparison.OrdinalIgnoreCase));
+        if (wizard && s.ContentType == "HighMotion")
+            reasons.Add("Tip: Wizard101 is turn-based. \"Low-motion\" (30 FPS) looks the same on stream, halves the data and leaves more power for smooth capture.");
+        plan = plan with { Reasons = reasons };
         if (_bitrateScale < 0.999)
         {
             int cap = Math.Max(1000, (int)(plan.CapKbps * _bitrateScale));
@@ -309,7 +331,7 @@ public sealed class StreamEngine : IDisposable
 
         // Pre-render text overlays.
         var rendered = new Dictionary<Guid, string>();
-        foreach (var s in _scenes.SelectMany(sc => sc.Sources).Where(s => s.Visible && SourceTypes.KindOf(s.Type) == SourceKind.Text))
+        foreach (var s in _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)).Where(s => SourceTypes.KindOf(s.Type) == SourceKind.Text))
         {
             try { if (_platform.RenderText(s, plan.Height) is { } png) rendered[s.Id] = png; } catch { }
         }
@@ -321,7 +343,7 @@ public sealed class StreamEngine : IDisposable
 
         // Webcams: one warm reader per device, fed to this run through counted pipes.
         var camUses = new Dictionary<string, (InputSpec device, List<StudioSource> uses)>();
-        foreach (var src in _scenes.SelectMany(sc => sc.Sources).Where(x => x.Visible && SourceTypes.KindOf(x.Type) == SourceKind.Camera))
+        foreach (var src in _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)).Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera))
         {
             string key = PipelineBuilder.InputKey(src);
             if (camUses.TryGetValue(key, out var e)) { e.uses.Add(src); continue; }
@@ -344,6 +366,8 @@ public sealed class StreamEngine : IDisposable
             AudioInputs = pipes,
             RenderedImages = rendered,
             MonitorBounds = _platform.MonitorBounds,
+            FindWindow = _platform.FindWindow,
+            GpuWindowCapture = GpuWindowCaptureSupported,
             AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
             WallclockOrigin = origin,
             InputOverride = InputOverride,

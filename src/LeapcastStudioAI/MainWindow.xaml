@@ -205,7 +205,7 @@
 
     <DockPanel Grid.Row="2" Margin="4,12,4,0">
       <TextBlock x:Name="HardwareLabel" DockPanel.Dock="Left" Text="Detecting hardware…" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
-      <TextBlock DockPanel.Dock="Right" Text="v0.3.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+      <TextBlock DockPanel.Dock="Right" Text="v0.4.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right"/>
     </DockPanel>
   </Grid>
 </Window>

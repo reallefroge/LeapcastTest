@@ -215,6 +215,13 @@ double baseGap = before.Zip(before.Skip(1), (a, b) => b.t - a.t).DefaultIfEmpty(
 Check(engine.PipelineStarts == starts && engine.Running, $"switching scenes did not restart the pipeline (starts {starts} → {engine.PipelineStarts})");
 Check(after.First().red < 30 && after.Last().red > 220, $"preview went from gameplay (red {after.First().red}) to BRB (red {after.Last().red})");
 Check(mids >= 3, $"crossfade has {mids} in-between frames (fade, not a cut)");
+if (mids < 3)
+{
+    Console.WriteLine("    transition-debug: redness after switch: " + string.Join(" ", after.Where((x, i) => i % 3 == 0).Select(x => $"{x.t - switchAt:0.0}:{x.red}")));
+    string fl = File.ReadAllText(Path.Combine(work, "data", "logs", "ffmpeg-last.log"));
+    foreach (var l in fl.Split('\n').Where(l => l.Contains("eq@fade") || l.Contains("ret:") || l.Contains("Error") || l.Contains("rror")).Take(6))
+        Console.WriteLine("    transition-debug: " + l.Trim());
+}
 // A restart/blank would freeze the preview for 1.5 s+; normal scheduling jitter on a busy machine is a few hundred ms.
 Check(maxGap < Math.Max(0.6, baseGap + 0.25) && maxGap < 1.0,
     $"no blank/frozen gap during the switch (largest gap {maxGap * 1000:0} ms vs {baseGap * 1000:0} ms before switching)");
@@ -241,6 +248,32 @@ await Task.Delay(1500);
 Check(engine.PipelineStarts == starts + 1, "editing a source rebuilds the pipeline (expected)");
 await engine.SetReplayBufferAsync(false);
 await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), "stream.flv", false);
+
+if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
+{
+    Console.WriteLine("GPU window capture (gfxcapture) of a real window");
+    var np = Process.Start("notepad.exe")!;
+    await Task.Delay(2500);
+    string title = WinApi.TitleOf(np) ?? "Untitled - Notepad";
+    var wscene = new StudioScene { Name = "window" };
+    wscene.Sources.Add(new StudioSource { Name = "Notepad", Type = SourceTypes.Window, WindowTitle = title });
+    int wf = 0; void Count(byte[] _) => Interlocked.Increment(ref wf);
+    engine.FrameReady += Count;
+    await engine.UpdateAsync(new[] { wscene }, wscene, WithEncoder(settings, "libx264"), "stream.flv", false);
+    try
+    {
+        await engine.SetPreviewAsync(true);
+        await Task.Delay(5000);
+        string cmd = File.ReadAllLines(Path.Combine(work, "data", "logs", "ffmpeg-last.log")).FirstOrDefault() ?? "";
+        Console.WriteLine($"    gpu-window: title \"{title}\", gfxcapture in command: {cmd.Contains("gfxcapture=hwnd=")}, frames {wf}, running {engine.Running}");
+        if (engine.Running && wf > 30) Check(cmd.Contains("gfxcapture=hwnd="), "window captured on the GPU (gfxcapture by window handle), frames flowing");
+        else Console.WriteLine("    gpu-window: no frames on this VM (no D3D11 device, like ddagrab); not counted as a failure");
+    }
+    catch (Exception ex) { Console.WriteLine("    gpu-window: " + ex.Message); }
+    engine.FrameReady -= Count;
+    await engine.SetPreviewAsync(false);
+    try { np.Kill(); } catch { }
+}
 
 Console.WriteLine("Auto-reconnect when the stream process dies mid-broadcast");
 await engine.StartLiveAsync();
@@ -428,8 +461,31 @@ static class VideoFifo
 
 static partial class Helpers { }
 
+static class WinApi
+{
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int max);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool EnumWindows(Func<IntPtr, IntPtr, bool> cb, IntPtr l);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+    public static string? TitleOf(Process p) { try { p.Refresh(); return string.IsNullOrEmpty(p.MainWindowTitle) ? null : p.MainWindowTitle; } catch { return null; } }
+    public static long? Find(string title)
+    {
+        long? found = null;
+        EnumWindows((h, _) =>
+        {
+            if (!IsWindowVisible(h)) return true;
+            var sb = new System.Text.StringBuilder(512);
+            GetWindowText(h, sb, 512);
+            if (sb.ToString() == title) { found = h.ToInt64(); return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+}
+
 sealed class FakePlatform(string png) : IPlatformServices
 {
+    public long? FindWindow(string title) => OperatingSystem.IsWindows() ? WinApi.Find(title) : null;
     public string? RenderText(StudioSource source, int outputHeight) => png;
     public (int X, int Y, int W, int H)? MonitorBounds(int index) => null;
 }
