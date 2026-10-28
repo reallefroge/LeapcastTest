@@ -45,10 +45,12 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = (Resolve-Path "publish/win-x64/ffmpeg/bin").Path + ";" + $env:PATH
+          $env:LEAPCAST_LOG_COMMANDS = "1"
           New-Item -ItemType Directory -Force smoke | Out-Null
           dotnet run -c Release --project tests/CoreTests 2>&1 | Tee-Object -FilePath smoke/engine-tests.txt
           $code = $LASTEXITCODE
           Get-ChildItem $env:TEMP\leapcast-tests\data\logs -ErrorAction SilentlyContinue | Copy-Item -Destination smoke/ -ErrorAction SilentlyContinue
+          Get-ChildItem $env:TEMP\leapcast-tests\*.log -ErrorAction SilentlyContinue | Copy-Item -Destination smoke/ -ErrorAction SilentlyContinue
           # Surface results as annotations (readable without downloading logs)
           Get-Content smoke/engine-tests.txt | Where-Object { $_ -match 'FAIL|engine:|FFmpeg under test|ddagrab|lip|gpu-window|transition-debug|PASS.*(crossfade|gap|GPU)' } |
             Select-Object -First 20 | ForEach-Object { Write-Host "::warning title=engine-test::$($_.Trim())" }
@@ -105,3 +107,14 @@ jobs:
           gh release create $tag (Get-ChildItem dist/* | ForEach-Object FullName) smoke/main-window.png smoke/engine-tests.txt `
             --target ${{ github.sha }} --prerelease --title "Leapcast Studio AI build ${{ github.run_number }}" `
             --notes "Automated Windows build of branch leapcast-studio-ai (${{ github.sha }})."
+
+      - name: Publish diagnostics (failed builds)
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if (-not (Test-Path smoke)) { exit 0 }
+          Compress-Archive -Path smoke/* -DestinationPath diag.zip -Force
+          gh release create "studio-ai-diag-${{ github.run_number }}" diag.zip --target ${{ github.sha }} --prerelease `
+            --title "Diagnostics for failed build ${{ github.run_number }}" --notes "Logs from a failed CI run."

@@ -114,7 +114,7 @@ await engine.StartLiveAsync();           // restart #2 → + RTMP(FLV) output; r
 await Task.Delay(9000);
 Check(last is { Live: true, Recording: true }, $"live + recording status ({last?.Health}, {last?.RecentKbps:0} kbps recent, fps {last?.Fps:0.0})");
 Check(last!.RecentKbps > 50 && last.RecentKbps <= last.CapKbps * 1.25 + 200, $"bitrate measured from segments and respects the cap: {last.RecentKbps:0} kbps (cap {last.CapKbps})");
-File.Copy(Path.Combine(work, "data", "logs", "ffmpeg-last.log"), Path.Combine(work, "main-run.log"), true);
+File.WriteAllText(Path.Combine(work, "main-run.log"), ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")));
 Console.WriteLine("    camera: " + engine.CameraStats());
 string replay = await engine.SaveReplayAsync();
 double wallRecorded = clock.Elapsed.TotalSeconds;
@@ -215,10 +215,11 @@ double baseGap = before.Zip(before.Skip(1), (a, b) => b.t - a.t).DefaultIfEmpty(
 Check(engine.PipelineStarts == starts && engine.Running, $"switching scenes did not restart the pipeline (starts {starts} → {engine.PipelineStarts})");
 Check(after.First().red < 30 && after.Last().red > 220, $"preview went from gameplay (red {after.First().red}) to BRB (red {after.Last().red})");
 Check(mids >= 3, $"crossfade has {mids} in-between frames (fade, not a cut)");
+File.WriteAllText(Path.Combine(work, "transition-run.log"), ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")));
 if (mids < 3)
 {
     Console.WriteLine("    transition-debug: redness after switch: " + string.Join(" ", after.Where((x, i) => i % 3 == 0).Select(x => $"{x.t - switchAt:0.0}:{x.red}")));
-    string fl = File.ReadAllText(Path.Combine(work, "data", "logs", "ffmpeg-last.log"));
+    string fl = ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log"));
     foreach (var l in fl.Split('\n').Where(l => l.Contains("eq@fade") || l.Contains("ret:") || l.Contains("Error") || l.Contains("rror")).Take(6))
         Console.WriteLine("    transition-debug: " + l.Trim());
 }
@@ -264,7 +265,9 @@ if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
     {
         await engine.SetPreviewAsync(true);
         await Task.Delay(5000);
-        string cmd = File.ReadAllLines(Path.Combine(work, "data", "logs", "ffmpeg-last.log")).FirstOrDefault() ?? "";
+        string wlog = ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log"));
+        File.WriteAllText(Path.Combine(work, "gpu-window-run.log"), wlog);
+        string cmd = wlog.Split('\n').FirstOrDefault() ?? "";
         Console.WriteLine($"    gpu-window: title \"{title}\", gfxcapture in command: {cmd.Contains("gfxcapture=hwnd=")}, frames {wf}, running {engine.Running}");
         if (engine.Running && wf > 30) Check(cmd.Contains("gfxcapture=hwnd="), "window captured on the GPU (gfxcapture by window handle), frames flowing");
         else Console.WriteLine("    gpu-window: no frames on this VM (no D3D11 device, like ddagrab); not counted as a failure");
@@ -293,6 +296,12 @@ Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(
 return failures == 0 ? 0 : 1;
 
 // ---------------------------------------------------------------- helpers
+static string ReadShared(string path)
+{
+    using var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    using var r = new StreamReader(f);
+    return r.ReadToEnd();
+}
 static StudioSettings WithEncoder(StudioSettings s, string e) { var c = s.Clone(); c.Encoder = e; return c; }
 async Task<(int, string)> RunAsync(IEnumerable<string> args) => await RunToolAsync(ffmpeg, args);
 async Task<(int, string)> RunToolAsync(string exe, IEnumerable<string> args)
