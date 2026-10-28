@@ -138,6 +138,14 @@ public sealed class CameraBridge : IDisposable
         public string LastError = "";
         public volatile bool Exited;
         public long Frames;
+        // to relaunch the same reader when the camera stalls
+        public string Ffmpeg = "", Name = "Camera";
+        public InputSpec? Device;
+        public int Fps;
+        public DateTime LaunchedUtc, LastFrameUtc;
+        public long FramesAtCheck;
+        public int Restarts;
+        public volatile bool Disposed;
 
         public byte[]? Snapshot()
         {
@@ -146,6 +154,7 @@ public sealed class CameraBridge : IDisposable
 
         public void Dispose()
         {
+            Disposed = true;
             try { if (Proc is { HasExited: false }) { Proc.StandardInput.Write("q"); Proc.StandardInput.Flush(); if (!Proc.WaitForExit(1500)) Proc.Kill(true); } } catch { }
             try { Proc?.Dispose(); } catch { }
         }
@@ -161,7 +170,43 @@ public sealed class CameraBridge : IDisposable
     private readonly string _scratch;
     public event Action<string>? Error;
 
-    public CameraBridge(string scratchDir) => _scratch = scratchDir;
+    public CameraBridge(string scratchDir)
+    {
+        _scratch = scratchDir;
+        new Thread(Watchdog) { IsBackground = true, Name = "Leapcast camera watchdog" }.Start();
+    }
+
+    /// <summary>
+    /// Webcams sometimes stop delivering (USB hiccups, driver resets, another app grabbing them). A reader with no new
+    /// picture for 4 s is relaunched in place; the stream keeps showing the last picture meanwhile.
+    /// </summary>
+    private void Watchdog()
+    {
+        while (!_disposed)
+        {
+            Thread.Sleep(1000);
+            try
+            {
+                List<Reader> readers;
+                lock (_readers) readers = _readers.Values.ToList();
+                foreach (var r in readers)
+                {
+                    if (r.Disposed || r.Device is null) continue;
+                    long f = Interlocked.Read(ref r.Frames);
+                    if (f != r.FramesAtCheck) { r.FramesAtCheck = f; r.LastFrameUtc = DateTime.UtcNow; continue; }
+                    var now = DateTime.UtcNow;
+                    if (now - r.LaunchedUtc < TimeSpan.FromSeconds(6) || now - r.LastFrameUtc < TimeSpan.FromSeconds(4)) continue;
+                    r.Restarts++;
+                    if (r.Restarts == 1 || r.Restarts % 10 == 0)
+                        Error?.Invoke($"\"{r.Name}\" stopped sending pictures, reconnecting it…");
+                    Launch(r);
+                }
+            }
+            catch { }
+        }
+    }
+
+    private volatile bool _disposed;
 
     public sealed record CameraFeed(string Path, int Width, int Height);
 
@@ -188,7 +233,8 @@ public sealed class CameraBridge : IDisposable
         int outW, int outH, int fps, double origin)
     {
         ClosePipes();
-        foreach (var key in _readers.Keys.Except(cameras.Keys).ToList()) { _readers[key].Dispose(); _readers.Remove(key); }
+        lock (_readers)
+            foreach (var key in _readers.Keys.Except(cameras.Keys).ToList()) { _readers[key].Dispose(); _readers.Remove(key); }
 
         var result = new Dictionary<string, CameraFeed>();
         foreach (var (key, (device, uses)) in cameras)
@@ -199,7 +245,7 @@ public sealed class CameraBridge : IDisposable
             {
                 if (reader is not null) reader.Dispose();
                 reader = StartReader(ffmpeg, device, w, h, fps, sig, uses.FirstOrDefault()?.Name ?? "Camera");
-                _readers[key] = reader;
+                lock (_readers) _readers[key] = reader;
             }
             int bytes = w * h * 3 / 2;
             var blank = new byte[bytes];
@@ -215,29 +261,42 @@ public sealed class CameraBridge : IDisposable
 
     private Reader StartReader(string ffmpeg, InputSpec device, int w, int h, int fps, string sig, string name)
     {
-        var reader = new Reader { Signature = sig, Width = w, Height = h };
-        var psi = new ProcessStartInfo(ffmpeg)
+        var reader = new Reader { Signature = sig, Width = w, Height = h, Ffmpeg = ffmpeg, Device = device, Fps = fps, Name = name };
+        Launch(reader);
+        return reader;
+    }
+
+    /// <summary>(Re)starts the reader process of <paramref name="reader"/>; frames keep landing in the same object.</summary>
+    private void Launch(Reader reader)
+    {
+        var old = reader.Proc;
+        if (old is not null) { try { if (!old.HasExited) old.Kill(true); old.WaitForExit(1500); } catch { } }
+        if (reader.Disposed || reader.Device is null) return;
+        int w = reader.Width, h = reader.Height;
+        var psi = new ProcessStartInfo(reader.Ffmpeg)
         {
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
         };
         // low latency: no input buffering, and every frame is flushed to us immediately (not in 32 KB blocks)
         foreach (var a in new[] { "-hide_banner", "-loglevel", "error", "-nostats", "-fflags", "nobuffer" }) psi.ArgumentList.Add(a);
-        var dev = device.Args.ToList();
+        var dev = reader.Device.Args.ToList();
         for (int i = dev.Count - 2; i >= 0; i--)          // single-input process: no queue tuning needed
             if (dev[i] is "-thread_queue_size" or "-use_wallclock_as_timestamps") dev.RemoveRange(i, 2);
         foreach (var a in dev) psi.ArgumentList.Add(a);
         foreach (var a in new[] { "-an", "-vf", $"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic,pad={w}:{h}:-1:-1:color=black,format=yuv420p",
                      "-fps_mode", "passthrough", "-flush_packets", "1", "-f", "rawvideo", "pipe:1" })
             psi.ArgumentList.Add(a);
+        reader.LaunchedUtc = DateTime.UtcNow;
         try
         {
             var p = Process.Start(psi)!;
             // A starved reader falls behind and every frame it queues becomes camera delay: keep it ahead of the game.
             try { p.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
             reader.Proc = p;
+            reader.Exited = false;
             int size = w * h * 3 / 2;
-            _ = Task.Run(async () =>
+            new Thread(() =>
             {
                 var s = p.StandardOutput.BaseStream;
                 try
@@ -248,7 +307,7 @@ public sealed class CameraBridge : IDisposable
                         int got = 0;
                         while (got < size)
                         {
-                            int n = await s.ReadAsync(buf.AsMemory(got, size - got));
+                            int n = s.Read(buf, got, size - got);
                             if (n <= 0) return;
                             got += n;
                         }
@@ -257,24 +316,24 @@ public sealed class CameraBridge : IDisposable
                     }
                 }
                 catch { }
-            });
+            }) { IsBackground = true, Name = "Leapcast camera reader " + reader.Name, Priority = ThreadPriority.AboveNormal }.Start();
             _ = Task.Run(async () =>
             {
                 string err = await p.StandardError.ReadToEndAsync();
                 await p.WaitForExitAsync();
+                if (reader.Proc != p) return; // relaunched
                 reader.Exited = true;
                 reader.LastError = err.Trim();
-                if (!string.IsNullOrWhiteSpace(err) && !reader.Signature.StartsWith("disposed"))
-                    Error?.Invoke($"\"{name}\": " + StreamEngine.Explain(err.Split('\n').Last(l => l.Trim().Length > 0)));
+                if (!string.IsNullOrWhiteSpace(err) && !reader.Disposed && reader.Restarts == 0)
+                    Error?.Invoke($"\"{reader.Name}\": " + StreamEngine.Explain(err.Split('\n').Last(l => l.Trim().Length > 0)));
             });
         }
-        catch (Exception ex) { reader.Exited = true; Error?.Invoke($"\"{name}\": couldn't start the camera reader ({ex.Message})."); }
-        return reader;
+        catch (Exception ex) { reader.Exited = true; Error?.Invoke($"\"{reader.Name}\": couldn't start the camera reader ({ex.Message})."); }
     }
 
     /// <summary>Diagnostics: reader frames and pipe counters.</summary>
     public string Stats() =>
-        string.Join("; ", _readers.Select(r => $"reader {r.Value.Width}x{r.Value.Height} frames={r.Value.Frames} exited={r.Value.Exited}")) + " | " +
+        string.Join("; ", _readers.Select(r => $"reader {r.Value.Width}x{r.Value.Height} frames={r.Value.Frames} exited={r.Value.Exited} restarts={r.Value.Restarts}")) + " | " +
         string.Join("; ", _pipes.Select(p => $"pipe sampled={p.Sampled} dropped={p.Dropped} written={p.Written} fromLatest={p.FromLatest}"));
 
     public void ClosePipes()
@@ -286,9 +345,12 @@ public sealed class CameraBridge : IDisposable
     public void CloseAll()
     {
         ClosePipes();
-        foreach (var r in _readers.Values) { r.Signature = "disposed"; r.Dispose(); }
-        _readers.Clear();
+        lock (_readers)
+        {
+            foreach (var r in _readers.Values) { r.Signature = "disposed"; r.Dispose(); }
+            _readers.Clear();
+        }
     }
 
-    public void Dispose() => CloseAll();
+    public void Dispose() { _disposed = true; CloseAll(); }
 }

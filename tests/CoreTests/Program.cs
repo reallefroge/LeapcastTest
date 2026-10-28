@@ -225,7 +225,13 @@ async Task SyncSection()
     await engine.UpdateAsync(new[] { sscene }, sscene, WithEncoder(settings, "libx264"), false);
     await Task.Delay(1500);
     var m2 = await engine.MeasureCameraSyncAsync(lagCam, 9);
-    Console.WriteLine($"    after applying {lagCam.SyncOffsetMs} ms: {m2?.OffsetMs:0} ms over {m2?.Events} events");
+    if (m2 is not { Reliable: true })
+    {
+        // what the app asks the user to do: try once more
+        Console.WriteLine("    re-measurement unreadable, trying again (camera: " + engine.CameraStats() + ")");
+        m2 = await engine.MeasureCameraSyncAsync(lagCam, 9);
+    }
+    Console.WriteLine($"    after applying {lagCam.SyncOffsetMs} ms: {m2?.OffsetMs:0} ms over {m2?.Events} events (camera: {engine.CameraStats()})");
     Check(m2 is { Reliable: true } && Math.Abs(m2.OffsetMs) < 90, $"after the fix the camera matches the sound ({m2?.OffsetMs:0} ms)");
     await engine.SetPreviewAsync(false);
     engine.CameraDeviceOverride = oldCam;
