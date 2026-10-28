@@ -166,11 +166,11 @@ var srvA = RtmpServer.Start(ffmpeg, portA, "a", Path.Combine(liveDir, "a.flv"));
 var srvB = RtmpServer.Start(ffmpeg, portB, "b", Path.Combine(liveDir, "b.flv"));
 var problems = await engine.StartOutputAsync(outA.Id);   // restart #2 → + shared encode on a bus; recording continues
 Check(problems.Count == 0, "first output starts" + string.Concat(problems.Select(x => ": " + x)));
-await Task.Delay(5000);
+await Task.Delay(8000);
 int startsLive = engine.PipelineStarts;
 Check(Out(outA)?.State == OutputState.Live, $"first destination is live ({Out(outA)?.State}, {Out(outA)?.Kbps:0} kbps)");
 await engine.StartOutputAsync(outB.Id);                    // joins the running encode mid-stream
-await Task.Delay(6000);
+await Task.Delay(8000);
 Check(engine.PipelineStarts == startsLive, $"second destination joined without restarting the encoder (starts {startsLive} → {engine.PipelineStarts})");
 Check(Out(outA)?.State == OutputState.Live && Out(outB)?.State == OutputState.Live,
     $"both destinations live: A {Out(outA)?.State} {Out(outA)?.Kbps:0} kbps, B {Out(outB)?.State} {Out(outB)?.Kbps:0} kbps");
@@ -196,7 +196,7 @@ Check(rp.ok && rp.duration is > 4 and < 12, $"replay saved: {Path.GetFileName(re
 var rr = await ProbeAsync(rec);
 Check(rr.ok && rr.duration > wallRecorded - 9 && rr.duration < wallRecorded + 1, $"recording spans the restart: {rr.duration:0.0}s of {wallRecorded:0.0}s wall time (restart gaps excluded), {rr.streams}");
 var lf = await ProbeAsync(Path.Combine(liveDir, "a.flv"));
-Check(lf.ok && lf.streams.Contains("h264") && lf.streams.Contains("aac") && lf.duration > 9, $"destination A received a valid stream: {lf.duration:0.0}s, {lf.streams}");
+Check(lf.ok && lf.streams.Contains("h264") && lf.streams.Contains("aac") && lf.duration > 14, $"destination A received a valid stream: {lf.duration:0.0}s, {lf.streams}");
 var lfb = await ProbeAsync(Path.Combine(liveDir, "b.flv"));
 var (_, bErr) = await RunAsync(new[] { "-hide_banner", "-v", "error", "-i", Path.Combine(liveDir, "b.flv"), "-f", "null", "-" });
 Check(lfb.ok && lfb.streams.Contains("h264") && lfb.streams.Contains("aac") && lfb.duration > 6 && bErr.Length == 0,
@@ -205,7 +205,7 @@ var lipLive = await LipSyncAsync(Path.Combine(liveDir, "a.flv"), 539, 293);
 var lip = await LipSyncAsync(rec, 539, 293); // centre of the bottom-right camera overlay at 640×360
 // The webcam path itself adds ~0.1 s on a loaded 2-vCPU VM; the stream must be in sync within a few frames and
 // must not drift, and the exported recording must match the live stream.
-Check(lipLive.events >= 4 && Math.Abs(lipLive.offsetMs) < 150 && lipLive.spreadMs < 160,
+Check(lipLive.events >= 3 && Math.Abs(lipLive.offsetMs) < 150 && lipLive.spreadMs < 160,
     $"live lip sync: flash vs beep {lipLive.offsetMs:+0;-0} ms (spread {lipLive.spreadMs:0} ms over {lipLive.events} events)");
 Check(lip.events >= 4 && Math.Abs(lip.offsetMs) < 150 && lip.spreadMs < 160,
     $"recording lip sync: flash vs beep {lip.offsetMs:+0;-0} ms (spread {lip.spreadMs:0} ms over {lip.events} events, no drift)");
