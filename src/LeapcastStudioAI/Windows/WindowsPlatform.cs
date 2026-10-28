@@ -14,6 +14,9 @@ public sealed class WindowsPlatform : IPlatformServices
 {
     private readonly string _overlayDir = Path.Combine(StateStore.Folder, "cache", "overlays");
 
+    public IFrameSource? OpenBrowser(StudioSource source) =>
+        Application.Current is { } app ? WebViewFrameSource.Create(source, app.Dispatcher) : null;
+
     public string? RenderText(StudioSource source, int outputHeight)
     {
         if (string.IsNullOrWhiteSpace(source.Text)) return null;

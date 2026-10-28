@@ -108,7 +108,8 @@ public static class SmartTuner
         }
 
         var (encoder, tier) = PickEncoder(s.Encoder, available, cpuThreads, reasons);
-        string preset = cpuThreads >= 16 ? "medium" : cpuThreads >= 8 ? "faster" : "veryfast";
+        // the game runs on the same CPU: light presets (x264 "veryfast" keeps ~90% of "medium" quality at ~1/3 the CPU)
+        string preset = cpuThreads >= 16 ? "faster" : cpuThreads >= 8 ? "veryfast" : "superfast";
         bool cbr = s.RateControl == "Cbr";
         reasons.Add(cbr
             ? "Constant bitrate: always sends the full cap, even on static screens."
@@ -149,18 +150,20 @@ public static class SmartTuner
             reasons.Add($"{EncoderCatalog.DisplayName(requested)} isn't available on this PC, choosing automatically.");
         }
 
-        // A modern NVIDIA encoder (Rich tier works = Turing or newer) matches x264 "medium" quality at zero CPU cost.
-        var nv = available.FirstOrDefault(e => e.Name == "h264_nvenc");
-        if (nv is { Tier: EncoderTier.Rich })
+        // Streaming and playing on one PC: a GPU's media engine encodes without touching the CPU the game needs,
+        // so any modern hardware encoder wins (NVIDIA → Intel Quick Sync → AMD).
+        foreach (var name in new[] { "h264_nvenc", "h264_qsv", "h264_amf" })
         {
-            reasons.Add("Using NVIDIA NVENC with look-ahead + adaptive quantization: high quality, no CPU load.");
-            return (nv.Name, nv.Tier);
+            var hw = available.FirstOrDefault(e => e.Name == name && e.Tier == EncoderTier.Rich);
+            if (hw is null) continue;
+            reasons.Add($"Using {EncoderCatalog.DisplayName(name)}: the GPU encodes, so the game keeps your CPU.");
+            return (hw.Name, hw.Tier);
         }
-        // Plenty of CPU and a light game like Wizard101: x264 is the most bandwidth-efficient option.
         var x264 = available.FirstOrDefault(e => e.Name == "libx264");
-        if (x264 is not null && cpuThreads >= 12)
+        // Older hardware encoders look noticeably worse; with a big CPU, x264 is the better trade.
+        if (x264 is not null && cpuThreads >= 16)
         {
-            reasons.Add($"Using x264 on your {cpuThreads}-thread CPU: best quality per kbps for a light game.");
+            reasons.Add($"Using x264 on your {cpuThreads}-thread CPU: your GPU's encoder is an older generation.");
             return (x264.Name, x264.Tier);
         }
         foreach (var name in new[] { "h264_nvenc", "h264_qsv", "h264_amf" })
@@ -174,7 +177,7 @@ public static class SmartTuner
         }
         if (x264 is not null)
         {
-            reasons.Add("No hardware encoder found, using x264 (CPU).");
+            reasons.Add("No hardware encoder found, using x264 (CPU) with a light preset.");
             return (x264.Name, x264.Tier);
         }
         reasons.Add("Encoder detection hasn't finished; assuming x264.");

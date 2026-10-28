@@ -30,6 +30,8 @@ plan = SmartTuner.Resolve(new StudioSettings(), new List<ProbedEncoder> { new("h
 Check(plan.Encoder == "libx264", "old NVENC + 16 threads → x264");
 plan = SmartTuner.Resolve(new StudioSettings(), new List<ProbedEncoder> { new("h264_qsv", EncoderTier.Rich), new("libx264", EncoderTier.Rich) }, 8);
 Check(plan.Encoder == "h264_qsv", "QSV + 8 threads → QSV");
+plan = SmartTuner.Resolve(new StudioSettings(), new List<ProbedEncoder> { new("h264_qsv", EncoderTier.Rich), new("libx264", EncoderTier.Rich) }, 12);
+Check(plan.Encoder == "h264_qsv", "laptop with Quick Sync + 12 threads → Quick Sync (game keeps the CPU)");
 Check(SmartTuner.ParseResolution("1664 × 936") == (1664, 936), "parse resolution with ×");
 
 // ---------------------------------------------------------------- multistream budget + layout math
@@ -70,8 +72,57 @@ string fp2 = PipelineBuilder.LayoutFingerprint(new[] { fpScene }, 1600, 900, (72
 fpCard.W = 0.4;
 string fp3 = PipelineBuilder.LayoutFingerprint(new[] { fpScene }, 1600, 900, (720, 1280));
 Check(fp0 == fp1 && fp1 == fp2 && fp2 != fp3, $"moving (or un-anchoring at the same size) doesn't rebuild; resizing does ({fp0 == fp1}, {fp1 == fp2}, {fp2 != fp3})");
+var dupA = new StudioScene { Name = "Game" };
+var dupB = new StudioScene { Name = "BRB" };
+foreach (var sc in new[] { dupA, dupB })
+{
+    sc.Sources.Add(new StudioSource { Type = SourceTypes.Display, MonitorIndex = 0 });
+    sc.Sources.Add(new StudioSource { Type = SourceTypes.Camera, DeviceName = "cam" });
+}
+var dupSpec = PipelineBuilder.Build(new PipelineRequest
+{
+    Scenes = new[] { dupA, dupB }, ActiveSceneIndex = 0, Plan = new EncodePlan(1600, 900, 30, 3500, 22, "libx264", EncoderTier.Rich, false, false, "veryfast", "t", Array.Empty<string>()),
+    InputOverride = (src, o) => new InputSpec(new[] { "-f", "lavfi", "-i", "testsrc2=s=800x500:r=30" }, false), IsWindows = true,
+});
+int fillScales = System.Text.RegularExpressions.Regex.Matches(dupSpec.FilterGraph, "force_original_aspect_ratio=increase").Count;
+Check(fillScales == 1, $"a game used by two scenes is scaled once and shared ({fillScales} scale chain(s))");
+Check(dupSpec.FilterGraph.Contains("overlay@stk1=format=yuv420:eof_action=repeat:enable=0") && dupSpec.SceneOverlays[1].Contains("overlay@stk1"),
+    "the hidden scene isn't blended until it's switched to");
+var tcmds = PipelineBuilder.TransitionCommands(dupSpec, 0, 1, 10, 0.5, out int tcrit);
+Check(tcmds[0] == "overlay@stk1 -1 enable 1" && tcrit < tcmds.Count + 1, $"switching turns the incoming scene on first ({string.Join(" | ", tcmds)})");
+var tback = PipelineBuilder.TransitionCommands(dupSpec, 1, 0, 20, 0.5, out int tcrit2);
+Check(tback.Last().StartsWith("overlay@stk1 -1 enable lt(t,20.6") && tcrit2 == tback.Count - 1, "the outgoing scene is switched off after its fade");
+Check(PipelineBuilder.FillChain(new StudioSource(), 1920, 1080, 30, true).Contains("increase") && LayoutMath.FillRect(new StudioSource(), 1920, 1080, 1.6) is { X: 0, W: 1920 } fr && fr.H > 1080,
+    "fill mode Crop covers the canvas (16:10 game: full width, edges trimmed top/bottom)");
+
+// the user's own layout: a game window dragged to free placement over the blank canvas
+var freeScene = new StudioScene { Name = "free" };
+freeScene.Sources.Add(new StudioSource { Type = SourceTypes.Window, WindowTitle = "Wizard101", Anchor = Anchors.Free, W = 0.9875, Y = -0.05 });
+var freeSpec = PipelineBuilder.Build(new PipelineRequest
+{
+    Scenes = new[] { freeScene }, Plan = new EncodePlan(1920, 1080, 30, 3500, 22, "libx264", EncoderTier.Rich, false, false, "veryfast", "t", Array.Empty<string>()),
+    InputOverride = (src, o) => new InputSpec(new[] { "-f", "lavfi", "-i", "testsrc2=s=1280x800:r=30" }, true), IsWindows = true,
+});
+Check(!string.Join(" ", freeSpec.Args).Contains("-re -f lavfi -i color") && freeSpec.FilterGraph.Contains("color=c=0x0E1016:s=1920x1080"),
+    "the blank canvas behind a live game is generated in-graph (no rate-limited input that lags after hiccups)");
+
 var snapped = LayoutMath.Snap(new LayoutRect(745, 7, 100, 50), 1600, 900, 12);
 Check(snapped == (750, 0), $"snaps to the centre line and the top edge ({snapped})");
+
+// ---------------------------------------------------------------- webcam modes
+var camModes = CameraModes.Parse("""
+[dshow @ 000001] vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30
+[dshow @ 000001] vcodec=mjpeg  min s=640x480 fps=5 max s=640x480 fps=30
+[dshow @ 000001]   pixel_format=yuyv422  min s=1280x720 fps=5 max s=1280x720 fps=10 (tv, bt470bg/bt709/unknown, topleft)
+[dshow @ 000001]   pixel_format=yuyv422  min s=640x360 fps=5 max s=640x360 fps=30
+[dshow @ 000001]   pixel_format=yuyv422  min s=640x480 fps=5 max s=640x480 fps=30
+""");
+var smallCam = CameraModes.Best(camModes, 460, 30);
+var bigCam = CameraModes.Best(camModes, 662, 30);
+Check(camModes.Count == 5 && smallCam is { Width: 640, Height: 360, Compressed: false } && bigCam is { Width: 1280, Format: "mjpeg" },
+    $"webcam mode: smallest sharp-enough mode at the stream's 30 FPS ({smallCam}; {bigCam} when the vertical canvas needs it bigger)");
+var slowCam = CameraModes.Best(CameraModes.Parse("vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=24\npixel_format=yuyv422  min s=640x480 fps=5 max s=640x480 fps=30"), 460, 30);
+Check(slowCam is { Width: 640, MaxFps: 30 }, $"a camera that only does 24 FPS at 720p runs at 30 FPS in a smaller mode instead ({slowCam})");
 
 // ---------------------------------------------------------------- dshow parsing
 Console.WriteLine("Device list parsing");
@@ -153,6 +204,39 @@ Directory.CreateDirectory(liveDir);
 var settings = new StudioSettings { QualityProfile = "Custom", Resolution = "640 × 360", FrameRate = 30, MaxBitrateKbps = 1500, Encoder = "libx264", RecordingFolder = Path.Combine(work, "videos"),
     ReplaySeconds = 6, Outputs = new() { outA, outB, outV } };
 await engine.UpdateAsync(scene, settings, false);
+async Task SyncSection()
+{
+    Console.WriteLine("Camera delay: the clap test measures it and the offset fixes it");
+    var sscene = new StudioScene { Name = "sync" };
+    sscene.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, CaptureMethod = testCapture });
+    var lagCam = new StudioSource { Name = "Slow cam", Type = SourceTypes.Camera, DeviceName = "slow", CameraDenoise = false, SizePercent = 30 };
+    sscene.Sources.Add(lagCam);
+    sscene.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone });
+    var oldCam = engine.CameraDeviceOverride;
+    engine.CameraDeviceOverride = src => VideoFifo.Input(work, 640, 360, 30, -1, lagSeconds: 0.25); // a webcam 250 ms slower than ours
+    await engine.UpdateAsync(new[] { sscene }, sscene, WithEncoder(settings, "libx264"), false);
+    await engine.SetPreviewAsync(true);
+    await Task.Delay(1500);
+    var m1 = await engine.MeasureCameraSyncAsync(lagCam, 9);
+    Console.WriteLine($"    measured: {m1?.OffsetMs:0} ms over {m1?.Events} events (spread {m1?.SpreadMs:0} ms)");
+    Check(m1 is { Reliable: true } && m1.OffsetMs is > 150 and < 350, $"a 250 ms slower camera is measured as late ({m1?.OffsetMs:0} ms)");
+    if (m1 is not null) lagCam.SyncOffsetMs += (int)Math.Round(m1.OffsetMs);
+    await engine.UpdateAsync(new[] { sscene }, sscene, WithEncoder(settings, "libx264"), false);
+    await Task.Delay(1500);
+    var m2 = await engine.MeasureCameraSyncAsync(lagCam, 9);
+    Console.WriteLine($"    after applying {lagCam.SyncOffsetMs} ms: {m2?.OffsetMs:0} ms over {m2?.Events} events");
+    Check(m2 is { Reliable: true } && Math.Abs(m2.OffsetMs) < 90, $"after the fix the camera matches the sound ({m2?.OffsetMs:0} ms)");
+    await engine.SetPreviewAsync(false);
+    engine.CameraDeviceOverride = oldCam;
+}
+
+if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_SYNC") == "1")
+{
+    await SyncSection();
+    await engine.StopAllAsync();
+    Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(S)");
+    return failures == 0 ? 0 : 1;
+}
 
 await engine.SetPreviewAsync(true);
 var pw = Stopwatch.StartNew();
@@ -365,8 +449,21 @@ if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
         File.WriteAllText(Path.Combine(work, "gpu-window-run.log"), wlog);
         string cmd = wlog.Split('\n').FirstOrDefault() ?? "";
         Console.WriteLine($"    gpu-window: title \"{title}\", final capture: {(cmd.Contains("gfxcapture=") ? "GPU (gfxcapture)" : cmd.Contains("gdigrab") ? "GDI fallback" : "?")}, frames {wf}, fallback used {sawFallback()}");
-        Check(engine.Running && wf >= 30 && (cmd.Contains("gfxcapture=hwnd=") || sawFallback()),
+        Console.WriteLine("    gpu-window: reader " + engine.WindowCaptureStats());
+        Check(engine.Running && wf >= 30 && (engine.WindowCaptureStats().Contains(" gpu ") || sawFallback()),
             "window capture delivers frames (GPU capture, or automatic GDI fallback where the GPU can't capture)");
+        // the "game" closes and reopens its window: capture re-attaches, the pipeline keeps running
+        var npSrc = wscene.Sources[0];
+        int npStarts = engine.PipelineStarts, readerStarts = engine.WindowReaderStarts(npSrc);
+        try { np.Kill(); } catch { }
+        await Task.Delay(1500);
+        np = Process.Start("notepad.exe")!;
+        await Task.Delay(6000);
+        long npFrames = engine.WindowFrames(npSrc);
+        await Task.Delay(2000);
+        Console.WriteLine("    gpu-window: after reopening: " + engine.WindowCaptureStats());
+        Check(engine.WindowReaderStarts(npSrc) > readerStarts && engine.WindowFrames(npSrc) > npFrames && engine.PipelineStarts == npStarts,
+            "window closed and reopened: capture re-attached by itself, no pipeline restart");
         await engine.SetPreviewAsync(false);
 
         // GPU display capture (desktop duplication) with the same automatic fallback
@@ -460,6 +557,63 @@ await engine.UpdateAsync(new[] { mscene }, mscene, WithEncoder(settings, "libx26
 Check(engine.PipelineStarts == moveStarts + 1, "resizing rebuilds the pipeline once");
 engine.FrameReady -= Grab;
 await engine.SetPreviewAsync(false);
+await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
+
+// ---------------------------------------------------------------- game window bridge + fill
+Console.WriteLine("Game window: own capture reader, 16:10 fills 16:9 (no bars, no stretching), survives the window closing");
+var gscene = new StudioScene { Name = "game window" };
+var gameWin = new StudioSource { Name = "Game", Type = SourceTypes.Window, WindowTitle = "TestGame", Anchor = Anchors.Fill };
+gscene.Sources.Add(gameWin);
+gscene.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone });
+// an 800×500 game picture: green, with a red band across the top 4% that a 16:9 crop must trim away
+engine.WindowDeviceOverride = _ => new InputSpec(new[] { "-re", "-f", "lavfi", "-i",
+    "color=c=0x00C000:s=800x500:r=30,drawbox=x=0:y=0:w=800:h=20:color=red:t=fill" }, false);
+byte[]? gFrame = null;
+void GrabG(byte[] f) { var pf = engine.PreviewFrame; if (f.Length == pf.Width * pf.Height * 4) gFrame = (byte[])f.Clone(); }
+(int r, int g) Px(double fx, double fy)
+{
+    var f = gFrame; var pf = engine.PreviewFrame;
+    if (f is null) return (-1, -1);
+    int i = ((int)(fy * (pf.Height - 1)) * pf.Width + (int)(fx * (pf.HorizontalWidth - 1))) * 4;
+    return (f[i + 2], f[i + 1]);
+}
+engine.FrameReady += GrabG;
+await engine.UpdateAsync(new[] { gscene }, gscene, WithEncoder(settings, "libx264"), false);
+await engine.SetPreviewAsync(true);
+await Task.Delay(4000);
+var edgeL = Px(0.0, 0.5); var edgeT = Px(0.5, 0.0); var mid = Px(0.5, 0.5);
+Check(edgeL.g > 150 && edgeL.r < 60 && edgeT.g > 150 && edgeT.r < 60 && mid.g > 150,
+    $"fills the whole 16:9 canvas: no side bars, top band trimmed instead of squashed (left {edgeL}, top {edgeT}, centre {mid})");
+int gStarts = engine.PipelineStarts, gReader = engine.WindowReaderStarts(gameWin);
+long gFramesBefore = engine.WindowFrames(gameWin);
+engine.SimulateWindowClosed(gameWin);
+await Task.Delay(4000);
+Console.WriteLine("    window reader: " + engine.WindowCaptureStats());
+Check(engine.WindowReaderStarts(gameWin) > gReader && engine.WindowFrames(gameWin) > gFramesBefore + 30 && engine.PipelineStarts == gStarts && Px(0.5, 0.5).g > 150,
+    $"window closed: capture re-attached by itself, stream never restarted (reader starts {gReader} → {engine.WindowReaderStarts(gameWin)}, pipeline starts {gStarts} → {engine.PipelineStarts})");
+engine.FrameReady -= GrabG;
+await engine.SetPreviewAsync(false);
+engine.WindowDeviceOverride = null;
+
+// ---------------------------------------------------------------- browser source
+Console.WriteLine("Browser source (a web page drawn over the scene)");
+var bscene = new StudioScene { Name = "chat" };
+var chat = new StudioSource { Name = "Chat", Type = SourceTypes.Browser, Url = "https://example.invalid/chat", BrowserWidth = 160, BrowserHeight = 90,
+    Anchor = Anchors.Free, X = 0.5, Y = 0.5, W = 0 };
+bscene.Sources.Add(chat);
+engine.FrameReady += GrabG;
+await engine.UpdateAsync(new[] { bscene }, bscene, WithEncoder(settings, "libx264"), false);
+await engine.SetPreviewAsync(true);
+await Task.Delay(3500);
+// 160×90 page at (320,180) on the 640×360 canvas: its centre is at (400,225)
+var inPage = Px(400 / 640.0, 225 / 360.0); var outside = Px(0.25, 0.25);
+Check(inPage.r > 200 && inPage.g < 60 && outside.r < 60, $"page drawn where placed (inside {inPage}, outside {outside}), transparent around it");
+Check(engine.SourceSize(chat) is (160, 90), $"page size known for the editor ({engine.SourceSize(chat)})");
+engine.FrameReady -= GrabG;
+await engine.SetPreviewAsync(false);
+
+// ---------------------------------------------------------------- camera sync (clap test)
+await SyncSection();
 await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
 
 // ---------------------------------------------------------------- reconnects
@@ -655,10 +809,10 @@ static class SyncMarker
 static class VideoFifo
 {
     /// <summary>Raw yuv420p frames (moving grey stripes) at exactly fps.</summary>
-    public static InputSpec Input(string dir, int w, int h, int fps, double origin)
+    public static InputSpec Input(string dir, int w, int h, int fps, double origin, double lagSeconds = 0)
     {
         int size = w * h * 3 / 2;
-        var frames = Enumerable.Range(0, 30).Select(i =>
+        var frames = Enumerable.Range(0, 32).Select(i =>  // 32 frames: the stripe pattern loops without a jump
         {
             var f = new byte[size];
             for (int y = 0; y < h; y++)
@@ -667,11 +821,23 @@ static class VideoFifo
             Array.Fill(f, (byte)128, w * h, size - w * h);
             return f;
         }).ToArray();
-        var white = new byte[size];
-        Array.Fill(white, (byte)235, 0, w * h);
-        Array.Fill(white, (byte)128, w * h, size - w * h);
+        // The marker is clap-like: a sudden white flash that fades out over ~0.3 s back into the moving picture
+        // (only its start is sudden). Each fade step is blended over the frame that is due at that moment.
+        var fadeBuf = new byte[size];
+        byte[] Fade(int k, byte[] b)
+        {
+            double a = 1 - k / 10.0;
+            for (int p = 0; p < w * h; p++) fadeBuf[p] = (byte)(235 * a + b[p] * (1 - a));
+            Array.Fill(fadeBuf, (byte)128, w * h, size - w * h);
+            return fadeBuf;
+        }
         // Like a webcam: frames are stamped by ffmpeg when read (wall clock), content is "now".
-        string path = PacedPipe.Create(dir, ".yuv", n => SyncMarker.On() ? white : frames[n % frames.Length], fps, -1, () => frames[0]);
+        string path = PacedPipe.Create(dir, ".yuv", n =>
+        {
+            double t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - lagSeconds;
+            long ms = (long)Math.Round(t * 1000) % 2000;
+            return ms < 300 ? Fade(Math.Min(9, (int)(ms / 30)), frames[n % frames.Length]) : frames[n % frames.Length];
+        }, fps, -1, () => frames[0]);
         return new InputSpec(new[] { "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", $"{w}x{h}", "-framerate", fps.ToString(), "-thread_queue_size", "64", "-i", path }, true);
     }
 }
@@ -727,6 +893,7 @@ static class WinApi
 
 sealed class FakePlatform(string png) : IPlatformServices
 {
+    public IFrameSource? OpenBrowser(StudioSource s) => new SolidPage(BrowserBridge.SizeOf(s).W, BrowserBridge.SizeOf(s).H);
     public long? FindWindow(string title) => OperatingSystem.IsWindows() ? WinApi.Find(title) : null;
     public string? RenderText(StudioSource source, int outputHeight) => png;
     public (int X, int Y, int W, int H)? MonitorBounds(int index) => null;
@@ -771,4 +938,15 @@ sealed class FifoAudioBridge(string dir) : IAudioBridge
     }
     public double LevelDb(Guid sourceId) => -20;
     public void Dispose() => ClosePipes();
+}
+
+/// <summary>Stand-in for a rendered web page: opaque magenta.</summary>
+sealed class SolidPage(int w, int h) : IFrameSource
+{
+    private readonly byte[] _frame = Enumerable.Range(0, w * h).SelectMany(_ => new byte[] { 255, 0, 255, 255 }).ToArray();
+    public int Width => w;
+    public int Height => h;
+    public byte[]? Latest() => _frame;
+    public string? Error => null;
+    public void Dispose() { }
 }

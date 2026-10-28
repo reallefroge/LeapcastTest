@@ -1,0 +1,312 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Text.RegularExpressions;
+
+namespace LeapcastStudioAI;
+
+/// <summary>
+/// Game window capture in its own small ffmpeg process per window, feeding the main pipeline through a
+/// <see cref="CountedFramePipe"/>. Three things fall out of that:
+/// <list type="bullet">
+/// <item>Games recreate their window (loading screens, resolution or fullscreen changes). The capture is re-attached
+///   to the new window automatically while the stream keeps running (it shows the last picture for a moment)
+///   instead of freezing on a dead window or restarting the whole pipeline.</item>
+/// <item>The compositor receives frames at an exact, steady rate no matter how unevenly the game presents them,
+///   which is what makes motion look smooth.</item>
+/// <item>Scaling/cropping the game picture happens in parallel with compositing and encoding (another process).</item>
+/// </list>
+/// </summary>
+public sealed class WindowCaptureBridge : IDisposable
+{
+    private sealed class Reader
+    {
+        public required string Key, Title, Signature, Name;
+        public required int Width, Height, Fps;
+        public required string Fill;
+        public required bool Cursor;
+        public required (int L, int T, int R, int B) Crop;
+        public Process? Proc;
+        public byte[]? Latest;
+        public readonly object Lock = new();
+        public long Frames;
+        public int Starts;
+        public volatile bool Running;
+        public DateTime StartedUtc, NextAttemptUtc;
+        public string State = "starting";
+        public bool UsedGpu;
+        public bool Retired;
+    }
+
+    private static readonly Regex VideoSize = new(@"Stream #0:0.*?: Video: .*?\b(\d{2,5})x(\d{2,5})\b", RegexOptions.Compiled);
+
+    private readonly Dictionary<string, Reader> _readers = new();
+    private readonly List<CountedFramePipe> _pipes = new();
+    private readonly object _lock = new();
+    private readonly string _scratch;
+    private readonly Func<string, long?> _findWindow;
+    private readonly CancellationTokenSource _cts = new();
+    private string? _ffmpeg;
+
+    /// <summary>GPU (Windows.Graphics.Capture) capture is available; turned off for this session if it fails.</summary>
+    public bool GpuCapture { get; set; }
+    /// <summary>Test / non-Windows hook: the capture input for a window source instead of gfxcapture/gdigrab.</summary>
+    public Func<StudioSource, InputSpec?>? DeviceOverride { get; set; }
+    /// <summary>(message, isError)</summary>
+    public event Action<string, bool>? Message;
+    /// <summary>Real (native) size of a window's picture, once its reader has reported it. Keyed by input key.</summary>
+    public Dictionary<string, (int W, int H)> CaptureSizes { get; } = new();
+
+    public sealed record WindowFeed(string Path, int Width, int Height);
+
+    public WindowCaptureBridge(string scratchDir, Func<string, long?> findWindow)
+    {
+        _scratch = scratchDir;
+        _findWindow = findWindow;
+        new Thread(Supervise) { IsBackground = true, Name = "Leapcast window capture supervisor" }.Start();
+    }
+
+    /// <summary>What a window source needs from its reader for one pipeline run.</summary>
+    public sealed record Need(StudioSource Source, int Width, int Height, string Fill);
+
+    /// <summary>Keeps a reader per window (restarting only those whose needs changed) and returns fresh pipes.</summary>
+    public Dictionary<string, WindowFeed> Open(string ffmpeg, IReadOnlyDictionary<string, Need> needs, int fps, double origin)
+    {
+        _ffmpeg = ffmpeg;
+        var result = new Dictionary<string, WindowFeed>();
+        lock (_lock)
+        {
+            ClosePipesLocked();
+            foreach (var key in _readers.Keys.Except(needs.Keys).ToList()) { Stop(_readers[key]); _readers.Remove(key); }
+            foreach (var (key, need) in needs)
+            {
+                var s = need.Source;
+                var crop = (Math.Max(0, s.CropLeft), Math.Max(0, s.CropTop), Math.Max(0, s.CropRight), Math.Max(0, s.CropBottom));
+                string sig = $"{s.WindowTitle.Trim()}|{need.Width}x{need.Height}|{need.Fill}|{fps}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}";
+                if (!_readers.TryGetValue(key, out var reader) || reader.Signature != sig)
+                {
+                    if (reader is not null) Stop(reader);
+                    reader = new Reader
+                    {
+                        Key = key, Title = s.WindowTitle.Trim(), Name = s.Name, Signature = sig, Width = need.Width, Height = need.Height,
+                        Fill = need.Fill, Fps = fps, Cursor = s.CaptureCursor, Crop = crop,
+                    };
+                    reader.UsedGpu = GpuCapture && !string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase);
+                    _readers[key] = reader;
+                    TryStart(reader);
+                }
+                int bytes = need.Width * need.Height * 3 / 2;
+                var blank = new byte[bytes];
+                Array.Fill(blank, (byte)16, 0, need.Width * need.Height);
+                Array.Fill(blank, (byte)128, need.Width * need.Height, bytes - need.Width * need.Height);
+                var r = reader;
+                var pipe = new CountedFramePipe(_scratch, bytes, fps, origin, () => { lock (r.Lock) return r.Latest; }, blank);
+                _pipes.Add(pipe);
+                result[key] = new WindowFeed(pipe.Path, need.Width, need.Height);
+            }
+        }
+        return result;
+    }
+
+    private void TryStart(Reader r)
+    {
+        var ffmpeg = _ffmpeg;
+        if (ffmpeg is null || r.Retired) return;
+        var src = new StudioSource { Type = SourceTypes.Window, WindowTitle = r.Title, CaptureCursor = r.Cursor };
+        InputSpec? input = DeviceOverride?.Invoke(src);
+        if (input is null)
+        {
+            if (r.UsedGpu)
+            {
+                var hwnd = _findWindow(r.Title);
+                if (hwnd is null or 0) { Wait(r, "waiting for the window"); return; }
+                input = new InputSpec(new[] { "-f", "lavfi", "-i",
+                    $"gfxcapture=hwnd={hwnd}:max_framerate={r.Fps}:capture_cursor={(r.Cursor ? 1 : 0)},hwdownload,format=bgra" }, false);
+            }
+            else
+            {
+                if (_findWindow(r.Title) is null or 0 && OperatingSystem.IsWindows()) { Wait(r, "waiting for the window"); return; }
+                input = new InputSpec(new[] { "-f", "gdigrab", "-framerate", r.Fps.ToString(CultureInfo.InvariantCulture),
+                    "-draw_mouse", r.Cursor ? "1" : "0", "-i", "title=" + r.Title }, false);
+            }
+        }
+
+        var psi = new ProcessStartInfo(ffmpeg)
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        foreach (var a in new[] { "-hide_banner", "-loglevel", "info", "-nostats" }) psi.ArgumentList.Add(a);
+        var dev = input.Args.ToList();
+        for (int i = dev.Count - 2; i >= 0; i--)
+            if (dev[i] is "-thread_queue_size" or "-use_wallclock_as_timestamps") dev.RemoveRange(i, 2);
+        foreach (var a in dev) psi.ArgumentList.Add(a);
+        var fillSrc = new StudioSource { FillMode = r.Fill };
+        string crop = r.Crop is (0, 0, 0, 0) ? "" : $"crop=iw-{r.Crop.L + r.Crop.R}:ih-{r.Crop.T + r.Crop.B}:{r.Crop.L}:{r.Crop.T},";
+        string vf = crop + PipelineBuilder.FillChain(fillSrc, r.Width, r.Height, r.Fps, pad: true) + "format=yuv420p";
+        foreach (var a in new[] { "-an", "-vf", vf, "-fps_mode", "passthrough", "-flush_packets", "1", "-f", "rawvideo", "pipe:1" })
+            psi.ArgumentList.Add(a);
+
+        Process p;
+        try { p = Process.Start(psi)!; }
+        catch (Exception ex) { Wait(r, "couldn't start: " + ex.Message); return; }
+        try { p.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
+        r.Proc = p;
+        r.Running = true;
+        r.Starts++;
+        r.StartedUtc = DateTime.UtcNow;
+        r.State = "capturing";
+        long framesAtStart = Interlocked.Read(ref r.Frames);
+        int size = r.Width * r.Height * 3 / 2;
+        new Thread(() =>
+        {
+            var s = p.StandardOutput.BaseStream;
+            try
+            {
+                while (true)
+                {
+                    var buf = new byte[size];
+                    int got = 0;
+                    while (got < size)
+                    {
+                        int n = s.Read(buf, got, size - got);
+                        if (n <= 0) return;
+                        got += n;
+                    }
+                    lock (r.Lock) r.Latest = buf;
+                    Interlocked.Increment(ref r.Frames);
+                }
+            }
+            catch { }
+        }) { IsBackground = true, Name = "Leapcast window reader " + r.Name, Priority = ThreadPriority.AboveNormal }.Start();
+        new Thread(() =>
+        {
+            var errors = new List<string>();
+            try
+            {
+                string? line;
+                bool inInput = false;
+                while ((line = p.StandardError.ReadLine()) is not null)
+                {
+                    if (line.StartsWith("Input #", StringComparison.Ordinal)) inInput = true;
+                    else if (line.StartsWith("Output #", StringComparison.Ordinal) || line.StartsWith("Stream mapping", StringComparison.Ordinal)) inInput = false;
+                    var m = VideoSize.Match(line);
+                    if (m.Success && inInput)
+                        lock (CaptureSizes) CaptureSizes[r.Key] = (int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture));
+                    if (line.Contains("Capture item closed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // the game closed or recreated its window: re-attach to the new one
+                        try { p.Kill(true); } catch { }
+                    }
+                    if (line.Contains("rror", StringComparison.Ordinal) || line.Contains("fail", StringComparison.OrdinalIgnoreCase))
+                    { errors.Add(line.Trim()); if (errors.Count > 10) errors.RemoveAt(0); }
+                }
+                p.WaitForExit();
+            }
+            catch { }
+            OnExited(r, p, framesAtStart, errors);
+        }) { IsBackground = true, Name = "Leapcast window reader log " + r.Name }.Start();
+    }
+
+    private void OnExited(Reader r, Process p, long framesAtStart, List<string> errors)
+    {
+        lock (_lock)
+        {
+            if (r.Proc != p) return;
+            r.Proc = null;
+            r.Running = false;
+            if (r.Retired) return;
+            bool producedNothing = Interlocked.Read(ref r.Frames) == framesAtStart;
+            if (producedNothing && r.UsedGpu && DateTime.UtcNow - r.StartedUtc < TimeSpan.FromSeconds(8) && _findWindow(r.Title) is not (null or 0))
+            {
+                // the window exists but GPU capture produced nothing: fall back to GDI for this session
+                GpuCapture = false;
+                r.UsedGpu = false;
+                Message?.Invoke("GPU window capture isn't working on this PC, so Leapcast switched to compatibility capture.", true);
+                r.NextAttemptUtc = DateTime.UtcNow;
+                r.State = "restarting (compatibility capture)";
+                return;
+            }
+            Wait(r, producedNothing && errors.Count > 0 ? "waiting for the window (" + errors[^1] + ")" : "window closed, re-attaching");
+        }
+    }
+
+    private static void Wait(Reader r, string state)
+    {
+        r.State = state;
+        r.Running = false;
+        r.NextAttemptUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
+    }
+
+    private void Supervise()
+    {
+        while (!_cts.IsCancellationRequested)
+        {
+            Thread.Sleep(500);
+            try
+            {
+                lock (_lock)
+                {
+                    foreach (var r in _readers.Values)
+                    {
+                        if (r.Retired || r.Running || r.Proc is not null || DateTime.UtcNow < r.NextAttemptUtc) continue;
+                        TryStart(r);
+                    }
+                }
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>Diagnostics: per window, how often its reader (re)started and how many frames arrived.</summary>
+    public string Stats()
+    {
+        lock (_lock)
+            return string.Join("; ", _readers.Values.Select(r =>
+                $"{r.Title}: {r.Width}x{r.Height} {(r.UsedGpu ? "gpu" : "gdi")} starts={r.Starts} frames={Interlocked.Read(ref r.Frames)} {r.State}"));
+    }
+
+    /// <summary>Frames received from a window's reader so far (tests / health).</summary>
+    public long FramesOf(string key) { lock (_lock) return _readers.TryGetValue(key, out var r) ? Interlocked.Read(ref r.Frames) : 0; }
+    public int StartsOf(string key) { lock (_lock) return _readers.TryGetValue(key, out var r) ? r.Starts : 0; }
+    /// <summary>Kills a reader as if its window had closed (tests).</summary>
+    public void SimulateWindowClosed(string key)
+    {
+        Process? p;
+        lock (_lock) p = _readers.TryGetValue(key, out var r) ? r.Proc : null;
+        try { p?.Kill(true); } catch { }
+    }
+
+    private static void Stop(Reader r)
+    {
+        r.Retired = true;
+        var p = r.Proc;
+        r.Proc = null;
+        if (p is null) return;
+        try { if (!p.HasExited) { p.StandardInput.Write("q"); p.StandardInput.Flush(); if (!p.WaitForExit(1500)) p.Kill(true); } } catch { }
+        try { p.Dispose(); } catch { }
+    }
+
+    private void ClosePipesLocked()
+    {
+        foreach (var p in _pipes) p.Dispose();
+        _pipes.Clear();
+    }
+
+    public void ClosePipes() { lock (_lock) ClosePipesLocked(); }
+
+    public void CloseAll()
+    {
+        lock (_lock)
+        {
+            ClosePipesLocked();
+            foreach (var r in _readers.Values) Stop(r);
+            _readers.Clear();
+        }
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        CloseAll();
+    }
+}

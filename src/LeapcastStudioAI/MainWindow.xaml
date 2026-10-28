@@ -45,6 +45,8 @@
           <Border x:Name="RecTag" Background="#7A2E31" CornerRadius="6" Padding="9,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center">
             <TextBlock x:Name="RecTagText" Text="● REC" FontWeight="Bold" FontSize="12"/>
           </Border>
+          <Button x:Name="AutoConfigButton" Content="Auto-config" Click="AutoConfig_Click" Padding="12,8" Margin="0,0,6,0"
+                  ToolTip="Test this PC with your real scene and pick the smoothest settings (about a minute)"/>
           <Button x:Name="GoLiveButton" Style="{StaticResource PrimaryButton}" Content="▶  Go live" Click="GoLive_Click" Padding="18,8" MinWidth="130"
                   ToolTip="Start every enabled output in the Multistream panel"/>
           <Button Style="{StaticResource IconButton}" Content="&#xE713;" FontSize="16" Click="Settings_Click" ToolTip="Settings"/>
@@ -282,7 +284,7 @@
     <!-- ===================== Status bar ===================== -->
     <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="14,5">
       <DockPanel>
-        <TextBlock DockPanel.Dock="Right" Text="v0.5.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
+        <TextBlock DockPanel.Dock="Right" Text="v0.6.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
         <TextBlock x:Name="HardwareLabel" DockPanel.Dock="Right" Text="Detecting hardware…" Foreground="{StaticResource MutedBrush}" FontSize="11"
                    VerticalAlignment="Center" Margin="0,0,16,0" TextTrimming="CharacterEllipsis" MaxWidth="560"/>
         <TextBlock x:Name="EngineStatus" Text="Starting…" Foreground="{StaticResource WarnBrush}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>

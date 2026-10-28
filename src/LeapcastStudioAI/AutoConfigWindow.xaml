@@ -1,0 +1,72 @@
+<Window x:Class="LeapcastStudioAI.AutoConfigWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Auto-config wizard" Width="600" Height="640" MinHeight="520" ResizeMode="CanResize"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}">
+  <DockPanel Margin="20,16,20,14">
+    <StackPanel DockPanel.Dock="Top">
+      <TextBlock Text="Auto-config" FontSize="22" FontWeight="Bold" Margin="3,0,0,2"/>
+      <TextBlock x:Name="Subtitle" Text="Finds the smoothest settings this PC can hold while you play, with as little quality loss as possible."
+                 Style="{StaticResource Hint}" Margin="3,0,3,8"/>
+    </StackPanel>
+    <DockPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
+      <Button x:Name="CancelButton" DockPanel.Dock="Left" Content="Cancel" IsCancel="True" Click="Cancel_Click"/>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <Button x:Name="ClapButton" Content="Sync camera (clap test)" Click="Clap_Click" Visibility="Collapsed"/>
+        <Button x:Name="PrimaryButton" Content="Start" Style="{StaticResource PrimaryButton}" MinWidth="120" Click="Primary_Click"/>
+      </StackPanel>
+    </DockPanel>
+    <Grid>
+      <!-- Page 1: questions -->
+      <ScrollViewer x:Name="QuestionsPage" VerticalScrollBarVisibility="Auto">
+        <Border Style="{StaticResource Card}">
+          <StackPanel>
+            <TextBlock Text="What do you stream?" Style="{StaticResource FieldLabel}"/>
+            <ComboBox x:Name="ContentBox">
+              <ComboBoxItem Content="Low-motion game: Wizard101, card or turn-based games" Tag="LowMotion"/>
+              <ComboBoxItem Content="High-motion game: shooters, racing, fast action" Tag="HighMotion"/>
+            </ComboBox>
+            <TextBlock Text="What matters most?" Style="{StaticResource FieldLabel}"/>
+            <ComboBox x:Name="PriorityBox">
+              <ComboBoxItem Content="Smooth stream and a smooth game: least PC load (recommended)" Tag="Performance"/>
+              <ComboBoxItem Content="Sharpest picture my PC and connection can hold" Tag="Quality"/>
+            </ComboBox>
+            <TextBlock Text="Upload speed (Mbps)" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="UploadBox"/>
+            <TextBlock x:Name="UploadHint" Text="From any speed test (e.g. your provider's), or measured in Settings → Connection." Style="{StaticResource Hint}"/>
+            <CheckBox x:Name="FillGameBox" Content="Make the game fill the whole 16:9 stream (trim edges, no bars, no stretching)" IsChecked="True"/>
+            <TextBlock Text="The test runs your real scene for about 15 seconds per try (a couple of tries at most). Keep the game open and playing; nothing goes live."
+                       Style="{StaticResource Hint}" Margin="3,10,3,0"/>
+          </StackPanel>
+        </Border>
+      </ScrollViewer>
+      <!-- Page 2: progress + results -->
+      <ScrollViewer x:Name="ResultsPage" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+        <StackPanel>
+          <Border Style="{StaticResource Card}" Margin="0,0,0,10">
+            <ItemsControl x:Name="StepsList">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="2,3"/>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </Border>
+          <Border x:Name="SummaryCard" Style="{StaticResource Card}" Visibility="Collapsed">
+            <StackPanel>
+              <TextBlock Text="RECOMMENDED" Style="{StaticResource SectionHeader}"/>
+              <TextBlock x:Name="SummaryTitle" FontSize="16" FontWeight="SemiBold" Margin="3,0,3,4" TextWrapping="Wrap"/>
+              <ItemsControl x:Name="SummaryList">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding StringFormat='•  {0}'}" Style="{StaticResource Hint}"/>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+  </DockPanel>
+</Window>

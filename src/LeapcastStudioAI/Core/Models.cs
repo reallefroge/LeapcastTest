@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace LeapcastStudioAI;
 
 /// <summary>What the engine actually does with a source. The persisted <see cref="StudioSource.Type"/> string maps onto this.</summary>
-public enum SourceKind { Display, Window, Camera, Image, Text, Microphone, DesktopAudio, Unsupported }
+public enum SourceKind { Display, Window, Camera, Image, Text, Browser, Microphone, DesktopAudio, Unsupported }
 
 public static class SourceTypes
 {
@@ -15,9 +15,10 @@ public static class SourceTypes
     public const string Text = "Text";
     public const string Microphone = "Audio Input";
     public const string DesktopAudio = "Audio Output";
+    public const string Browser = "Browser";
 
     /// <summary>Types offered in the "Add source" picker.</summary>
-    public static readonly string[] Pickable = { Display, Window, Camera, Image, Text, Microphone, DesktopAudio };
+    public static readonly string[] Pickable = { Window, Display, Camera, Browser, Image, Text, Microphone, DesktopAudio };
 
     public static SourceKind KindOf(string? type) => type switch
     {
@@ -27,12 +28,15 @@ public static class SourceTypes
         Camera => SourceKind.Camera,
         Image => SourceKind.Image,
         Text => SourceKind.Text,
+        Browser => SourceKind.Browser,
         Microphone => SourceKind.Microphone,
         DesktopAudio => SourceKind.DesktopAudio,
         _ => SourceKind.Unsupported
     };
 
-    public static bool IsVideo(SourceKind k) => k is SourceKind.Display or SourceKind.Window or SourceKind.Camera or SourceKind.Image or SourceKind.Text;
+    public static bool IsVideo(SourceKind k) => k is SourceKind.Display or SourceKind.Window or SourceKind.Camera or SourceKind.Image or SourceKind.Text or SourceKind.Browser;
+    /// <summary>Has transparency and a natural pixel size (drawn as an overlay, never as the opaque base).</summary>
+    public static bool IsGraphic(SourceKind k) => k is SourceKind.Image or SourceKind.Text or SourceKind.Browser;
     public static bool IsAudio(SourceKind k) => k is SourceKind.Microphone or SourceKind.DesktopAudio;
 }
 
@@ -47,6 +51,8 @@ public static class Anchors
     public const string Center = "Center";
     /// <summary>Positioned by dragging on the preview (X/Y/W fractions of the canvas).</summary>
     public const string Free = "Free";
+    /// <summary>How a full-screen source fills a canvas of a different shape.</summary>
+    public const string FillCrop = "Crop", FillFit = "Fit", FillStretch = "Stretch";
     public static readonly string[] All = { Auto, Fill, TopLeft, TopRight, BottomLeft, BottomRight, Center, Free };
 
     public static string Resolve(StudioSource s)
@@ -77,6 +83,8 @@ public sealed class StudioSource
     public double X { get; set; }
     public double Y { get; set; }
     public double W { get; set; } = 0.25;
+    /// <summary>"Crop" (fill the canvas, trim the edges: no bars, no stretching), "Fit" (bars) or "Stretch".</summary>
+    public string FillMode { get; set; } = Anchors.FillCrop;
 
     // Vertical (9:16) canvas placement
     /// <summary>Shown on the vertical canvas.</summary>
@@ -102,6 +110,8 @@ public sealed class StudioSource
     public string DeviceName { get; set; } = "";
     public string CameraResolution { get; set; } = "1280x720";
     public int CameraFps { get; set; } = 30;
+    /// <summary>"" = let the camera choose, else a dshow format tag: "vcodec=mjpeg" or "pixel_format=yuyv422".</summary>
+    public string CameraFormat { get; set; } = "";
     /// <summary>Temporal denoise before encoding. Webcam sensor noise is one of the biggest bitrate wasters.</summary>
     public bool CameraDenoise { get; set; } = true;
     public bool Mirror { get; set; }
@@ -113,6 +123,14 @@ public sealed class StudioSource
     public string Text { get; set; } = "";
     public double FontSize { get; set; } = 44;
     public string TextColor { get; set; } = "#FFFFFF";
+
+    // Browser
+    public string Url { get; set; } = "";
+    public int BrowserWidth { get; set; } = 400;
+    public int BrowserHeight { get; set; } = 600;
+    public int BrowserFps { get; set; } = 15;
+    /// <summary>Extra CSS injected into the page (e.g. to make a chat background transparent).</summary>
+    public string BrowserCss { get; set; } = "body { background-color: rgba(0,0,0,0) !important; margin: 0; overflow: hidden; }";
 
     // Audio
     /// <summary>WASAPI endpoint id; empty = Windows default device.</summary>
@@ -195,6 +213,8 @@ public sealed class StudioSettings
     // Reliability
     public bool AutoReconnect { get; set; } = true;
     public bool AutoAdjustBitrate { get; set; } = true;
+    /// <summary>The auto-config wizard has been offered once (first launch).</summary>
+    public bool AutoConfigOffered { get; set; }
     public string FfmpegPath { get; set; } = "";
 
     public StudioSettings Clone() => JsonSerializer.Deserialize<StudioSettings>(JsonSerializer.Serialize(this))!;

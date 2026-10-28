@@ -175,6 +175,33 @@ public sealed class SegmentCache
         finally { lock (_lock) _pinned.Remove((from, to)); }
     }
 
+    /// <summary>Remembers "now" so <see cref="ExportSinceAsync"/> can export exactly what is recorded from here on.</summary>
+    public long Mark()
+    {
+        long key = CurrentKey();
+        lock (_lock) _pinned.Add((key, long.MaxValue));
+        return key;
+    }
+
+    /// <summary>Exports every segment from <paramref name="fromKey"/> (a <see cref="Mark"/>) up to now, then releases the mark.</summary>
+    public async Task<string> ExportSinceAsync(string ffmpeg, long fromKey, string outputPath, CancellationToken ct = default)
+    {
+        long to = LastExistingKey();
+        try
+        {
+            await WaitClosedAsync(to, TimeSpan.FromSeconds(SegmentSeconds * 4 + 4), ct);
+            InvalidateScan();
+            var segs = Scan().Where(s => s.Closed && s.Key >= fromKey && s.Key <= to && s.Size > 0).ToList();
+            if (segs.Count == 0) throw new InvalidOperationException("Nothing was recorded (the encoder never started).");
+            await ConcatAsync(ffmpeg, segs, outputPath, ct);
+            return outputPath;
+        }
+        finally { Release(fromKey); }
+    }
+
+    /// <summary>Drops a <see cref="Mark"/> (its segments may be housekept again).</summary>
+    public void Release(long fromKey) { lock (_lock) _pinned.RemoveAll(p => p.from == fromKey && p.to == long.MaxValue); }
+
     /// <summary>Saves the last <paramref name="seconds"/> of the stream as an MP4.</summary>
     public async Task<string> SaveReplayAsync(string ffmpeg, int seconds, string outputPath, CancellationToken ct = default)
     {

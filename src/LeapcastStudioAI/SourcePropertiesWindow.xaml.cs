@@ -11,11 +11,14 @@ public partial class SourcePropertiesWindow : Window
     private readonly StudioSource _source;
     private readonly SourceKind _kind;
     private readonly string? _ffmpeg;
+    private readonly Func<StudioSource, Task<SyncAnalyzer.Result?>>? _clapTest;
 
-    public SourcePropertiesWindow(StudioSource source, string? ffmpegPath)
+    /// <param name="clapTest">Runs the camera clap test on the live pipeline (null when the camera isn't in a scene yet).</param>
+    public SourcePropertiesWindow(StudioSource source, string? ffmpegPath, Func<StudioSource, Task<SyncAnalyzer.Result?>>? clapTest = null)
     {
         InitializeComponent();
         _source = source;
+        _clapTest = clapTest;
         _kind = SourceTypes.KindOf(source.Type);
         _ffmpeg = ffmpegPath;
 
@@ -30,6 +33,11 @@ public partial class SourcePropertiesWindow : Window
         Toggle(CameraGroup, _kind == SourceKind.Camera);
         Toggle(ImageGroup, _kind == SourceKind.Image);
         Toggle(TextGroup, _kind == SourceKind.Text);
+        Toggle(BrowserGroup, _kind == SourceKind.Browser);
+        Toggle(FillGroup, _kind is SourceKind.Display or SourceKind.Window or SourceKind.Camera or SourceKind.Image);
+        ClapButton.IsEnabled = clapTest is not null;
+        if (clapTest is null && _kind == SourceKind.Camera)
+            ClapHint.Text = "Add the camera to a scene first, then open its properties again to run the clap test.";
         Toggle(PlacementGroup, video);
         Toggle(AudioGroup, SourceTypes.IsAudio(_kind));
         Toggle(NoiseBox, _kind == SourceKind.Microphone);
@@ -62,6 +70,14 @@ public partial class SourcePropertiesWindow : Window
         SyncOffsetBox.Text = source.SyncOffsetMs.ToString(CultureInfo.InvariantCulture);
         if (_kind == SourceKind.Camera) _ = LoadCamerasAsync();
 
+        // Browser
+        UrlBox.Text = source.Url;
+        BrowserWBox.Text = source.BrowserWidth.ToString(CultureInfo.InvariantCulture);
+        BrowserHBox.Text = source.BrowserHeight.ToString(CultureInfo.InvariantCulture);
+        SelectTag(BrowserFpsBox, source.BrowserFps <= 10 ? "10" : source.BrowserFps <= 15 ? "15" : "30");
+        CssBox.Text = source.BrowserCss;
+        SelectTag(FillBox, source.FillMode);
+
         // Image / text
         ImageBox.Text = source.FilePath;
         TextContentBox.Text = source.Text;
@@ -76,6 +92,7 @@ public partial class SourcePropertiesWindow : Window
         MarginBox.Text = source.MarginPx.ToString(CultureInfo.InvariantCulture);
         if (_kind == SourceKind.Text) { SizeLabel.Visibility = Visibility.Collapsed; SizeSlider.Visibility = Visibility.Collapsed; SizeValue.Visibility = Visibility.Collapsed; }
         if (_kind == SourceKind.Image) SizeLabel.Text = "Width (% of the stream width; 100 = full width)";
+        if (_kind == SourceKind.Browser) SizeLabel.Text = "Width (% of the stream width) for corner positions";
 
         // Audio
         if (SourceTypes.IsAudio(_kind))
@@ -172,6 +189,12 @@ public partial class SourcePropertiesWindow : Window
             }
         }
 
+        if (_kind == SourceKind.Browser && string.IsNullOrWhiteSpace(UrlBox.Text))
+        {
+            MessageBox.Show(this, "Enter the web address to show.", "Source properties", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
         var s = _source;
         s.Name = string.IsNullOrWhiteSpace(NameBox.Text) ? s.Type : NameBox.Text.Trim();
         s.MonitorIndex = Int(TagOf(MonitorBox, "0"), 0, 0, 16);
@@ -198,8 +221,41 @@ public partial class SourcePropertiesWindow : Window
         s.AudioDeviceId = TagOf(AudioDeviceBox, "");
         s.VolumeDb = Dbl(VolumeBox.Text, 0, -40, 20);
         s.NoiseCleanup = NoiseBox.IsChecked == true;
+        s.Url = UrlBox.Text.Trim();
+        s.BrowserWidth = Int(BrowserWBox.Text, 400, 64, 3840);
+        s.BrowserHeight = Int(BrowserHBox.Text, 600, 64, 2160);
+        s.BrowserFps = Int(TagOf(BrowserFpsBox, "15"), 15, 1, 60);
+        s.BrowserCss = CssBox.Text;
+        s.FillMode = TagOf(FillBox, Anchors.FillCrop);
         DialogResult = true;
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
+
+    private async void ClapTest_Click(object sender, RoutedEventArgs e)
+    {
+        if (_clapTest is null) return;
+        ClapButton.IsEnabled = false;
+        try
+        {
+            ClapHint.Text = "Listening… clap 4–5 times, about once a second, where the camera can see your hands.";
+            var r = await _clapTest(_source);
+            int current = Int(SyncOffsetBox.Text, 0, -1000, 2000);
+            if (r is not { Reliable: true })
+            {
+                ClapHint.Text = r is null
+                    ? "Couldn't hear or see clear claps. Try again: clap loudly, close to the mic, with your hands in view."
+                    : $"The claps didn't line up consistently ({r.Events} found). Try again with sharper claps.";
+                return;
+            }
+            int fixedMs = Math.Clamp(current + (int)Math.Round(r.OffsetMs), -1000, 2000);
+            SyncOffsetBox.Text = fixedMs.ToString(CultureInfo.InvariantCulture);
+            ClapHint.Text = Math.Abs(r.OffsetMs) < 34
+                ? $"Already in sync ({r.OffsetMs:+0;-0} ms over {r.Events} claps). Press OK."
+                : $"Your camera was {Math.Abs(r.OffsetMs):0} ms {(r.OffsetMs > 0 ? "behind" : "ahead of")} your voice ({r.Events} claps). " +
+                  $"Sync offset set to {fixedMs} ms: press OK to apply.";
+        }
+        catch (Exception ex) { ClapHint.Text = ex.Message; }
+        finally { ClapButton.IsEnabled = true; }
+    }
 }

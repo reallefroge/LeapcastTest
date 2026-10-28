@@ -107,6 +107,7 @@ public partial class MainWindow : Window
     private (int W, int H) _hCanvas = (1600, 900), _vCanvas = (720, 1280);
     private int _sizesSeen;
     private bool _syncingSelection;
+    private bool _struggleTipShown;
 
     private StudioScene? SelectedScene => ScenesList.SelectedItem as StudioScene;
 
@@ -215,6 +216,14 @@ public partial class MainWindow : Window
         Log("Engine ready: " + string.Join(", ", names), false);
         UpdateCanvasLayout();
         UpdatePlanDisplay();
+        if (!_state.Settings.AutoConfigOffered && !Environment.GetCommandLineArgs().Contains("--preview", StringComparer.OrdinalIgnoreCase))
+        {
+            _state.Settings.AutoConfigOffered = true;
+            Save();
+            if (MessageBox.Show(this, "Let Leapcast test this PC with your scene and pick the smoothest settings? It takes about a minute (keep your game open).",
+                    "Auto-config", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+                AutoConfig_Click(this, new RoutedEventArgs());
+        }
         // demo/automation: --preview starts the preview right away
         if (Environment.GetCommandLineArgs().Contains("--preview", StringComparer.OrdinalIgnoreCase))
         {
@@ -329,6 +338,11 @@ public partial class MainWindow : Window
             : "—";
         StatFps.Text = st.Running && st.Fps > 0 ? $"{st.Fps:0} / {_engine.CurrentPlan?.Fps ?? 30} FPS" : "— FPS";
         StatHealth.Text = st.Running || st.Reconnecting ? st.Health : "Idle";
+        if (st.Health.StartsWith("Struggling") && !_struggleTipShown)
+        {
+            _struggleTipShown = true;
+            Log("Your PC is falling behind. Click Auto-config (top right) to find lighter settings that stay smooth.", true);
+        }
         StatHealth.Foreground = st.Health.StartsWith("Struggling") || st.Health.StartsWith("Upload") ? (Brush)FindResource("BadBrush")
             : st.Reconnecting ? (Brush)FindResource("WarnBrush")
             : st.Health.StartsWith("Excellent") ? (Brush)FindResource("GoodBrush") : (Brush)FindResource("TextBrush");
@@ -454,7 +468,7 @@ public partial class MainWindow : Window
 
     private void SetButtonsEnabled(bool on)
     {
-        GoLiveButton.IsEnabled = StartAllButton.IsEnabled = RecordButton.IsEnabled = PreviewButton.IsEnabled = PreviewButtonCenter.IsEnabled =
+        GoLiveButton.IsEnabled = AutoConfigButton.IsEnabled = StartAllButton.IsEnabled = RecordButton.IsEnabled = PreviewButton.IsEnabled = PreviewButtonCenter.IsEnabled =
             ReplayBufferButton.IsEnabled = SaveReplayButton.IsEnabled = HorizontalOutputs.IsEnabled = VerticalOutputs.IsEnabled = on;
     }
 
@@ -681,6 +695,27 @@ public partial class MainWindow : Window
             Log("Replay saved: " + path, false);
         }
         catch (Exception ex) { Log(ex.Message, true); }
+    }
+
+    private async void AutoConfig_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_ready) { MessageBox.Show(this, EngineStatus.Text, "Engine not ready", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_engine.Live)
+        {
+            MessageBox.Show(this, "End the stream first: the test needs your PC to itself for about a minute.", "Auto-config", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var w = new AutoConfigWindow(_engine, _state) { Owner = this };
+        bool ok = w.ShowDialog() == true && w.Result is not null;
+        if (ok) _state.Settings = w.Result!;
+        Save();
+        _shownPlan = null;
+        UpdatePlanDisplay();
+        UpdateCanvasLayout();
+        RedrawEditors();
+        SourcesList.Items.Refresh();
+        try { await ApplyToEngineAsync(true); } catch (Exception ex) { Log(ex.Message, true); }
+        if (ok) { Status("Auto-config applied: " + (_engine.CurrentPlan ?? _engine.PlanFor(_state.Settings)).Summary); Log("Auto-config applied.", false); }
     }
 
     private async void Settings_Click(object sender, RoutedEventArgs e)

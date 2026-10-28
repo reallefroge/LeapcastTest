@@ -11,6 +11,11 @@ low-motion games like **Wizard101** plus a webcam.
 | **Multistream (Aitum-style)** | Stream to Twitch, YouTube, TikTok, Kick or any RTMP(S) server at once. Each destination is its own row with a status light, live bitrate, and its own ▶/■: start, stop or reconnect one without touching the others. All destinations share one encode per canvas (no extra GPU/CPU); a destination can optionally get its own encode at a different bitrate. |
 | **Vertical canvas** | A second 9:16 canvas for TikTok / Shorts / Reels with its own layout: camera on top, game full-width below over a blurred copy of itself, automatically. Drag things on the vertical preview to change it. |
 | **Edit on the preview** | Drag sources to move them, drag the corner to resize, snap to edges and centre lines (hold Shift to place freely), arrow keys to nudge, right-click for corner snaps. Moves apply live, with no restart and no blink, even while streaming. |
+| **Auto-config** | One click: measures your game window, picks the GPU encoder and a webcam mode that matches the stream's frame rate, then stress-tests your real scene (capture + every scene + encode, nothing goes live) and steps down until it keeps up. |
+| **Any game size fills 16:9** | Full-screen sources default to *crop to fill*: an 800×500 (16:10) window fills the whole 16:9 stream with the edges trimmed, never stretched and with no black bars. *Fit* and *Stretch* are there if you prefer. Auto quality never upscales a small window (that only costs data). |
+| **Game window capture that survives** | Each game window is captured by its own small process at a steady frame rate. If the game recreates its window (loading screens, resolution changes) the capture re-attaches by itself while the stream keeps running. |
+| **Browser source** | Any URL (chat, alerts, widgets) rendered off-screen with a transparent background by Microsoft Edge WebView2 (built into Windows 10/11). Frames are only produced when the page changes, so an idle chat costs almost nothing. Custom CSS is injected into the page. |
+| **Camera sync (clap test)** | Clap a few times in view: Leapcast measures how far the camera trails your voice and corrects it. |
 | **One encode, many outputs** | The stream, recordings and instant replay all come from the **same** encode. Recording while live costs no extra GPU/CPU. |
 | **Smart VBR** | Quality-targeted encoding with a hard bitrate cap. Static screens (menus, waiting for your turn, dialogue) use a fraction of the cap; battles can use all of it. In testing on mostly-static game-like content at a 3,500 kbps cap: **~965 kbps vs 3,607 kbps** for constant bitrate. |
 | **Auto quality** | Picks resolution/FPS/bitrate from your measured upload (Twitch test mode, invisible to viewers), the strictest platform limit and your hardware. It never plans more than 75% of your upload, split across every destination you stream to at once. |
@@ -22,6 +27,8 @@ low-motion games like **Wizard101** plus a webcam.
 | **Live stats** | Real upload (measured from the encoded output), average, % data saved vs constant bitrate, frame rate, connection health, and *why* each setting was chosen. |
 
 ### Recommended setup for Wizard101 + camera
+Click **Auto-config** (top right) with Wizard101 open: it does most of the steps below for you.
+
 1. Multistream panel → **+ Add output** → Twitch (paste the key), again for YouTube, and TikTok (server URL + key from TikTok LIVE Producer; it asks for a fresh key each time you go live).
 2. Settings → Connection → **Test my connection**. Quality: **Low-motion game**, Profile **Auto**, Bitrate mode **Smart VBR**.
 3. Scene: **Display Capture** (GPU) of the monitor with Wizard101 + **Video Capture Device** (your cam, Smart denoise on) + **Desktop audio** + **Microphone** (Noise cleanup on). Drag the camera where you want it on each canvas.

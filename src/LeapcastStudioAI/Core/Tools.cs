@@ -74,6 +74,63 @@ public static class DeviceDiscovery
     }
 }
 
+/// <summary>One capture mode a webcam offers (from DirectShow's option list).</summary>
+public sealed record CameraMode(string Format, bool Compressed, int Width, int Height, double MaxFps)
+{
+    /// <summary>The ffmpeg dshow option that selects this format ("-vcodec mjpeg" or "-pixel_format yuyv422").</summary>
+    public string Tag => (Compressed ? "vcodec=" : "pixel_format=") + Format;
+    public override string ToString() => $"{Width}×{Height} @ {MaxFps:0.##} FPS ({Format})";
+}
+
+public static class CameraModes
+{
+    public static async Task<List<CameraMode>> ListAsync(string ffmpeg, string device)
+    {
+        var (_, err) = await EncoderCatalog.RunQuietAsync(ffmpeg,
+            new[] { "-hide_banner", "-f", "dshow", "-list_options", "true", "-i", "video=" + device }, TimeSpan.FromSeconds(15), default);
+        return Parse(err);
+    }
+
+    private static readonly Regex Line = new(
+        @"(?<kind>vcodec|pixel_format)=(?<fmt>\S+)\s+min s=\d+x\d+ fps=[\d.]+\s+max s=(?<w>\d+)x(?<h>\d+) fps=(?<fps>[\d.]+)",
+        RegexOptions.Compiled);
+
+    /// <summary>Parses "vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30" / "pixel_format=yuyv422 …" lines.</summary>
+    public static List<CameraMode> Parse(string stderr)
+    {
+        var list = new List<CameraMode>();
+        foreach (Match m in Line.Matches(stderr))
+        {
+            var mode = new CameraMode(m.Groups["fmt"].Value, m.Groups["kind"].Value == "vcodec",
+                int.Parse(m.Groups["w"].Value, CultureInfo.InvariantCulture), int.Parse(m.Groups["h"].Value, CultureInfo.InvariantCulture),
+                double.Parse(m.Groups["fps"].Value, CultureInfo.InvariantCulture));
+            if (!list.Any(x => x.Tag == mode.Tag && x.Width == mode.Width && x.Height == mode.Height && Math.Abs(x.MaxFps - mode.MaxFps) < 0.01))
+                list.Add(mode);
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// The lightest mode that still looks sharp where the camera is drawn and runs at the stream's frame rate
+    /// (a 24 FPS camera in a 30 FPS stream repeats every 4th frame, which reads as stutter). Uncompressed formats
+    /// beat MJPEG at the same size (no decoding). Null when the list is empty.
+    /// </summary>
+    public static CameraMode? Best(IReadOnlyList<CameraMode> modes, int neededWidth, int streamFps)
+    {
+        if (modes.Count == 0) return null;
+        int minW = Math.Max(640, neededWidth);
+        var fast = modes.Where(m => m.MaxFps >= streamFps - 0.5).ToList();
+        var pool = fast.Count > 0 ? fast : modes.Where(m => m.MaxFps >= modes.Max(x => x.MaxFps) - 0.5).ToList();
+        var bigEnough = pool.Where(m => m.Width >= minW).ToList();
+        var pick = (bigEnough.Count > 0 ? bigEnough : pool)
+            .OrderBy(m => bigEnough.Count > 0 ? m.Width * m.Height : -(m.Width * m.Height)) // smallest that's enough, else largest
+            .ThenBy(m => m.Compressed ? 1 : 0)
+            .ThenBy(m => Math.Abs(m.Width / (double)m.Height - 16.0 / 9))
+            .First();
+        return pick;
+    }
+}
+
 public sealed record BandwidthResult(double MeasuredKbps, int TestedKbps, bool ReachedTestRate, string Detail);
 
 /// <summary>

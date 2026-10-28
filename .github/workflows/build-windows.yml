@@ -82,8 +82,10 @@ jobs:
           {
             "Scenes": [
               { "Name": "Wizard101", "Sources": [
-                { "Name": "Wizard101 (screen)", "Type": "Display Capture", "CaptureMethod": "GDI" },
-                { "Name": "Title", "Type": "Text", "Text": "Leapcast multistream", "Anchor": "Free", "X": 0.04, "Y": 0.05, "W": 0 }
+                { "Name": "Wizard101 (screen)", "Type": "Display Capture", "CaptureMethod": "GDI", "Anchor": "Fill", "FillMode": "Crop" },
+                { "Name": "Title", "Type": "Text", "Text": "Leapcast multistream", "Anchor": "Free", "X": 0.04, "Y": 0.05, "W": 0 },
+                { "Name": "Chat (browser source)", "Type": "Browser", "Anchor": "Free", "X": 0.55, "Y": 0.62, "W": 0, "BrowserWidth": 640, "BrowserHeight": 200, "BrowserFps": 15,
+                  "Url": "data:text/html,<html><body><div style='margin:12px;padding:14px 20px;border-radius:14px;background:rgba(87,72,199,0.85);color:rgb(255,255,255);font:600 34px Segoe UI,sans-serif'>Chat: hello from a browser source!</div><div id='t' style='margin:0 12px;color:rgb(255,214,102);font:28px Segoe UI,sans-serif'></div><script>let n=0;setInterval(()=>document.getElementById('t').textContent='live tick '+(n++),500)</script></body></html>" }
               ] },
               { "Name": "Be right back", "Sources": [
                 { "Name": "BRB", "Type": "Text", "Text": "Be right back", "Anchor": "Center", "FontSize": 80 }
@@ -91,6 +93,7 @@ jobs:
             ],
             "Settings": {
               "VerticalCanvas": true,
+              "AutoConfigOffered": true,
               "Outputs": [
                 { "Name": "Twitch", "Service": "Twitch", "ServerUrl": "rtmp://live.twitch.tv/app" },
                 { "Name": "YouTube", "Service": "YouTube", "ServerUrl": "rtmp://a.rtmp.youtube.com/live2" },

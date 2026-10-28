@@ -8,6 +8,8 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        // hidden helper windows (browser sources) must not keep the app alive after the studio closes
+        ShutdownMode = ShutdownMode.OnMainWindowClose;
         DispatcherUnhandledException += OnUnhandled;
     }
 

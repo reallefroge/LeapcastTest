@@ -30,18 +30,18 @@ public static class LayoutMath
     {
         aspect = SafeAspect(aspect);
         string anchor = Anchors.Resolve(s);
-        if (anchor == Anchors.Fill) return Fit(cw, ch, aspect);
+        if (anchor == Anchors.Fill) return FillRect(s, cw, ch, aspect);
         if (anchor == Anchors.Free)
         {
             var k = SourceTypes.KindOf(s.Type);
-            if (s.W <= 0 && k is SourceKind.Text or SourceKind.Image && naturalSize is { } nat)
+            if (s.W <= 0 && SourceTypes.IsGraphic(k) && naturalSize is { } nat)
                 return new LayoutRect(s.X * cw, s.Y * ch, nat.w, nat.h); // free position, natural size (logos, text)
             double w = Math.Max(16, (s.W > 0 ? s.W : 0.25) * cw);
             return new LayoutRect(s.X * cw, s.Y * ch, w, w / aspect);
         }
         double ow, oh;
         var kind = SourceTypes.KindOf(s.Type);
-        if ((kind == SourceKind.Text || (kind == SourceKind.Image && s.SizePercent <= 0)) && naturalSize is { } n)
+        if ((kind == SourceKind.Text || (kind is SourceKind.Image or SourceKind.Browser && s.SizePercent <= 0)) && naturalSize is { } n)
         { ow = n.w; oh = n.h; }
         else
         {
@@ -99,6 +99,17 @@ public static class LayoutMath
         return new LayoutRect((cw - ow) / 2, ch * 0.75, ow, ow / aspect);
     }
 
+    /// <summary>Where a full-screen source lands: cropped to fill (may overhang the canvas), fitted, or stretched.</summary>
+    public static LayoutRect FillRect(StudioSource s, int cw, int ch, double aspect)
+    {
+        aspect = SafeAspect(aspect);
+        if (s.FillMode == Anchors.FillStretch) return new LayoutRect(0, 0, cw, ch);
+        if (s.FillMode == Anchors.FillFit) return Fit(cw, ch, aspect);
+        double w = cw, h = cw / aspect;
+        if (h < ch) { h = ch; w = ch * aspect; }
+        return new LayoutRect((cw - w) / 2, (ch - h) / 2, w, h);
+    }
+
     public static LayoutRect Fit(int cw, int ch, double aspect)
     {
         double w = cw, h = cw / aspect;
@@ -112,6 +123,7 @@ public static class LayoutMath
         var k = SourceTypes.KindOf(s.Type);
         if (k == SourceKind.Camera && SmartTuner.TryParseResolution(s.CameraResolution, out var w, out var h)) return w / (double)h;
         if (k == SourceKind.Text) return 6;
+        if (k == SourceKind.Browser) return Math.Max(64, s.BrowserWidth) / (double)Math.Max(64, s.BrowserHeight);
         return 16.0 / 9;
     }
 

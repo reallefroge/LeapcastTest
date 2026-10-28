@@ -83,7 +83,7 @@ public sealed class PreviewEditor
         if (_kind == CanvasKind.Horizontal)
         {
             layers ??= Layers();
-            if (LayoutMath.IsBaseLayer(s, layers)) return LayoutMath.Fit(cw, ch, Aspect(s));
+            if (LayoutMath.IsBaseLayer(s, layers)) return LayoutMath.FillRect(s, cw, ch, Aspect(s));
             return LayoutMath.Horizontal(s, cw, ch, Aspect(s), NaturalSize(s));
         }
         layers ??= Layers();

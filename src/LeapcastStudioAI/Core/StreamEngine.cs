@@ -28,6 +28,8 @@ public interface IPlatformServices
     (int X, int Y, int W, int H)? MonitorBounds(int index);
     /// <summary>Handle of the visible top-level window with exactly this title (null if not open).</summary>
     long? FindWindow(string title) => null;
+    /// <summary>Starts rendering a web page off-screen (null where browsers aren't supported).</summary>
+    IFrameSource? OpenBrowser(StudioSource source) => null;
 }
 
 public sealed record EngineStatus(
@@ -65,6 +67,8 @@ public sealed class StreamEngine : IDisposable
     private readonly IPlatformServices _platform;
     private readonly SegmentCache _cache;
     private readonly CameraBridge _cameras;
+    private readonly WindowCaptureBridge _windows;
+    private readonly BrowserBridge _browsers;
     private readonly OutputManager _outputs;
     private readonly string _logDir;
     private readonly string _tempDir;
@@ -104,6 +108,14 @@ public sealed class StreamEngine : IDisposable
     public Func<StudioSource, double, InputSpec?>? InputOverride { get; set; }
     /// <summary>Replaces the webcam device input of the camera reader (tests / non-Windows hosts).</summary>
     public Func<StudioSource, InputSpec?>? CameraDeviceOverride { get; set; }
+    /// <summary>Replaces the capture input of a window reader (tests / non-Windows hosts).</summary>
+    public Func<StudioSource, InputSpec?>? WindowDeviceOverride { get => _windows.DeviceOverride; set => _windows.DeviceOverride = value; }
+    /// <summary>Diagnostics: game window readers (starts, frames, state).</summary>
+    public string WindowCaptureStats() => _windows.Stats();
+    public long WindowFrames(StudioSource s) => _windows.FramesOf(PipelineBuilder.InputKey(s));
+    public int WindowReaderStarts(StudioSource s) => _windows.StartsOf(PipelineBuilder.InputKey(s));
+    /// <summary>Tests: behave as if the game had closed its window.</summary>
+    public void SimulateWindowClosed(StudioSource s) => _windows.SimulateWindowClosed(PipelineBuilder.InputKey(s));
     /// <summary>Returns an output's saved stream key (decrypted). Set by the app.</summary>
     public Func<StreamOutput, string>? KeyResolver { get; set; }
     public IReadOnlyList<ProbedEncoder> Encoders { get; private set; } = Array.Empty<ProbedEncoder>();
@@ -205,6 +217,13 @@ public sealed class StreamEngine : IDisposable
         Directory.CreateDirectory(_tempDir);
         _cameras = new CameraBridge(_pipeDir);
         _cameras.Error += msg => Message?.Invoke(this, new EngineMessageEventArgs(msg, true));
+        _windows = new WindowCaptureBridge(_pipeDir, title => _platform.FindWindow(title));
+        _windows.Message += (msg, err) =>
+        {
+            if (!_windows.GpuCapture) GpuWindowCaptureSupported = false;
+            Message?.Invoke(this, new EngineMessageEventArgs(msg, err));
+        };
+        _browsers = new BrowserBridge(_pipeDir, src => _platform.OpenBrowser(src));
         _outputs = new OutputManager(() => FfmpegPath, _logDir);
         _outputs.Message += (text, err) => Message?.Invoke(this, new EngineMessageEventArgs(text, err));
         _outputs.Changed += OnOutputsChanged;
@@ -224,6 +243,7 @@ public sealed class StreamEngine : IDisposable
         var (_, help) = await EncoderCatalog.RunQuietAsync(FfmpegPath, new[] { "-hide_banner", "-h", "filter=gfxcapture" },
             TimeSpan.FromSeconds(10), _life.Token);
         GpuWindowCaptureSupported = help.Contains("gfxcapture AVOptions", StringComparison.Ordinal);
+        _windows.GpuCapture = GpuWindowCaptureSupported;
         EncodersProbed = true;
     }
 
@@ -378,7 +398,7 @@ public sealed class StreamEngine : IDisposable
         var r = _runner; var spec = _runnerSpec;
         if (r is null || spec is null) return;
         double seconds = Settings.Transition == "Cut" ? 0.001 : Math.Clamp(Settings.TransitionMs, 100, 3000) / 1000.0;
-        int lineCount = PipelineBuilder.TransitionCommands(spec, from, to, 0, seconds).Count;
+        PipelineBuilder.TransitionCommands(spec, from, to, 0, seconds, out int lineCount);
         // Schedule against the pipeline's own clock (ffmpeg's latest output time, which tracks the frames being
         // composited), not the wall clock: if the machine falls behind real time, a wall-clock start time would
         // lie seconds in the future and the switch would appear frozen. Start after every command line has landed
@@ -387,8 +407,9 @@ public sealed class StreamEngine : IDisposable
         bool fresh = _lastProgress is not null && (DateTime.UtcNow - _lastProgressAt) < TimeSpan.FromSeconds(1.5);
         double now = fresh && !double.IsNaN(reported) ? reported : wall;
         double startAt = now + 0.15 * lineCount + 0.2;
-        _pumpPausedUntil = DateTime.UtcNow + TimeSpan.FromSeconds(0.15 * lineCount + 0.3); // keep stdin free for the fade
-        r.SendCommands(PipelineBuilder.TransitionCommands(spec, from, to, startAt, seconds));
+        var lines = PipelineBuilder.TransitionCommands(spec, from, to, startAt, seconds, out _);
+        _pumpPausedUntil = DateTime.UtcNow + TimeSpan.FromSeconds(0.15 * lines.Count + 0.3); // keep stdin free for the fade
+        r.SendCommands(lines);
     }
 
     private string RunnerFingerprint(IEnumerable<StudioScene> scenes)
@@ -545,6 +566,101 @@ public sealed class StreamEngine : IDisposable
         return await _cache.SaveReplayAsync(RequireFfmpeg(), Math.Clamp(Settings.ReplaySeconds, 5, 600), file);
     }
 
+    public sealed record BenchmarkResult(double Fps, int TargetFps, double Speed, long Dropped, string Health)
+    {
+        /// <summary>Kept up with real time at (nearly) the full frame rate.</summary>
+        public bool Smooth => Fps >= TargetFps * 0.93 && (Speed <= 0 || Speed >= 0.97);
+    }
+
+    /// <summary>
+    /// Auto-config stress test: runs the real pipeline (capture, every scene, encode) with <paramref name="candidate"/>
+    /// for a few seconds and measures whether it keeps up; then restores the previous settings and modes.
+    /// </summary>
+    public async Task<BenchmarkResult> BenchmarkAsync(StudioSettings candidate, int seconds = 10, CancellationToken ct = default)
+    {
+        if (Live) throw new InvalidOperationException("End the stream before running auto-config.");
+        if (Scene is null) throw new InvalidOperationException("No scene selected.");
+        var oldSettings = Settings;
+        bool oldReplay = ReplayBuffer;
+        var scenes = _scenes.ToList();
+        var scene = Scene;
+        try
+        {
+            await UpdateAsync(scenes, scene, candidate, restartIfRunning: true);
+            await SetReplayBufferAsync(true); // encodes like a stream does
+            await Task.Delay(2500, ct);        // devices settle, encoder look-ahead fills
+            lock (_progressWindow) _progressWindow.Clear();
+            await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(seconds, 4, 30)), ct);
+            var (fps, speed, _) = WindowedRates();
+            var p = _lastProgress;
+            return new BenchmarkResult(fps, CurrentPlan?.Fps ?? candidate.FrameRate, speed, p?.DroppedFrames ?? 0, _health);
+        }
+        finally
+        {
+            try { if (!oldReplay) await SetReplayBufferAsync(false); } catch { }
+            try { await UpdateAsync(scenes, scene, oldSettings, restartIfRunning: true); } catch { }
+        }
+    }
+
+    /// <summary>The game window's real size as captured (null until its capture has started once).</summary>
+    public (int W, int H)? CaptureSize(StudioSource s)
+    {
+        if (SourceTypes.KindOf(s.Type) == SourceKind.Window)
+            lock (_windows.CaptureSizes)
+                if (_windows.CaptureSizes.TryGetValue(PipelineBuilder.InputKey(s), out var v)) return v;
+        return SourceSize(s);
+    }
+
+    /// <summary>
+    /// Clap test: records the next <paramref name="seconds"/> (the user claps a few times in view of the camera)
+    /// and measures how late the camera's picture is compared with the sound. Add the result to the camera's
+    /// <see cref="StudioSource.SyncOffsetMs"/>.
+    /// </summary>
+    public async Task<SyncAnalyzer.Result?> MeasureCameraSyncAsync(StudioSource camera, int seconds = 8, CancellationToken ct = default)
+    {
+        var ffmpeg = RequireFfmpeg();
+        var scene = Scene ?? throw new InvalidOperationException("No scene selected.");
+        if (!scene.Sources.Contains(camera) || !camera.Visible)
+            throw new InvalidOperationException("Show the camera in the current scene first.");
+        if (!scene.Sources.Any(x => x.Visible && SourceTypes.KindOf(x.Type) == SourceKind.Microphone))
+            throw new InvalidOperationException("Add your microphone to the current scene first (the clap is heard through it).");
+        bool hadReplay = ReplayBuffer;
+        if (!(_runnerShape?.Main == true && _runner is not null)) await SetReplayBufferAsync(true);
+        string tmp = Path.Combine(_tempDir, $"sync-{Guid.NewGuid():N}.mp4");
+        long mark = _cache.Mark(); // exactly the claps from here on, never older footage from before a restart
+        SyncAnalyzer.Result? result = null;
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(seconds, 4, 30)), ct);
+            await _cache.ExportSinceAsync(ffmpeg, mark, tmp, ct);
+            var plan = CurrentPlan ?? throw new InvalidOperationException("The pipeline stopped.");
+            var layers = PipelineBuilder.VisibleLayers(scene.Sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
+            if (!layers.Contains(camera)) throw new InvalidOperationException("The camera is hidden behind a full-screen source in this scene.");
+            var rect = LayoutMath.IsBaseLayer(camera, layers)
+                ? LayoutMath.FillRect(camera, plan.Width, plan.Height, SourceAspect(camera))
+                : LayoutMath.Horizontal(camera, plan.Width, plan.Height, SourceAspect(camera));
+            double x0 = Math.Max(0, rect.X), y0 = Math.Max(0, rect.Y);
+            var visible = new LayoutRect(x0, y0, Math.Min(plan.Width, rect.Right) - x0, Math.Min(plan.Height, rect.Bottom) - y0);
+            result = await SyncAnalyzer.MeasureAsync(ffmpeg, tmp, visible, plan.Width, plan.Height, ct);
+            return result;
+        }
+        finally
+        {
+            try
+            {
+                _cache.Release(mark);
+                // keep the last unreadable attempt for diagnosis (Settings → Open log folder)
+                if (result is not { Reliable: true } && File.Exists(tmp))
+                    File.Copy(tmp, Path.Combine(_logDir, "sync-last-failed.mp4"), true);
+                if (Environment.GetEnvironmentVariable("LEAPCAST_KEEP_SYNC") is { Length: > 0 } keep && File.Exists(tmp))
+                    File.Copy(tmp, Path.Combine(keep, Path.GetFileName(tmp)), true);
+                File.Delete(tmp);
+            }
+            catch { }
+            if (!hadReplay) { try { await SetReplayBufferAsync(false); } catch { } }
+        }
+    }
+
     public async Task StopAllAsync()
     {
         await Locked(async () =>
@@ -554,7 +670,7 @@ public sealed class StreamEngine : IDisposable
             await _outputs.StopAllAsync();
             _liveSince = null;
             await StopRunnerAsync();
-            _cameras.CloseAll();
+            CloseDevices();
         });
         if (_cache.IsRecording) { try { await StopRecordingAsync(); } catch { } }
     }
@@ -589,10 +705,19 @@ public sealed class StreamEngine : IDisposable
     private async Task ReconcileAsync(bool requireSuccess = false)
     {
         var want = DesiredShape();
-        if (!want.Run) { await StopRunnerAsync(); _audio.Configure(Array.Empty<StudioSource>()); _cameras.CloseAll(); Publish(); return; }
+        if (!want.Run) { await StopRunnerAsync(); CloseDevices(); Publish(); return; }
         if (_runner is not null && want == _runnerShape) return;
         await StopRunnerAsync();
         await StartRunnerAsync(requireSuccess);
+    }
+
+    /// <summary>Nothing is running: release cameras, game capture, web pages and audio devices.</summary>
+    private void CloseDevices()
+    {
+        _audio.Configure(Array.Empty<StudioSource>());
+        _cameras.CloseAll();
+        _windows.CloseAll();
+        _browsers.CloseAll();
     }
 
     private async Task RestartAsync()
@@ -641,6 +766,14 @@ public sealed class StreamEngine : IDisposable
             if (dev is not null) camUses[key] = (dev, new List<StudioSource> { src });
         }
         var camFeeds = _cameras.Open(ffmpeg, camUses, plan.Width, plan.Height, plan.Fps, origin);
+        var winFeeds = _windows.Open(ffmpeg, WindowNeeds(plan, shape.Vertical ? vSize : null), plan.Fps, origin);
+        var browserUses = new Dictionary<string, StudioSource>();
+        foreach (var src in _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)
+                     .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources) : Enumerable.Empty<StudioSource>()))
+                     .Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && x.Url.Trim().Length > 0))
+            browserUses.TryAdd(PipelineBuilder.InputKey(src), src);
+        var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)));
+        lock (_windows.CaptureSizes) foreach (var (k, v) in _windows.CaptureSizes) _knownSizes[k] = v;
         string? segPattern = shape.Main ? _cache.BeginSession() : null;
 
         // One TS bus per encode that feeds destinations; outputs subscribe/unsubscribe at will.
@@ -684,6 +817,8 @@ public sealed class StreamEngine : IDisposable
             InputOverride = InputOverride,
             InputThreadQueueSupported = InputThreadQueueSupported,
             CameraInputs = camFeeds,
+            WindowInputs = winFeeds,
+            BrowserInputs = browserFeeds,
         };
         PipelineSpec spec;
         try { spec = PipelineBuilder.Build(request); }
@@ -751,6 +886,43 @@ public sealed class StreamEngine : IDisposable
         Publish();
     }
 
+    /// <summary>
+    /// What each game window's reader must deliver: the full canvas (already cropped/fitted) when the window fills the
+    /// screen, otherwise its picture at the largest size any scene or canvas draws it.
+    /// </summary>
+    private Dictionary<string, WindowCaptureBridge.Need> WindowNeeds(EncodePlan plan, (int W, int H)? vertical)
+    {
+        int W = plan.Width, H = plan.Height;
+        var fill = new Dictionary<string, WindowCaptureBridge.Need>();
+        var widths = new Dictionary<string, (StudioSource src, double w)>();
+        void Want(StudioSource s, double w)
+        {
+            string key = PipelineBuilder.InputKey(s);
+            widths[key] = widths.TryGetValue(key, out var e) ? (e.src, Math.Max(e.w, w)) : (s, w);
+        }
+        foreach (var sc in _scenes)
+        {
+            var layers = PipelineBuilder.VisibleLayers(sc.Sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
+            foreach (var s in layers.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.WindowTitle.Trim().Length > 0))
+            {
+                if (Anchors.Resolve(s) == Anchors.Fill) fill.TryAdd(PipelineBuilder.InputKey(s), new WindowCaptureBridge.Need(s, W, H, s.FillMode));
+                else Want(s, LayoutMath.Horizontal(s, W, H, PipelineBuilder.AspectFor(s, _knownSizes)).W);
+            }
+            if (vertical is { } v)
+                foreach (var s in PipelineBuilder.VerticalLayers(sc.Sources.ToList()).Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.WindowTitle.Trim().Length > 0))
+                    Want(s, PipelineBuilder.VerticalWidth(s, v.W, v.H));
+        }
+        var needs = new Dictionary<string, WindowCaptureBridge.Need>(fill);
+        foreach (var (key, (src, w)) in widths)
+        {
+            if (needs.ContainsKey(key)) continue;
+            int ww = SmartTuner.Even((int)Math.Clamp(Math.Round(w), 64, 3840));
+            int hh = SmartTuner.Even((int)Math.Clamp(Math.Round(ww / PipelineBuilder.AspectFor(src, _knownSizes)), 36, 2160));
+            needs[key] = new WindowCaptureBridge.Need(src, ww, hh, Anchors.FillFit);
+        }
+        return needs;
+    }
+
     private static readonly Regex InputHeader = new(@"^Input #(\d+),", RegexOptions.Compiled);
     private static readonly Regex VideoStream = new(@"^\s+Stream #(\d+):\d+.*?: Video: .*?\b(\d{2,5})x(\d{2,5})\b", RegexOptions.Compiled);
 
@@ -765,6 +937,7 @@ public sealed class StreamEngine : IDisposable
         var m = VideoStream.Match(line);
         if (!m.Success || int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) != parsingInput) return;
         if (!spec.InputKeys.TryGetValue(parsingInput, out var key)) return;
+        if (key.StartsWith("window|", StringComparison.Ordinal)) return; // fed already cropped/filled: the bridge knows the real size
         var size = (int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture), int.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture));
         if (_knownSizes.TryGetValue(key, out var old) && old == size) return;
         _knownSizes[key] = size;
@@ -795,6 +968,8 @@ public sealed class StreamEngine : IDisposable
         if (_runnerShape?.Main == true) _cache.EndSession();
         if (encoded) _audio.ClosePipes();
         _cameras.ClosePipes(); // readers stay open (warm) for the next run
+        _windows.ClosePipes();
+        _browsers.ClosePipes();
         _runnerShape = null;
         _lastProgress = null;
         _health = "Idle";
@@ -840,7 +1015,7 @@ public sealed class StreamEngine : IDisposable
                 else
                 {
                     PreviewOn = false; ReplayBuffer = false;
-                    if (!DesiredShape().Run) { _audio.Configure(Array.Empty<StudioSource>()); _cameras.CloseAll(); }
+                    if (!DesiredShape().Run) CloseDevices();
                 }
                 ModesChanged?.Invoke();
             }
@@ -1034,5 +1209,7 @@ public sealed class StreamEngine : IDisposable
         _outputs.Dispose();
         _audio.Dispose();
         _cameras.Dispose();
+        _windows.Dispose();
+        _browsers.Dispose();
     }
 }

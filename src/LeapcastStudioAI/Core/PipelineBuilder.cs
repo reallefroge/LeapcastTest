@@ -60,6 +60,10 @@ public sealed class PipelineRequest
     public bool InputThreadQueueSupported { get; init; } = true;
     /// <summary>Camera input key → counted raw-video pipe from the <see cref="CameraBridge"/>.</summary>
     public IReadOnlyDictionary<string, CameraBridge.CameraFeed> CameraInputs { get; init; } = new Dictionary<string, CameraBridge.CameraFeed>();
+    /// <summary>Window input key → counted raw-video pipe from the <see cref="WindowCaptureBridge"/> (already cropped/filled).</summary>
+    public IReadOnlyDictionary<string, WindowCaptureBridge.WindowFeed> WindowInputs { get; init; } = new Dictionary<string, WindowCaptureBridge.WindowFeed>();
+    /// <summary>Browser input key → counted BGRA pipe from the <see cref="BrowserBridge"/>.</summary>
+    public IReadOnlyDictionary<string, BrowserBridge.BrowserFeed> BrowserInputs { get; init; } = new Dictionary<string, BrowserBridge.BrowserFeed>();
 }
 
 /// <summary>A per-device audio gain stage whose level differs between scenes (crossfaded on scene switch).</summary>
@@ -79,6 +83,8 @@ public sealed record PipelineSpec(
     public IReadOnlyDictionary<int, string> InputKeys { get; init; } = new Dictionary<int, string>();
     /// <summary>Preview frame layout: horizontal part width, vertical part width (0 if none), height.</summary>
     public (int HW, int VW, int H) PreviewLayout { get; init; }
+    /// <summary>Per scene: every overlay filter that only matters while that scene is visible (switched on/off).</summary>
+    public IReadOnlyList<IReadOnlyList<string>> SceneOverlays { get; init; } = Array.Empty<IReadOnlyList<string>>();
 }
 
 public static class PipelineBuilder
@@ -97,9 +103,10 @@ public static class PipelineBuilder
         {
             SourceKind.Display => $"display|{s.MonitorIndex}|{s.CaptureMethod}|{s.CaptureCursor}",
             SourceKind.Window => $"window|{s.WindowTitle.Trim().ToLowerInvariant()}|{s.CaptureCursor}",
-            SourceKind.Camera => $"camera|{s.DeviceName}|{s.CameraResolution}|{s.CameraFps}",
+            SourceKind.Camera => $"camera|{s.DeviceName}|{s.CameraResolution}|{s.CameraFps}|{s.CameraFormat}",
             SourceKind.Image => $"image|{s.FilePath.ToLowerInvariant()}",
             SourceKind.Text => $"text|{s.Id}",
+            SourceKind.Browser => $"browser|{s.Url.Trim()}|{s.BrowserWidth}x{s.BrowserHeight}|{s.BrowserFps}|{s.BrowserCss}",
             SourceKind.Microphone or SourceKind.DesktopAudio => $"audio|{k}|{s.AudioDeviceId}",
             _ => $"other|{s.Id}"
         };
@@ -142,6 +149,7 @@ public static class PipelineBuilder
     {
         var plan = r.Plan;
         int W = plan.Width, H = plan.Height, F = plan.Fps;
+        _bridged = r.WindowInputs;
         var scenes = r.Scenes is { Count: > 0 }
             ? r.Scenes
             : new[] { new StudioScene { Name = "Scene", Sources = new(r.Sources ?? Array.Empty<StudioSource>()) } };
@@ -179,6 +187,7 @@ public static class PipelineBuilder
                 continue;
             }
         }
+        bool anyLive = false;
         bool Ensure(StudioSource s)
         {
             var kind = SourceTypes.KindOf(s.Type);
@@ -186,8 +195,12 @@ public static class PipelineBuilder
             if (failedKeys.Contains(key)) return false;
             if (inputs.ContainsKey(key)) return true;
             var spec = r.InputOverride?.Invoke(s, r.WallclockOrigin) ?? CameraFeedInput(s, kind, key, r)
+                       ?? WindowFeedInput(kind, key, r) ?? BrowserFeedInput(kind, key, r)
                        ?? VideoInput(s, kind, r, warned.Add(s.Id) ? warnings : new List<string>());
             if (spec is null) { failedKeys.Add(key); return false; }
+            // live = delivers frames in real time by itself (capture devices, counted pipes from the bridges)
+            if (spec.Wallclock || spec.Args.Contains("-re") || r.CameraInputs.ContainsKey(key) || r.WindowInputs.ContainsKey(key)
+                || r.BrowserInputs.ContainsKey(key)) anyLive = true;
             args.AddRange(WithWallclock(spec));
             inputKeys[inputCount] = key;
             inputs[key] = (inputCount++, spec.Wallclock, new List<string>());
@@ -207,6 +220,22 @@ public static class PipelineBuilder
             return label;
         }
 
+        // Prepared layers: the same source with the same crop/scale in several scenes (a "BRB" copy of the game
+        // scene, both canvases) is processed once and split, instead of once per scene.
+        var prepared = new Dictionary<string, (int id, string input, string chain, List<string> outs)>();
+        string Prep(string key, string chain)
+        {
+            string pk = key + "\u001f" + chain;
+            if (!prepared.TryGetValue(pk, out var e))
+            {
+                e = (prepared.Count, Use(key), chain, new List<string>());
+                prepared[pk] = e;
+            }
+            string label = $"p{e.id}o{e.outs.Count}";
+            e.outs.Add(label);
+            return label;
+        }
+
         // Shared blank canvases for scenes whose bottom layer isn't a full-screen capture.
         var colorUses = new Dictionary<string, (int index, List<string> uses)>();
         string ColorUse(int cw, int ch)
@@ -214,14 +243,27 @@ public static class PipelineBuilder
             string ck = $"{cw}x{ch}";
             if (!colorUses.TryGetValue(ck, out var c))
             {
-                args.AddRange(new[] { "-re", "-f", "lavfi", "-i", $"color=c=0x0E1016:s={cw}x{ch}:r={F}" });
-                c = (inputCount++, new List<string>());
+                // With live sources in the graph the blank canvas is generated inside it, paced by those sources:
+                // a separate real-time (-re) input can only catch up at 1.05× after any hiccup, which kept the
+                // whole stream seconds behind and stuttering. Only a graph with nothing live needs -re pacing.
+                if (anyLive) c = (-1, new List<string>());
+                else
+                {
+                    args.AddRange(new[] { "-re", "-f", "lavfi", "-i", $"color=c=0x0E1016:s={cw}x{ch}:r={F}" });
+                    c = (inputCount++, new List<string>());
+                }
                 colorUses[ck] = c;
             }
             string label = $"bg{ck.Replace('x', '_')}u{c.uses.Count}";
             c.uses.Add(label);
             return label;
         }
+
+        // Only the scene on air (and, during a fade, the one coming in) is blended: the overlays of hidden scenes
+        // are switched off with ffmpeg's timeline "enable" and switched on by the transition commands.
+        var sceneOverlays = Enumerable.Range(0, N).Select(_ => new List<string>()).ToList();
+        string Enabled(int k) => k == active ? "" : ":enable=0";
+        bool Large(LayoutRect rect, int cw, int ch) => rect.W * rect.H >= 0.25 * cw * ch;
 
         var sceneGraph = new List<string>();
         // ---------- horizontal canvas, per scene ----------
@@ -233,9 +275,8 @@ public static class PipelineBuilder
             if (layers.Count > 0 && LayoutMath.IsBaseLayer(layers[0], layers))
             {
                 var b = layers[0];
-                sceneGraph.Add($"[{Use(InputKey(b))}]{Crop(b)}{CameraPrep(b, SourceTypes.KindOf(b.Type), null)}" +
-                               $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags={ScaleFlags(F)}," +
-                               $"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[{p}base]");
+                string chain = $"{Crop(b)}{CameraPrep(b, SourceTypes.KindOf(b.Type), null)}{FillChain(b, W, H, F, pad: true)}format=yuv420p";
+                sceneGraph.Add($"[{Prep(InputKey(b), chain)}]null[{p}base]");
                 start = 1;
             }
             else
@@ -248,12 +289,15 @@ public static class PipelineBuilder
             {
                 var src = layers[j];
                 var kind = SourceTypes.KindOf(src.Type);
-                bool alpha = kind is SourceKind.Image or SourceKind.Text;
+                bool alpha = SourceTypes.IsGraphic(kind);
                 string scale = HorizontalScale(src, W, H, F);
                 var (px, py) = HorizontalPosition(src, W, H);
                 string pos = $"x={px}:y={py}";
-                sceneGraph.Add($"[{Use(InputKey(src))}]{Crop(src)}{CameraPrep(src, kind, scale)}format={(alpha ? "rgba" : "yuv420p")}[{p}l{j}]");
-                sceneGraph.Add($"[{cur}][{p}l{j}]{OverlayName(src.Id, CanvasKind.Horizontal)}={pos}:eof_action=repeat:format=yuv420[{p}c{j}]");
+                string name = OverlayName(src.Id, CanvasKind.Horizontal);
+                bool big = Large(LayoutMath.Horizontal(src, W, H, AspectFor(src, r.KnownSizes)), W, H);
+                if (big) sceneOverlays[k].Add(name);
+                string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, scale)}format={(alpha ? "rgba" : "yuv420p")}");
+                sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{(big ? Enabled(k) : "")}[{p}c{j}]");
                 cur = $"{p}c{j}";
             }
             sceneGraph.Add($"[{cur}]fps={F},format=yuv420p[scene{k}]");
@@ -271,8 +315,8 @@ public static class PipelineBuilder
                 var bgGame = layers.FirstOrDefault(x => LayoutMath.IsGame(SourceTypes.KindOf(x.Type)));
                 if (bgGame is not null)
                     // blur at quarter resolution: ~1/16 of the work of a full-size blur, looks the same
-                    sceneGraph.Add($"[{Use(InputKey(bgGame))}]{Crop(bgGame)}scale={bw}:{bh}:force_original_aspect_ratio=increase:flags=fast_bilinear," +
-                                   $"crop={bw}:{bh},boxblur=6:2,scale={VW}:{VH}:flags=bilinear,setsar=1,format=yuv420p,eq=brightness=-0.08[{p}base]");
+                    sceneGraph.Add($"[{Prep(InputKey(bgGame), $"{Crop(bgGame)}scale={bw}:{bh}:force_original_aspect_ratio=increase:flags=fast_bilinear," +
+                                   $"crop={bw}:{bh},boxblur=6:2,scale={VW}:{VH}:flags=bilinear,setsar=1,format=yuv420p,eq=brightness=-0.08")}]null[{p}base]");
                 else
                     sceneGraph.Add($"[{ColorUse(VW, VH)}]format=yuv420p[{p}base]");
                 string cur = $"{p}base";
@@ -280,49 +324,66 @@ public static class PipelineBuilder
                 {
                     var src = layers[j];
                     var kind = SourceTypes.KindOf(src.Type);
-                    bool alpha = kind is SourceKind.Image or SourceKind.Text;
+                    bool alpha = SourceTypes.IsGraphic(kind);
                     double aspect = AspectFor(src, r.KnownSizes);
                     var rect = LayoutMath.Vertical(src, VW, VH, aspect, hasCam);
                     int w = VerticalWidth(src, VW, VH);
                     string pos = $"x={LayoutMath.Px(rect.X)}:y={LayoutMath.Px(rect.Y)}";
-                    sceneGraph.Add($"[{Use(InputKey(src))}]{Crop(src)}{CameraPrep(src, kind, $"scale={w}:-2:flags=bicubic,")}format={(alpha ? "rgba" : "yuv420p")}[{p}l{j}]");
-                    sceneGraph.Add($"[{cur}][{p}l{j}]{OverlayName(src.Id, CanvasKind.Vertical)}={pos}:eof_action=repeat:format=yuv420[{p}c{j}]");
+                    string name = OverlayName(src.Id, CanvasKind.Vertical);
+                    bool big = Large(rect, VW, VH);
+                    if (big) sceneOverlays[k].Add(name);
+                    string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, $"scale={w}:-2:flags=bicubic,")}format={(alpha ? "rgba" : "yuv420p")}");
+                    sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{(big ? Enabled(k) : "")}[{p}c{j}]");
                     cur = $"{p}c{j}";
                 }
                 sceneGraph.Add($"[{cur}]fps={F},format=yuv420p[vscene{k}]");
             }
         }
 
-        // input splits (timestamp shift happens once, before the split)
+        // input splits (timestamp shift happens once, before the split), then the shared prepared layers
         foreach (var (_, e) in inputs)
         {
             if (e.uses.Count == 0) continue;
-            graph.Add($"[{e.index}:v]{(e.wall ? shift : "")}split={e.uses.Count}{string.Concat(e.uses.Select(u => $"[{u}]"))}");
+            graph.Add(e.uses.Count == 1 && !e.wall
+                ? $"[{e.index}:v]null[{e.uses[0]}]"
+                : $"[{e.index}:v]{(e.wall ? shift : "")}split={e.uses.Count}{string.Concat(e.uses.Select(u => $"[{u}]"))}");
         }
-        foreach (var (_, c) in colorUses)
-            graph.Add($"[{c.index}:v]split={c.uses.Count}{string.Concat(c.uses.Select(u => $"[{u}]"))}");
+        foreach (var (ck, c) in colorUses)
+        {
+            string src = c.index < 0 ? $"color=c=0x0E1016:s={ck}:r={F},format=yuv420p," : $"[{c.index}:v]";
+            graph.Add(c.uses.Count == 1 && c.index < 0
+                ? $"{src.TrimEnd(',')}[{c.uses[0]}]"
+                : $"{src}split={c.uses.Count}{string.Concat(c.uses.Select(u => $"[{u}]"))}");
+        }
+        foreach (var (_, e) in prepared)
+            graph.Add(e.outs.Count == 1
+                ? $"[{e.input}]{e.chain}[{e.outs[0]}]"
+                : $"[{e.input}]{e.chain},split={e.outs.Count}{string.Concat(e.outs.Select(o => $"[{o}]"))}");
         graph.AddRange(sceneGraph);
 
         // ---------- scene switcher (per canvas) ----------
         // Scenes are stacked bottom→top; every scene above the first has its own alpha mask (an eq brightness
         // expression of stream time t). Switching only rewrites mask expressions: no filter reconfiguration,
         // no restart, frame-accurate fades. Invariant: every mask above the on-air scene is transparent.
-        void Stack(string scenePrefix, string fadePrefix, int cw, int ch, string outLabel)
+        // Every scene is opaque, so only the on-air scene's layer of the stack needs blending (the others are off).
+        void Stack(string scenePrefix, string fadePrefix, string stackPrefix, int cw, int ch, string outLabel)
         {
             if (N == 1) { graph.Add($"[{scenePrefix}0]format=nv12[{outLabel}]"); return; }
             string cur = $"{scenePrefix}0";
             for (int k = 1; k < N; k++)
             {
                 string initial = k == active ? "1" : "-1";
+                string name = $"overlay@{stackPrefix}{k}";
+                sceneOverlays[k].Add(name);
                 graph.Add($"color=c=black:s={cw}x{ch}:r={F},format=gray,{fadePrefix}{k}=eval=frame:brightness={initial}[{scenePrefix}m{k}]");
                 graph.Add($"[{scenePrefix}{k}][{scenePrefix}m{k}]alphamerge[{scenePrefix}a{k}]");
-                graph.Add($"[{cur}][{scenePrefix}a{k}]overlay=format=yuv420:eof_action=repeat[{scenePrefix}st{k}]");
+                graph.Add($"[{cur}][{scenePrefix}a{k}]{name}=format=yuv420:eof_action=repeat{Enabled(k)}[{scenePrefix}st{k}]");
                 cur = $"{scenePrefix}st{k}";
             }
             graph.Add($"[{cur}]format=nv12[{outLabel}]");
         }
-        Stack("scene", FadeFilter, W, H, "vfinal");
-        if (vertical) Stack("vscene", VerticalFadeFilter, VW, VH, "vvfinal");
+        Stack("scene", FadeFilter, "stk", W, H, "vfinal");
+        if (vertical) Stack("vscene", VerticalFadeFilter, "vstk", VW, VH, "vvfinal");
 
         // fan the composited canvases out to encodes + preview
         var hOuts = new List<string>(); var vOuts = new List<string>();
@@ -460,6 +521,7 @@ public static class PipelineBuilder
         return new PipelineSpec(args, warnings, encoded, r.Preview, filterGraph, N, gains)
         {
             HasVertical = vertical, InputKeys = inputKeys, PreviewLayout = (PW, VPW, PH),
+            SceneOverlays = sceneOverlays,
         };
     }
 
@@ -490,12 +552,21 @@ public static class PipelineBuilder
     /// The fade starts at stream time <paramref name="startAt"/> (seconds since the wall-clock origin), so every line
     /// can be delivered before the first faded frame and nothing ever flashes.
     /// </summary>
-    public static List<string> TransitionCommands(PipelineSpec spec, int from, int to, double startAt, double seconds)
+    public static List<string> TransitionCommands(PipelineSpec spec, int from, int to, double startAt, double seconds) =>
+        TransitionCommands(spec, from, to, startAt, seconds, out _);
+
+    /// <param name="critical">How many leading lines must reach ffmpeg before the fade starts (the rest are
+    /// expressions of time that may land later, such as switching the old scene off once it is hidden).</param>
+    public static List<string> TransitionCommands(PipelineSpec spec, int from, int to, double startAt, double seconds, out int critical)
     {
         var lines = new List<string>();
+        critical = 0;
         if (spec.SceneCount < 2 || from == to) return lines;
         double d = Math.Max(0.001, seconds);
         string ramp = $"clip((t-{I(startAt)})/{I(d)},0,1)";
+        // the incoming scene's switched-off overlays come on first (still invisible under its mask)
+        if (to < spec.SceneOverlays.Count)
+            foreach (var name in spec.SceneOverlays[to]) lines.Add($"{name} -1 enable 1");
         // brightness is added to a black mask: ≤ -0.1 → fully transparent, ≥ 1 → fully opaque
         foreach (var fade in spec.HasVertical ? new[] { FadeFilter, VerticalFadeFilter } : new[] { FadeFilter })
         {
@@ -518,6 +589,10 @@ public static class PipelineBuilder
             if (Math.Abs(a - b) < 1e-6) continue;
             lines.Add($"{g.FilterName} -1 volume {I(a)}+({I(b - a)})*{ramp}");
         }
+        critical = lines.Count;
+        // the outgoing scene stops being blended once the fade has finished
+        if (from < spec.SceneOverlays.Count)
+            foreach (var name in spec.SceneOverlays[from]) lines.Add($"{name} -1 enable lt(t,{I(startAt + d + 0.1)})");
         return lines;
     }
 
@@ -541,6 +616,21 @@ public static class PipelineBuilder
             "-framerate", I(r.Plan.Fps), "-thread_queue_size", "64", "-i", feed.Path }, false);
     }
 
+    private static InputSpec? WindowFeedInput(SourceKind kind, string key, PipelineRequest r)
+    {
+        if (kind != SourceKind.Window || !r.WindowInputs.TryGetValue(key, out var feed)) return null;
+        // same frame-counted path as the camera: shift back by the reader + sampling delay
+        return new InputSpec(new[] { "-itsoffset", I(-CameraBridge.PathLatencySeconds), "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-video_size", $"{feed.Width}x{feed.Height}", "-framerate", I(r.Plan.Fps), "-thread_queue_size", "64", "-i", feed.Path }, false);
+    }
+
+    private static InputSpec? BrowserFeedInput(SourceKind kind, string key, PipelineRequest r)
+    {
+        if (kind != SourceKind.Browser || !r.BrowserInputs.TryGetValue(key, out var feed)) return null;
+        return new InputSpec(new[] { "-f", "rawvideo", "-pix_fmt", "bgra", "-video_size", $"{feed.Width}x{feed.Height}",
+            "-framerate", I(feed.Fps), "-thread_queue_size", "16", "-i", feed.Path }, false);
+    }
+
     /// <summary>The DirectShow input for a webcam (opened by the camera reader process, not the main pipeline).</summary>
     public static InputSpec? CameraDeviceInput(StudioSource s)
     {
@@ -549,6 +639,8 @@ public static class PipelineBuilder
         if (!string.IsNullOrWhiteSpace(s.CameraResolution) && s.CameraResolution != "Default")
             c.AddRange(new[] { "-video_size", s.CameraResolution.Replace("×", "x").Replace(" ", "") });
         if (s.CameraFps > 0) c.AddRange(new[] { "-framerate", I(s.CameraFps) });
+        if (s.CameraFormat.StartsWith("vcodec=", StringComparison.Ordinal)) c.AddRange(new[] { "-vcodec", s.CameraFormat[7..] });
+        else if (s.CameraFormat.StartsWith("pixel_format=", StringComparison.Ordinal)) c.AddRange(new[] { "-pixel_format", s.CameraFormat[13..] });
         c.AddRange(new[] { "-i", "video=" + s.DeviceName });
         return new InputSpec(c, false);
     }
@@ -611,6 +703,10 @@ public static class PipelineBuilder
                 // every overlay above it wait for the next image frame and stall the live layers.
                 return new InputSpec(new[] { "-i", s.FilePath }, false);
 
+            case SourceKind.Browser:
+                warnings.Add($"\"{s.Name}\": the page couldn't be loaded (browser sources need the Microsoft Edge WebView2 runtime).");
+                return null;
+
             case SourceKind.Text:
                 if (!r.RenderedImages.TryGetValue(s.Id, out var png) || !File.Exists(png))
                 { warnings.Add($"\"{s.Name}\": text is empty, skipped."); return null; }
@@ -619,8 +715,12 @@ public static class PipelineBuilder
         return null;
     }
 
+    /// <summary>Windows captured by the bridge in the build in progress (their crop happens in the reader).</summary>
+    [ThreadStatic] private static IReadOnlyDictionary<string, WindowCaptureBridge.WindowFeed>? _bridged;
+
     private static string Crop(StudioSource s)
     {
+        if (SourceTypes.KindOf(s.Type) == SourceKind.Window && _bridged?.ContainsKey(InputKey(s)) == true) return "";
         int l = Math.Max(0, s.CropLeft), t = Math.Max(0, s.CropTop), rr = Math.Max(0, s.CropRight), b = Math.Max(0, s.CropBottom);
         if (l + t + rr + b == 0) return "";
         return $"crop=iw-{l + rr}:ih-{t + b}:{l}:{t},";
@@ -660,16 +760,32 @@ public static class PipelineBuilder
     {
         var kind = SourceTypes.KindOf(src.Type);
         string anchor = Anchors.Resolve(src);
-        bool natural = kind == SourceKind.Text || kind == SourceKind.Image;
-        if (anchor == Anchors.Fill) return $"scale={W}:{H}:force_original_aspect_ratio=decrease:flags={ScaleFlags(F)},";
+        bool natural = SourceTypes.IsGraphic(kind);
+        if (anchor == Anchors.Fill) return FillChain(src, W, H, F, pad: false);
         if (anchor == Anchors.Free)
         {
             if (src.W <= 0 && natural) return "";
             double frac = src.W > 0 ? src.W : 0.25;
             return $"scale={Math.Max(16, SmartTuner.Even((int)Math.Round(frac * W)))}:-2:flags=bicubic,";
         }
-        if (kind == SourceKind.Text || (kind == SourceKind.Image && src.SizePercent <= 0)) return "";
+        if (kind == SourceKind.Text || (kind is SourceKind.Image or SourceKind.Browser && src.SizePercent <= 0)) return "";
         return $"scale={LayoutMath.OverlayWidth(src, W)}:-2:flags=bicubic,";
+    }
+
+    /// <summary>
+    /// Scales a full-screen source to the canvas. "Crop" (default) fills the whole canvas without stretching by
+    /// trimming the edges, so an 800×500 (16:10) game window fills a 16:9 stream with no bars and no distortion.
+    /// </summary>
+    public static string FillChain(StudioSource s, int cw, int ch, int fps, bool pad)
+    {
+        string flags = ScaleFlags(fps);
+        return s.FillMode switch
+        {
+            Anchors.FillStretch => $"scale={cw}:{ch}:flags={flags},setsar=1,",
+            Anchors.FillFit => $"scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags={flags}," +
+                               (pad ? $"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black," : "") + "setsar=1,",
+            _ => $"scale={cw}:{ch}:force_original_aspect_ratio=increase:force_divisible_by=2:flags={flags},crop={cw}:{ch},setsar=1,",
+        };
     }
 
     /// <summary>Overlay width on the vertical canvas (independent of the source's aspect ratio).</summary>

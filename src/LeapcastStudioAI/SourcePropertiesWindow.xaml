@@ -75,7 +75,12 @@
           <CheckBox x:Name="DenoiseBox" Content="Smart denoise (removes sensor grain: big bandwidth saver in dim rooms)"/>
           <CheckBox x:Name="MirrorBox" Content="Mirror"/>
           <TextBlock Text="Sync offset (ms): raise it if your lips move after you're heard" Style="{StaticResource FieldLabel}"/>
-          <TextBox x:Name="SyncOffsetBox"/>
+          <DockPanel>
+            <Button x:Name="ClapButton" DockPanel.Dock="Right" Content="Sync automatically (clap test)" Click="ClapTest_Click"/>
+            <TextBox x:Name="SyncOffsetBox"/>
+          </DockPanel>
+          <TextBlock x:Name="ClapHint" Text="Built-in and USB cameras show your picture a little after your voice. The clap test measures exactly how much: click it, then clap 4–5 times where the camera can see your hands."
+                     Style="{StaticResource Hint}"/>
         </StackPanel>
 
         <!-- Image -->
@@ -85,6 +90,36 @@
             <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseImage_Click"/>
             <TextBox x:Name="ImageBox"/>
           </DockPanel>
+        </StackPanel>
+
+        <!-- Browser -->
+        <StackPanel x:Name="BrowserGroup">
+          <TextBlock Text="Web address (URL)" Style="{StaticResource FieldLabel}"/>
+          <TextBox x:Name="UrlBox"/>
+          <TextBlock Text="Paste your chat's pop-out or overlay link (Twitch pop-out chat, YouTube live chat, StreamElements/Streamlabs widgets, a local multichat page). A local .html file works too."
+                     Style="{StaticResource Hint}"/>
+          <UniformGrid Columns="3">
+            <StackPanel>
+              <TextBlock Text="Width (px)" Style="{StaticResource FieldLabel}"/>
+              <TextBox x:Name="BrowserWBox"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="Height (px)" Style="{StaticResource FieldLabel}"/>
+              <TextBox x:Name="BrowserHBox"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="Frame rate" Style="{StaticResource FieldLabel}"/>
+              <ComboBox x:Name="BrowserFpsBox">
+                <ComboBoxItem Content="10 (chat)" Tag="10"/>
+                <ComboBoxItem Content="15" Tag="15"/>
+                <ComboBoxItem Content="30 (animated alerts)" Tag="30"/>
+              </ComboBox>
+            </StackPanel>
+          </UniformGrid>
+          <TextBlock Text="Custom CSS" Style="{StaticResource FieldLabel}"/>
+          <TextBox x:Name="CssBox" AcceptsReturn="True" MinHeight="54" TextWrapping="Wrap" FontFamily="Consolas"/>
+          <TextBlock Text="The default makes the page background see-through. Pages only cost CPU when something on them changes."
+                     Style="{StaticResource Hint}"/>
         </StackPanel>
 
         <!-- Text -->
@@ -107,6 +142,16 @@
         <StackPanel x:Name="PlacementGroup">
           <TextBlock Text="Position" Style="{StaticResource FieldLabel}"/>
           <ComboBox x:Name="AnchorBox"/>
+          <StackPanel x:Name="FillGroup">
+            <TextBlock Text="When it fills the screen" Style="{StaticResource FieldLabel}"/>
+            <ComboBox x:Name="FillBox">
+              <ComboBoxItem Content="Fill: trim the edges (no black bars, never stretched; recommended)" Tag="Crop"/>
+              <ComboBoxItem Content="Fit: show everything (black bars if the shape differs)" Tag="Fit"/>
+              <ComboBoxItem Content="Stretch (distorts a picture of a different shape)" Tag="Stretch"/>
+            </ComboBox>
+            <TextBlock Text="Example: an 800×500 game window (16:10) fills a 16:9 stream with ~5% trimmed from the top and bottom."
+                       Style="{StaticResource Hint}"/>
+          </StackPanel>
           <TextBlock x:Name="SizeLabel" Text="Width (% of the stream width)" Style="{StaticResource FieldLabel}"/>
           <DockPanel>
             <TextBlock DockPanel.Dock="Right" x:Name="SizeValue" Width="44" TextAlignment="Right" VerticalAlignment="Center"/>
