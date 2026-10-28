@@ -202,6 +202,8 @@ await engine.UpdateAsync(both, sceneA, tset, "stream.flv", false);
 await engine.SetReplayBufferAsync(true);
 await Task.Delay(5000);
 int starts = engine.PipelineStarts;
+var sc0 = engine.StreamClock();
+Console.WriteLine($"    transition-debug: stream clock wall {sc0.wall:0.00}s, ffmpeg reported {sc0.reported:0.00}s");
 double switchAt = tclock.Elapsed.TotalSeconds;
 await engine.UpdateAsync(both, sceneB, tset, "stream.flv", false);
 await Task.Delay(3500);
@@ -474,7 +476,8 @@ static class WinApi
 {
     [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int max);
-    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool EnumWindows(Func<IntPtr, IntPtr, bool> cb, IntPtr l);
+    private delegate bool EnumProc(IntPtr h, IntPtr l);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr l);
     [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
     public static string? TitleOf(Process p) { try { p.Refresh(); return string.IsNullOrEmpty(p.MainWindowTitle) ? null : p.MainWindowTitle; } catch { return null; } }
     public static long? Find(string title)

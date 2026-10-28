@@ -101,6 +101,16 @@ public sealed class StreamEngine : IDisposable
     public int PipelineStarts { get; private set; }
     public string CameraStats() => _cameras.Stats();
 
+    /// <summary>Diagnostics: (wall clock − origin, last reported ffmpeg output time + age of that report).</summary>
+    public (double wall, double reported) StreamClock()
+    {
+        double wall = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - _runnerOrigin;
+        var p = _lastProgress;
+        double rep = p is null ? double.NaN : p.OutTime.TotalSeconds + (DateTime.UtcNow - _lastProgressAt).TotalSeconds;
+        return (wall, rep);
+    }
+    private DateTime _lastProgressAt;
+
     public event Action<byte[]>? FrameReady;
     public event EventHandler<EngineMessageEventArgs>? Message;
     public event Action<EngineStatus>? StatusChanged;
@@ -209,8 +219,13 @@ public sealed class StreamEngine : IDisposable
         if (r is null || spec is null) return;
         double seconds = Settings.Transition == "Cut" ? 0.001 : Math.Clamp(Settings.TransitionMs, 100, 3000) / 1000.0;
         int lineCount = PipelineBuilder.TransitionCommands(spec, from, to, 0, seconds).Count;
-        // ffmpeg reads one command per ~100 ms; start the fade only after every line has landed.
-        double now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - _runnerOrigin;
+        // Schedule against the pipeline's own clock (ffmpeg's latest output time, which tracks the frames being
+        // composited), not the wall clock: if the machine falls behind real time, a wall-clock start time would
+        // lie seconds in the future and the switch would appear frozen. Start after every command line has landed
+        // (ffmpeg reads one per ~100 ms).
+        var (wall, reported) = StreamClock();
+        bool fresh = _lastProgress is not null && (DateTime.UtcNow - _lastProgressAt) < TimeSpan.FromSeconds(1.5);
+        double now = fresh && !double.IsNaN(reported) ? reported : wall;
         double startAt = now + 0.15 * lineCount + 0.2;
         r.SendCommands(PipelineBuilder.TransitionCommands(spec, from, to, startAt, seconds));
     }
@@ -386,6 +401,7 @@ public sealed class StreamEngine : IDisposable
         runner.Progress += p =>
         {
             _lastProgress = p;
+            _lastProgressAt = DateTime.UtcNow;
             lock (_progressWindow)
             {
                 var nowT = DateTime.UtcNow;
