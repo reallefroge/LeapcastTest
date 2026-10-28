@@ -80,6 +80,29 @@ public sealed class StreamEngine : IDisposable
     public bool InputThreadQueueSupported { get; private set; } = true;
     /// <summary>FFmpeg 8+ "gfxcapture" (Windows.Graphics.Capture): GPU window capture that works with DirectX games.</summary>
     public bool GpuWindowCaptureSupported { get; private set; }
+    private bool _gpuDisplayFailed;
+    private string _runnerCommand = "";
+
+    /// <summary>
+    /// If a pipeline using GPU capture died before producing a frame, GPU capture probably isn't available on this
+    /// PC (old driver, remote desktop, no Direct3D 11): switch this session to GDI capture instead of failing.
+    /// </summary>
+    private bool TryGpuCaptureFallback(TimeSpan ranFor, bool producedFrames)
+    {
+        if (ranFor > TimeSpan.FromSeconds(15) || producedFrames) return false;
+        bool changed = false;
+        if (_runnerCommand.Contains("gfxcapture=", StringComparison.Ordinal) && GpuWindowCaptureSupported)
+        {
+            GpuWindowCaptureSupported = false; changed = true;
+            Message?.Invoke(this, new EngineMessageEventArgs("GPU window capture isn't working on this PC, so Leapcast switched to compatibility capture (30 FPS).", true));
+        }
+        if (_runnerCommand.Contains("ddagrab=", StringComparison.Ordinal) && !_gpuDisplayFailed)
+        {
+            _gpuDisplayFailed = true; changed = true;
+            Message?.Invoke(this, new EngineMessageEventArgs("GPU screen capture isn't working on this PC, so Leapcast switched to compatibility capture (30 FPS).", true));
+        }
+        return changed;
+    }
     /// <summary>The scene currently on air.</summary>
     public StudioScene? Scene { get; private set; }
     private List<StudioScene> _scenes = new();
@@ -155,12 +178,15 @@ public sealed class StreamEngine : IDisposable
         var shown = _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)).ToList();
         // Old-style (GDI) window capture can't deliver 60 smooth frames from a DirectX game; 60 FPS output would
         // just repeat frames unevenly (judder). Cap at 30 when it's in use.
-        bool gdiWindow = shown.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Window
-                                        && (!GpuWindowCaptureSupported || string.Equals(x.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase)));
+        bool gdiWindow = shown.Any(x =>
+            (SourceTypes.KindOf(x.Type) == SourceKind.Window
+             && (!GpuWindowCaptureSupported || string.Equals(x.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase)))
+            || (SourceTypes.KindOf(x.Type) == SourceKind.Display
+                && (_gpuDisplayFailed || string.Equals(x.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase))));
         if (gdiWindow && plan.Fps > 30)
         {
             plan = plan with { Fps = 30 };
-            reasons.Add("Window capture is using the slower GDI method, so the stream runs at 30 FPS to stay smooth.");
+            reasons.Add("Capture is using the slower GDI method, so the stream runs at 30 FPS to stay smooth.");
         }
         bool wizard = shown.Any(x => x.WindowTitle.Contains("Wizard101", StringComparison.OrdinalIgnoreCase) || x.Name.Contains("Wizard101", StringComparison.OrdinalIgnoreCase));
         if (wizard && s.ContentType == "HighMotion")
@@ -383,6 +409,7 @@ public sealed class StreamEngine : IDisposable
             MonitorBounds = _platform.MonitorBounds,
             FindWindow = _platform.FindWindow,
             GpuWindowCapture = GpuWindowCaptureSupported,
+            GpuDisplayCapture = !_gpuDisplayFailed,
             AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
             WallclockOrigin = origin,
             InputOverride = InputOverride,
@@ -396,6 +423,7 @@ public sealed class StreamEngine : IDisposable
         foreach (var w in spec.Warnings) Message?.Invoke(this, new EngineMessageEventArgs(w, false));
 
         PipelineStarts++;
+        _runnerCommand = string.Join(" ", spec.Args);
         var runner = new FfmpegRunner(ffmpeg, spec.Args, PreviewWidth, PreviewHeight, Path.Combine(_logDir, "ffmpeg-last.log"));
         runner.Frame += f => FrameReady?.Invoke(f);
         runner.Progress += p =>
@@ -424,7 +452,13 @@ public sealed class StreamEngine : IDisposable
             if (runner.Completion.IsCompleted && !runner.StopRequested)
             {
                 string err = Explain(runner.ErrorSummary());
+                bool hadFrames = _lastProgress is { Frame: > 0 };
                 await StopRunnerAsync();
+                if (TryGpuCaptureFallback(DateTime.UtcNow - runner.StartedUtc, hadFrames))
+                {
+                    await StartRunnerAsync(requireSuccess); // flags changed, so this can't loop
+                    return;
+                }
                 if (stream) { Live = false; _liveSince = null; }
                 else if (encode) ReplayBuffer = false;
                 // If only going live failed (bad key, no internet), keep preview/recording alive.
@@ -472,8 +506,16 @@ public sealed class StreamEngine : IDisposable
             string err = Explain(runner.ErrorSummary());
             var ranFor = DateTime.UtcNow - runner.StartedUtc;
             bool wasStreaming = _runnerStreams;
+            bool hadFrames = _lastProgress is { Frame: > 0 };
             await StopRunnerAsync();
             _lastError = err;
+            if (TryGpuCaptureFallback(ranFor, hadFrames) && Desired().run)
+            {
+                try { await StartRunnerAsync(false); }
+                catch (Exception ex) { Message?.Invoke(this, new EngineMessageEventArgs(ex.Message, true)); }
+                Publish();
+                return;
+            }
 
             if (wasStreaming && Live && Settings.AutoReconnect && ranFor > TimeSpan.FromSeconds(8))
             {

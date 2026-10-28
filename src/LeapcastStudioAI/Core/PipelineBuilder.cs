@@ -36,6 +36,8 @@ public sealed class PipelineRequest
     /// <summary>Window title → HWND (for GPU window capture).</summary>
     public Func<string, long?>? FindWindow { get; init; }
     public bool GpuWindowCapture { get; init; }
+    /// <summary>False after desktop duplication failed on this PC: display capture falls back to GDI.</summary>
+    public bool GpuDisplayCapture { get; init; } = true;
     public int AudioBitrateKbps { get; init; } = 160;
 
     /// <summary>Common time origin (Unix seconds). Every live input is wall-clock stamped and shifted by this,
@@ -433,7 +435,7 @@ public static class PipelineBuilder
         switch (kind)
         {
             case SourceKind.Display:
-                if (string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase))
+                if (!r.GpuDisplayCapture || string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase))
                 {
                     var a = new List<string> { "-thread_queue_size", "512", "-f", "gdigrab", "-framerate", I(F), "-draw_mouse", mouse };
                     if (r.MonitorBounds?.Invoke(s.MonitorIndex) is { } m)

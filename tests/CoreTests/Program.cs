@@ -265,14 +265,29 @@ if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
     await engine.UpdateAsync(new[] { wscene }, wscene, WithEncoder(settings, "libx264"), "stream.flv", false);
     try
     {
-        await engine.SetPreviewAsync(true);
-        await Task.Delay(5000);
+        bool sawFallback() { lock (messages) return messages.Any(m => m.Contains("switched to compatibility capture")); }
+        try { await engine.SetPreviewAsync(true); } catch (Exception ex) { Console.WriteLine("    gpu-window: start: " + ex.Message); }
+        var gw = Stopwatch.StartNew();
+        while (wf < 30 && gw.Elapsed < TimeSpan.FromSeconds(20)) await Task.Delay(200);
         string wlog = ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log"));
         File.WriteAllText(Path.Combine(work, "gpu-window-run.log"), wlog);
         string cmd = wlog.Split('\n').FirstOrDefault() ?? "";
-        Console.WriteLine($"    gpu-window: title \"{title}\", gfxcapture in command: {cmd.Contains("gfxcapture=hwnd=")}, frames {wf}, running {engine.Running}");
-        if (engine.Running && wf > 30) Check(cmd.Contains("gfxcapture=hwnd="), "window captured on the GPU (gfxcapture by window handle), frames flowing");
-        else Console.WriteLine("    gpu-window: no frames on this VM (no D3D11 device, like ddagrab); not counted as a failure");
+        Console.WriteLine($"    gpu-window: title \"{title}\", final capture: {(cmd.Contains("gfxcapture=") ? "GPU (gfxcapture)" : cmd.Contains("gdigrab") ? "GDI fallback" : "?")}, frames {wf}, fallback used {sawFallback()}");
+        Check(engine.Running && wf >= 30 && (cmd.Contains("gfxcapture=hwnd=") || sawFallback()),
+            "window capture delivers frames (GPU capture, or automatic GDI fallback where the GPU can't capture)");
+        await engine.SetPreviewAsync(false);
+
+        // GPU display capture (desktop duplication) with the same automatic fallback
+        var dscene = new StudioScene { Name = "display" };
+        dscene.Sources.Add(new StudioSource { Name = "Screen", Type = SourceTypes.Display, CaptureMethod = "Auto" });
+        wf = 0;
+        await engine.UpdateAsync(new[] { dscene }, dscene, WithEncoder(settings, "libx264"), "stream.flv", false);
+        try { await engine.SetPreviewAsync(true); } catch (Exception ex) { Console.WriteLine("    gpu-display: start: " + ex.Message); }
+        gw.Restart();
+        while (wf < 30 && gw.Elapsed < TimeSpan.FromSeconds(20)) await Task.Delay(200);
+        string dcmd = (ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")).Split('\n').FirstOrDefault() ?? "");
+        Console.WriteLine($"    gpu-display: final capture: {(dcmd.Contains("ddagrab=") ? "GPU (ddagrab)" : dcmd.Contains("gdigrab") ? "GDI fallback" : "?")}, frames {wf}");
+        Check(engine.Running && wf >= 30, "display capture delivers frames (GPU, or automatic GDI fallback)");
     }
     catch (Exception ex) { Console.WriteLine("    gpu-window: " + ex.Message); }
     engine.FrameReady -= Count;
