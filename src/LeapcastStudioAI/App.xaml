@@ -58,9 +58,9 @@
     <Style x:Key="IconButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="FontFamily" Value="{StaticResource IconFont}"/>
       <Setter Property="FontSize" Value="13"/>
-      <Setter Property="Padding" Value="7,6"/>
-      <Setter Property="Margin" Value="2,0"/>
-      <Setter Property="MinWidth" Value="30"/>
+      <Setter Property="Padding" Value="6,6"/>
+      <Setter Property="Margin" Value="1,0"/>
+      <Setter Property="MinWidth" Value="27"/>
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="BorderBrush" Value="Transparent"/>
     </Style>

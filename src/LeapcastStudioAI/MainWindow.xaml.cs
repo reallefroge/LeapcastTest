@@ -385,6 +385,7 @@ public partial class MainWindow : Window
         VerticalCaption.Text = $"VERTICAL · {_vCanvas.W}×{_vCanvas.H}";
         bool vOn = _state.Settings.VerticalCanvas;
         VerticalPanel.Visibility = vOn ? Visibility.Visible : Visibility.Collapsed;
+        VerticalColumn.Width = vOn ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
         VerticalToggle.IsChecked = vOn;
         // redraw once real source sizes arrive from the running pipeline (exact outlines)
         int seen = SelectedScene?.Sources.Count(s => _engine.SourceSize(s) is not null) ?? 0;
