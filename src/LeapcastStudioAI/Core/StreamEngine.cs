@@ -28,6 +28,8 @@ public interface IPlatformServices
     (int X, int Y, int W, int H)? MonitorBounds(int index);
     /// <summary>Handle of the visible top-level window with exactly this title (null if not open).</summary>
     long? FindWindow(string title) => null;
+    /// <summary>Client-area size of a window in physical pixels (null if unknown).</summary>
+    (int W, int H)? WindowClientSize(long hwnd) => null;
     /// <summary>Starts rendering a web page off-screen (null where browsers aren't supported).</summary>
     IFrameSource? OpenBrowser(StudioSource source) => null;
 }
@@ -88,6 +90,14 @@ public sealed class StreamEngine : IDisposable
     private int _reconnectAttempt;
     private DateTime? _liveSince;
     private DateTime _lastAdjust = DateTime.MinValue;
+    // performance guard: steps taken this session because the PC fell behind (0 = none, 1 = 30 FPS, 2 = smaller too)
+    private int _guardStep;
+    private DateTime? _behindSince;
+    private DateTime _lastGuard = DateTime.MinValue;
+    /// <summary>The automatic performance guard has lightened the settings this session.</summary>
+    public int PerformanceGuardStep => _guardStep;
+    /// <summary>Tests: pretend the guard has already stepped in this far.</summary>
+    public void SimulatePerformanceGuard(int step) => _guardStep = Math.Clamp(step, 0, 2);
     private DateTime? _uploadTroubleSince;
     private double _bitrateScale = 1.0;
     private readonly HashSet<long> _countedSegments = new();
@@ -217,7 +227,7 @@ public sealed class StreamEngine : IDisposable
         Directory.CreateDirectory(_tempDir);
         _cameras = new CameraBridge(_pipeDir);
         _cameras.Error += msg => Message?.Invoke(this, new EngineMessageEventArgs(msg, true));
-        _windows = new WindowCaptureBridge(_pipeDir, title => _platform.FindWindow(title));
+        _windows = new WindowCaptureBridge(_pipeDir, title => _platform.FindWindow(title), hwnd => _platform.WindowClientSize(hwnd));
         _windows.Message += (msg, err) =>
         {
             if (!_windows.GpuCapture) GpuWindowCaptureSupported = false;
@@ -244,6 +254,10 @@ public sealed class StreamEngine : IDisposable
             TimeSpan.FromSeconds(10), _life.Token);
         GpuWindowCaptureSupported = help.Contains("gfxcapture AVOptions", StringComparison.Ordinal);
         _windows.GpuCapture = GpuWindowCaptureSupported;
+        // GPU crop + scale of game windows (Direct3D 11 video processor): the CPU only receives the finished picture
+        var (_, d3dHelp) = await EncoderCatalog.RunQuietAsync(FfmpegPath, new[] { "-hide_banner", "-h", "filter=scale_d3d11" },
+            TimeSpan.FromSeconds(10), _life.Token);
+        _windows.GpuScale = GpuWindowCaptureSupported && d3dHelp.Contains("scale_d3d11 AVOptions", StringComparison.Ordinal);
         EncodersProbed = true;
     }
 
@@ -266,6 +280,17 @@ public sealed class StreamEngine : IDisposable
              && (!GpuWindowCaptureSupported || string.Equals(x.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase)))
             || (SourceTypes.KindOf(x.Type) == SourceKind.Display
                 && (_gpuDisplayFailed || string.Equals(x.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase))));
+        if (_guardStep >= 1 && plan.Fps > 30)
+        {
+            plan = plan with { Fps = 30 };
+            reasons.Add("Running at 30 FPS for now: this PC fell behind real time at the higher frame rate.");
+        }
+        if (_guardStep >= 2 && plan.Height > 540)
+        {
+            int w = Math.Max(960, SmartTuner.Even((int)(plan.Width * 0.8))), h = Math.Max(540, SmartTuner.Even((int)(plan.Height * 0.8)));
+            plan = plan with { Width = w, Height = h };
+            reasons.Add($"Running at {w}×{h} for now: this PC still fell behind real time at 30 FPS.");
+        }
         bool capFps = gdi && plan.Fps > 30;
         if (capFps)
         {
@@ -303,6 +328,7 @@ public sealed class StreamEngine : IDisposable
 
         if (_runner is null) { _activeIndex = index; return; }
         bool structural = RunnerFingerprint(_scenes) != _runnerFingerprint;
+        if (restartIfRunning) _guardStep = 0; // new settings from the user: give them a fair try
         if (restartIfRunning || structural)
         {
             _activeIndex = index;
@@ -1129,7 +1155,35 @@ public sealed class StreamEngine : IDisposable
         bool behind = span >= 8 && speed > 0 && speed < 0.95;
         double expected = CurrentPlan?.Fps ?? 30;
         bool dipping = fps > 0 && fps < expected * 0.9;
-        if (behind) { _health = "Struggling: this PC can't keep up (try Data saver or 30 FPS)"; return; }
+        if (behind)
+        {
+            _health = "Struggling: this PC can't keep up (try Auto-config)";
+            _behindSince ??= DateTime.UtcNow;
+            // Falling behind real time makes previews, recordings and streams stutter alike. After 10 s of it, take
+            // the cheapest step that helps (60 → 30 FPS first, then a smaller picture), once a minute at most.
+            if (DateTime.UtcNow - _behindSince > TimeSpan.FromSeconds(10) && DateTime.UtcNow - _lastGuard > TimeSpan.FromSeconds(60)
+                && Settings.AutoAdjustBitrate && _guardStep < 2 && DateTime.UtcNow - r.StartedUtc > TimeSpan.FromSeconds(15))
+            {
+                int fpsNow = CurrentPlan?.Fps ?? 30, hNow = CurrentPlan?.Height ?? 720;
+                int next = fpsNow > 30 ? 1 : hNow > 540 ? 2 : 0;
+                if (next > _guardStep)
+                {
+                    _guardStep = next;
+                    _lastGuard = DateTime.UtcNow;
+                    _behindSince = null;
+                    string what = next == 1 ? $"from {fpsNow} to 30 FPS" : "to a smaller picture";
+                    _ = Locked(async () =>
+                    {
+                        if (_runner is null) return;
+                        Message?.Invoke(this, new EngineMessageEventArgs(
+                            $"This PC couldn't keep up, so Leapcast switched {what} to stay smooth (until you change settings). Auto-config can find the best fit.", true));
+                        await RestartAsync();
+                    });
+                }
+            }
+            return;
+        }
+        _behindSince = null;
         _health = live ? (dipping ? "OK (frame rate dipping)" : "Excellent") : (dipping ? "Running (frame rate dipping)" : "Running");
     }
 

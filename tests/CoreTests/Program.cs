@@ -109,6 +109,15 @@ Check(!string.Join(" ", freeSpec.Args).Contains("-re -f lavfi -i color") && free
 var snapped = LayoutMath.Snap(new LayoutRect(745, 7, 100, 50), 1600, 900, 12);
 Check(snapped == (750, 0), $"snaps to the centre line and the top edge ({snapped})");
 
+// ---------------------------------------------------------------- GPU window cut
+var cut1 = WindowCaptureBridge.PlanGpuCut(1280, 800, (0, 0, 0, 0), Anchors.FillCrop, 1600, 900);
+Check(cut1 is { L: 0, R: 0, T: 40, B: 40, ScaleW: 1600, ScaleH: 900, Pad: false },
+    $"GPU cut: a 1280×800 window fills 1600×900 by trimming 40 px top and bottom before scaling ({cut1})");
+var cut2 = WindowCaptureBridge.PlanGpuCut(1280, 800, (0, 0, 0, 0), Anchors.FillFit, 1600, 900);
+Check(cut2 is { ScaleW: 1440, ScaleH: 900, Pad: true }, $"GPU cut, fit mode: scaled to 1440×900 and padded ({cut2})");
+var cut3 = WindowCaptureBridge.PlanGpuCut(2560, 1080, (0, 0, 0, 0), Anchors.FillCrop, 1920, 1080);
+Check(cut3 is { L: 320, R: 320, T: 0, B: 0 }, $"GPU cut: an ultrawide window loses its sides ({cut3})");
+
 // ---------------------------------------------------------------- webcam modes
 var camModes = CameraModes.Parse("""
 [dshow @ 000001] vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30
@@ -302,6 +311,15 @@ Check(lip.events >= 4 && Math.Abs(lip.offsetMs) < 150 && lip.spreadMs < 160,
     $"recording lip sync: flash vs beep {lip.offsetMs:+0;-0} ms (spread {lip.spreadMs:0} ms over {lip.events} events, no drift)");
 var dims = await RunCaptureAsync("ffprobe", new[] { "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate", "-of", "csv=p=0", rec });
 Check(dims.Trim().StartsWith("640,360,"), $"output is 640x360@30 ({dims.Trim()})");
+
+// ---------------------------------------------------------------- performance guard
+var heavy = WithEncoder(settings, "libx264"); heavy.Resolution = "1600 × 900"; heavy.FrameRate = 60;
+Check(engine.PlanFor(heavy) is { Fps: 60, Width: 1600 }, "custom 1600×900 @ 60 is honoured while the PC keeps up");
+engine.SimulatePerformanceGuard(1);
+Check(engine.PlanFor(heavy) is { Fps: 30, Width: 1600 }, "falling behind: the guard drops to 30 FPS first");
+engine.SimulatePerformanceGuard(2);
+Check(engine.PlanFor(heavy) is { Fps: 30, Width: 1280, Height: 720 }, $"still behind: then a smaller picture ({engine.PlanFor(heavy).Summary})");
+engine.SimulatePerformanceGuard(0);
 
 // ---------------------------------------------------------------- bad destination
 Console.WriteLine("A destination that refuses the connection fails on its own");

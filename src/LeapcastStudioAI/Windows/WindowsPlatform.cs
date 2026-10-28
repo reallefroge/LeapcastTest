@@ -61,6 +61,17 @@ public sealed class WindowsPlatform : IPlatformServices
         return path;
     }
 
+    /// <summary>Size of a window's client area in physical pixels (what GPU window capture delivers).</summary>
+    public (int W, int H)? WindowClientSize(long hwnd)
+    {
+        if (hwnd == 0 || !GetClientRect(new IntPtr(hwnd), out var r)) return null;
+        int w = r.Right - r.Left, h = r.Bottom - r.Top;
+        return w > 16 && h > 16 ? (w, h) : null;
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct CLIENTRECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hWnd, out CLIENTRECT rect);
+
     public long? FindWindow(string title)
     {
         long? found = null;

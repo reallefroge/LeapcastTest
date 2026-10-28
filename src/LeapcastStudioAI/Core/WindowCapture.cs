@@ -34,7 +34,46 @@ public sealed class WindowCaptureBridge : IDisposable
         public DateTime StartedUtc, NextAttemptUtc;
         public string State = "starting";
         public bool UsedGpu;
+        /// <summary>Crop + scale happen on the GPU (Direct3D 11 video processor) before the picture is downloaded.</summary>
+        public bool UsedGpuScale;
+        public long Hwnd;
+        public (int W, int H)? Client;
+        public DateTime LastSizeCheck;
         public bool Retired;
+    }
+
+    /// <summary>
+    /// How to cut and size a window picture on the GPU: crop (pixels from each edge, user crop included) so its shape
+    /// matches the target, then scale to (ScaleW × ScaleH). Fit leaves bars to pad on the CPU (cheap).
+    /// </summary>
+    public sealed record GpuCut(int L, int T, int R, int B, int ScaleW, int ScaleH, bool Pad);
+
+    public static GpuCut PlanGpuCut(int srcW, int srcH, (int L, int T, int R, int B) userCrop, string fill, int w, int h)
+    {
+        int l = Math.Max(0, userCrop.L), t = Math.Max(0, userCrop.T), r = Math.Max(0, userCrop.R), b = Math.Max(0, userCrop.B);
+        int cw = Math.Max(16, srcW - l - r), ch = Math.Max(16, srcH - t - b);
+        double target = w / (double)h, src = cw / (double)ch;
+        if (fill == Anchors.FillStretch) return new GpuCut(l, t, r, b, w, h, false);
+        if (fill == Anchors.FillFit)
+        {
+            int fw = w, fh = SmartTuner.Even((int)Math.Round(w / src));
+            if (fh > h) { fh = h; fw = SmartTuner.Even((int)Math.Round(h * src)); }
+            return new GpuCut(l, t, r, b, Math.Max(16, fw), Math.Max(16, fh), fw != w || fh != h);
+        }
+        // crop to fill: trim the longer side so the shape matches, centred
+        if (src > target + 1e-3)
+        {
+            int keep = (int)Math.Round(ch * target);
+            int cut = cw - keep;
+            l += cut / 2; r += cut - cut / 2;
+        }
+        else if (src < target - 1e-3)
+        {
+            int keep = (int)Math.Round(cw / target);
+            int cut = ch - keep;
+            t += cut / 2; b += cut - cut / 2;
+        }
+        return new GpuCut(l, t, r, b, w, h, false);
     }
 
     private static readonly Regex VideoSize = new(@"Stream #0:0.*?: Video: .*?\b(\d{2,5})x(\d{2,5})\b", RegexOptions.Compiled);
@@ -44,11 +83,14 @@ public sealed class WindowCaptureBridge : IDisposable
     private readonly object _lock = new();
     private readonly string _scratch;
     private readonly Func<string, long?> _findWindow;
+    private readonly Func<long, (int W, int H)?>? _clientSize;
     private readonly CancellationTokenSource _cts = new();
     private string? _ffmpeg;
 
     /// <summary>GPU (Windows.Graphics.Capture) capture is available; turned off for this session if it fails.</summary>
     public bool GpuCapture { get; set; }
+    /// <summary>scale_d3d11 is available: crop/scale windows on the GPU; turned off for this session if it fails.</summary>
+    public bool GpuScale { get; set; }
     /// <summary>Test / non-Windows hook: the capture input for a window source instead of gfxcapture/gdigrab.</summary>
     public Func<StudioSource, InputSpec?>? DeviceOverride { get; set; }
     /// <summary>(message, isError)</summary>
@@ -58,10 +100,11 @@ public sealed class WindowCaptureBridge : IDisposable
 
     public sealed record WindowFeed(string Path, int Width, int Height);
 
-    public WindowCaptureBridge(string scratchDir, Func<string, long?> findWindow)
+    public WindowCaptureBridge(string scratchDir, Func<string, long?> findWindow, Func<long, (int W, int H)?>? clientSize = null)
     {
         _scratch = scratchDir;
         _findWindow = findWindow;
+        _clientSize = clientSize;
         new Thread(Supervise) { IsBackground = true, Name = "Leapcast window capture supervisor" }.Start();
     }
 
@@ -113,14 +156,29 @@ public sealed class WindowCaptureBridge : IDisposable
         if (ffmpeg is null || r.Retired) return;
         var src = new StudioSource { Type = SourceTypes.Window, WindowTitle = r.Title, CaptureCursor = r.Cursor };
         InputSpec? input = DeviceOverride?.Invoke(src);
+        GpuCut? gpuCut = null;
         if (input is null)
         {
             if (r.UsedGpu)
             {
                 var hwnd = _findWindow(r.Title);
                 if (hwnd is null or 0) { Wait(r, "waiting for the window"); return; }
-                input = new InputSpec(new[] { "-f", "lavfi", "-i",
-                    $"gfxcapture=hwnd={hwnd}:max_framerate={r.Fps}:capture_cursor={(r.Cursor ? 1 : 0)},hwdownload,format=bgra" }, false);
+                r.Hwnd = hwnd.Value;
+                r.Client = _clientSize?.Invoke(hwnd.Value);
+                r.UsedGpuScale = GpuScale && r.Client is not null;
+                string cap = $"gfxcapture=hwnd={hwnd}:max_framerate={r.Fps}:capture_cursor={(r.Cursor ? 1 : 0)}";
+                if (r.UsedGpuScale && r.Client is { } c)
+                {
+                    // crop + scale + colour conversion on the GPU: only a finished NV12 picture is downloaded
+                    var cut = PlanGpuCut(c.W, c.H, r.Crop, r.Fill, r.Width, r.Height);
+                    input = new InputSpec(new[] { "-f", "lavfi", "-i",
+                        $"{cap}:crop_left={cut.L}:crop_top={cut.T}:crop_right={cut.R}:crop_bottom={cut.B}," +
+                        $"scale_d3d11=width={cut.ScaleW}:height={cut.ScaleH}:format=nv12,hwdownload,format=nv12" }, false);
+                    gpuCut = cut;
+                    lock (CaptureSizes) CaptureSizes[r.Key] = (Math.Max(16, c.W - r.Crop.L - r.Crop.R), Math.Max(16, c.H - r.Crop.T - r.Crop.B));
+                }
+                else
+                    input = new InputSpec(new[] { "-f", "lavfi", "-i", $"{cap},hwdownload,format=bgra" }, false);
             }
             else
             {
@@ -142,7 +200,9 @@ public sealed class WindowCaptureBridge : IDisposable
         foreach (var a in dev) psi.ArgumentList.Add(a);
         var fillSrc = new StudioSource { FillMode = r.Fill };
         string crop = r.Crop is (0, 0, 0, 0) ? "" : $"crop=iw-{r.Crop.L + r.Crop.R}:ih-{r.Crop.T + r.Crop.B}:{r.Crop.L}:{r.Crop.T},";
-        string vf = crop + PipelineBuilder.FillChain(fillSrc, r.Width, r.Height, r.Fps, pad: true) + "format=yuv420p";
+        string vf = gpuCut is { } g
+            ? (g.Pad ? $"pad={r.Width}:{r.Height}:(ow-iw)/2:(oh-ih)/2:color=black," : "") + "format=yuv420p" // already cut and sized
+            : crop + PipelineBuilder.FillChain(fillSrc, r.Width, r.Height, r.Fps, pad: true) + "format=yuv420p";
         foreach (var a in new[] { "-an", "-vf", vf, "-fps_mode", "passthrough", "-flush_packets", "1", "-f", "rawvideo", "pipe:1" })
             psi.ArgumentList.Add(a);
 
@@ -190,7 +250,7 @@ public sealed class WindowCaptureBridge : IDisposable
                     if (line.StartsWith("Input #", StringComparison.Ordinal)) inInput = true;
                     else if (line.StartsWith("Output #", StringComparison.Ordinal) || line.StartsWith("Stream mapping", StringComparison.Ordinal)) inInput = false;
                     var m = VideoSize.Match(line);
-                    if (m.Success && inInput)
+                    if (m.Success && inInput && !r.UsedGpuScale) // GPU-cut captures report the scaled size: the window size is known already
                         lock (CaptureSizes) CaptureSizes[r.Key] = (int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture));
                     if (line.Contains("Capture item closed", StringComparison.OrdinalIgnoreCase))
                     {
@@ -216,6 +276,16 @@ public sealed class WindowCaptureBridge : IDisposable
             r.Running = false;
             if (r.Retired) return;
             bool producedNothing = Interlocked.Read(ref r.Frames) == framesAtStart;
+            if (producedNothing && r.UsedGpuScale && DateTime.UtcNow - r.StartedUtc < TimeSpan.FromSeconds(8) && _findWindow(r.Title) is not (null or 0))
+            {
+                // the GPU video processor couldn't take this window: scale on the CPU instead (capture stays on the GPU)
+                GpuScale = false;
+                r.UsedGpuScale = false;
+                Message?.Invoke("GPU scaling isn't available for window capture on this PC, so Leapcast scales on the CPU.", false);
+                r.NextAttemptUtc = DateTime.UtcNow;
+                r.State = "restarting (CPU scaling)";
+                return;
+            }
             if (producedNothing && r.UsedGpu && DateTime.UtcNow - r.StartedUtc < TimeSpan.FromSeconds(8) && _findWindow(r.Title) is not (null or 0))
             {
                 // the window exists but GPU capture produced nothing: fall back to GDI for this session
@@ -248,6 +318,14 @@ public sealed class WindowCaptureBridge : IDisposable
                 {
                     foreach (var r in _readers.Values)
                     {
+                        // a GPU-cut capture is sized for the window's shape: if the window is resized, cut again
+                        if (r.Running && r.UsedGpuScale && r.Proc is { } p && DateTime.UtcNow - r.LastSizeCheck > TimeSpan.FromSeconds(2))
+                        {
+                            r.LastSizeCheck = DateTime.UtcNow;
+                            var now = _clientSize?.Invoke(r.Hwnd);
+                            if (now is not null && now != r.Client) { try { p.Kill(true); } catch { } }
+                            continue;
+                        }
                         if (r.Retired || r.Running || r.Proc is not null || DateTime.UtcNow < r.NextAttemptUtc) continue;
                         TryStart(r);
                     }
@@ -262,7 +340,7 @@ public sealed class WindowCaptureBridge : IDisposable
     {
         lock (_lock)
             return string.Join("; ", _readers.Values.Select(r =>
-                $"{r.Title}: {r.Width}x{r.Height} {(r.UsedGpu ? "gpu" : "gdi")} starts={r.Starts} frames={Interlocked.Read(ref r.Frames)} {r.State}"));
+                $"{r.Title}: {r.Width}x{r.Height} {(r.UsedGpu ? (r.UsedGpuScale ? "gpu+gpuscale" : "gpu") : "gdi")} starts={r.Starts} frames={Interlocked.Read(ref r.Frames)} {r.State}"));
     }
 
     /// <summary>Frames received from a window's reader so far (tests / health).</summary>

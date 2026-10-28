@@ -946,6 +946,7 @@ public partial class MainWindow : Window
         if (source.Type == SourceTypes.Window) source.Name = "Wizard101 window";
         if (source.Type == SourceTypes.DesktopAudio) { source.Name = "Desktop audio"; source.NoiseCleanup = false; }
         if (source.Type == SourceTypes.Microphone) source.Name = "Microphone";
+        if (source.Type == SourceTypes.Browser) { source.Name = "Chat"; source.Anchor = Anchors.TopRight; source.SizePercent = 0; }
 
         var props = new SourcePropertiesWindow(source, _engine.FfmpegPath) { Owner = this };
         if (props.ShowDialog() != true) return;
