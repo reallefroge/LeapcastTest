@@ -61,8 +61,10 @@ public sealed class FfmpegRunner : IDisposable
             try { _process.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { /* not fatal */ }
         }
 
-        _ = Task.Run(ReadStderrAsync);
-        _ = Task.Run(ReadStdoutAsync);
+        // Dedicated, above-normal threads (not the thread pool): when a game saturates the CPU, pool threads are
+        // scheduled late, ffmpeg's stderr/stdout pipes fill up and the whole pipeline blocks on a write.
+        StartThread(ReadStderr, "Leapcast ffmpeg log");
+        StartThread(ReadStdout, "Leapcast ffmpeg preview");
         _ = Task.Run(async () =>
         {
             await _process.WaitForExitAsync();
@@ -103,13 +105,16 @@ public sealed class FfmpegRunner : IDisposable
         return hit ?? "the encoder process stopped unexpectedly";
     }
 
-    private async Task ReadStderrAsync()
+    private static void StartThread(Action body, string name) =>
+        new Thread(() => body()) { IsBackground = true, Name = name, Priority = ThreadPriority.AboveNormal }.Start();
+
+    private void ReadStderr()
     {
         try
         {
             var reader = _process.StandardError;
             string? line;
-            while ((line = await reader.ReadLineAsync()) is not null)
+            while ((line = reader.ReadLine()) is not null)
             {
                 int eq = line.IndexOf('=');
                 if (IsProgressLine(line, eq))
@@ -172,7 +177,7 @@ public sealed class FfmpegRunner : IDisposable
         try { Progress?.Invoke(info); } catch { }
     }
 
-    private async Task ReadStdoutAsync()
+    private void ReadStdout()
     {
         if (_frameBytes <= 0) return;
         var stream = _process.StandardOutput.BaseStream;
@@ -186,7 +191,7 @@ public sealed class FfmpegRunner : IDisposable
                 int got = 0;
                 while (got < _frameBytes)
                 {
-                    int n = await stream.ReadAsync(buf.AsMemory(got, _frameBytes - got));
+                    int n = stream.Read(buf, got, _frameBytes - got);
                     if (n <= 0) return;
                     got += n;
                 }

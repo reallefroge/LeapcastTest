@@ -11,6 +11,12 @@ public partial class App : Application
         // hidden helper windows (browser sources) must not keep the app alive after the studio closes
         ShutdownMode = ShutdownMode.OnMainWindowClose;
         DispatcherUnhandledException += OnUnhandled;
+        // The studio moves every frame between its capture helpers, the compositor and the outputs: like OBS's
+        // "Above normal" process priority, this keeps those hand-offs on time while a game uses the whole CPU.
+        if (Environment.GetEnvironmentVariable("LEAPCAST_NO_PRIORITY_BOOST") != "1")
+        {
+            try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.AboveNormal; } catch { }
+        }
     }
 
     private static void OnUnhandled(object sender, DispatcherUnhandledExceptionEventArgs e)
