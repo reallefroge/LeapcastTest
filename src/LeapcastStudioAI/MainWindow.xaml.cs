@@ -168,7 +168,9 @@ public partial class MainWindow : Window
             CanvasSize = size,
             Aspect = s => _engine.SourceAspect(s),
             NaturalSize = s => SourceTypes.KindOf(s.Type) is SourceKind.Text or SourceKind.Image ? _engine.SourceSize(s) : null,
+            SourcePixels = s => _engine.CaptureSize(s),
         };
+        ed.Hint += Status;
         ed.SelectionChanged += s =>
         {
             _syncingSelection = true;
@@ -788,6 +790,10 @@ public partial class MainWindow : Window
             Item("Hide on the vertical canvas", () => s.VShow = false);
         }
         menu.Items.Add(new Separator());
+        if (s.CropLeft + s.CropTop + s.CropRight + s.CropBottom > 0)
+            Item("Reset crop", () => s.CropLeft = s.CropTop = s.CropRight = s.CropBottom = 0);
+        if (kind == CanvasKind.Horizontal ? s.H > 0 : s.VH > 0)
+            Item("Reset shape (undo stretch)", () => { if (kind == CanvasKind.Horizontal) s.H = 0; else s.VH = 0; });
         var props = new MenuItem { Header = "Properties…" };
         props.Click += (_, _) => { SourcesList.SelectedItem = s; SourceProperties_Click(this, new RoutedEventArgs()); };
         menu.Items.Add(props);

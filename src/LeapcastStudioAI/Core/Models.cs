@@ -85,6 +85,9 @@ public sealed class StudioSource
     public double X { get; set; }
     public double Y { get; set; }
     public double W { get; set; } = 0.25;
+    /// <summary>Free placement height (fraction of the canvas height). 0 = follow the picture's shape; set when
+    /// the user stretches the source (Shift + drag on the preview).</summary>
+    public double H { get; set; }
     /// <summary>"Crop" (fill the canvas, trim the edges: no bars, no stretching), "Fit" (bars) or "Stretch".</summary>
     public string FillMode { get; set; } = Anchors.FillCrop;
 
@@ -96,6 +99,8 @@ public sealed class StudioSource
     public double VX { get; set; }
     public double VY { get; set; }
     public double VW { get; set; } = 1;
+    /// <summary>Manual vertical-canvas height (fraction); 0 = follow the picture's shape.</summary>
+    public double VH { get; set; }
 
     // Display / window capture
     public int MonitorIndex { get; set; }

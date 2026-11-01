@@ -10,8 +10,9 @@ namespace LeapcastStudioAI;
 /// Drag / resize editing of sources directly on a canvas preview (horizontal or vertical). Works on canvas pixels:
 /// the host grid is exactly canvas-sized inside a Viewbox, so mouse positions need no conversion.
 /// Moves are pushed to the running pipeline live (overlay commands); resizes apply when the mouse is released.
-/// Every corner and edge of the selected source is a resize grip (the picture keeps its shape: the opposite corner
-/// or edge stays put). Locked sources can be selected but not moved, resized or nudged.
+/// Every corner and edge of the selected source is a grip: drag = resize keeping the picture's shape (the opposite
+/// corner or edge stays put), Shift + drag = stretch freely, Ctrl + Shift + drag = crop. While moving, Shift turns
+/// snapping off. Locked sources can be selected but not moved, resized, cropped or nudged.
 /// </summary>
 public sealed class PreviewEditor
 {
@@ -20,6 +21,10 @@ public sealed class PreviewEditor
     private readonly CanvasKind _kind;
     private StudioSource? _drag;
     private Grip _grip;
+    private enum EditMode { Move, Resize, Stretch, Crop }
+    private EditMode _mode;
+    private (int L, int T, int R, int B) _startCrop;
+    private (int W, int H)? _sourcePixels;
     private Point _grabOffset;
     private LayoutRect _startRect;
     private bool _changedSize;
@@ -29,6 +34,10 @@ public sealed class PreviewEditor
     public Func<(int W, int H)> CanvasSize { get; init; } = () => (1920, 1080);
     public Func<StudioSource, double> Aspect { get; init; } = LayoutMath.EstimateAspect;
     public Func<StudioSource, (int W, int H)?> NaturalSize { get; init; } = _ => null;
+    /// <summary>The source's full picture size before cropping (null until the preview has run once).</summary>
+    public Func<StudioSource, (int W, int H)?> SourcePixels { get; init; } = _ => null;
+    /// <summary>A short line for the status bar (crop amounts while cropping, why cropping isn't possible yet).</summary>
+    public event Action<string>? Hint;
 
     public StudioSource? Selected { get; private set; }
     /// <summary>The user picked a source by clicking it on the canvas.</summary>
@@ -164,6 +173,7 @@ public sealed class PreviewEditor
         _startRect = RectOf(s, layers);
         _drag = s;
         _grip = grip;
+        _startCrop = (Math.Max(0, s.CropLeft), Math.Max(0, s.CropTop), Math.Max(0, s.CropRight), Math.Max(0, s.CropBottom));
         _moved = false;
         _changedSize = false;
         _grabOffset = new Point(p.X - _startRect.X, p.Y - _startRect.Y);
@@ -182,6 +192,7 @@ public sealed class PreviewEditor
             s.X = _startRect.X / cw;
             s.Y = _startRect.Y / ch;
             s.W = natural ? 0 : _startRect.W / cw; // natural-size logos/text keep their size (no rebuild)
+            s.H = 0;
             s.Anchor = Anchors.Free;
         }
         else
@@ -190,8 +201,27 @@ public sealed class PreviewEditor
             s.VX = _startRect.X / cw;
             s.VY = _startRect.Y / ch;
             s.VW = _startRect.W / cw;
+            s.VH = 0;
             s.VAuto = false;
         }
+    }
+
+    private bool Stretched(StudioSource s) => _kind == CanvasKind.Horizontal ? s.H > 0 && s.W > 0 : s.VH > 0;
+
+    /// <summary>Writes a rectangle back to the source (free placement); the height only when it's stretched.</summary>
+    private void Place(StudioSource s, LayoutRect r, bool stretched)
+    {
+        var (cw, ch) = CanvasSize();
+        if (_kind == CanvasKind.Horizontal) { s.X = r.X / cw; s.Y = r.Y / ch; s.W = r.W / cw; s.H = stretched ? r.H / ch : 0; }
+        else { s.VX = r.X / cw; s.VY = r.Y / ch; s.VW = r.W / cw; s.VH = stretched ? r.H / ch : 0; }
+    }
+
+    private EditMode ModeNow()
+    {
+        if (_grip == Grip.Move) return EditMode.Move;
+        var m = Keyboard.Modifiers;
+        bool shift = (m & ModifierKeys.Shift) != 0, ctrl = (m & ModifierKeys.Control) != 0;
+        return shift && ctrl ? EditMode.Crop : shift ? EditMode.Stretch : EditMode.Resize;
     }
 
     private void OnMove(object sender, MouseEventArgs e)
@@ -212,14 +242,35 @@ public sealed class PreviewEditor
             double dx = p.X - (_startRect.X + _grabOffset.X), dy = p.Y - (_startRect.Y + _grabOffset.Y);
             if (Math.Abs(dx) * Scale < 3 && Math.Abs(dy) * Scale < 3) return;
             _moved = true;
-            MakeFree(_drag);
+            _mode = ModeNow(); // decided once per drag, so a key let go halfway doesn't mix crop and resize
+            if (_mode == EditMode.Crop)
+            {
+                _sourcePixels = SourcePixels(_drag);
+                if (_sourcePixels is null)
+                {
+                    Hint?.Invoke("Start the preview once so Leapcast knows this source's size, then Ctrl + Shift + drag to crop.");
+                    _mode = EditMode.Resize;
+                }
+            }
+            // a full-screen source stays full-screen while it's cropped (the rest of the picture refills the canvas)
+            if (!(_mode == EditMode.Crop && _kind == CanvasKind.Horizontal && Anchors.Resolve(_drag) == Anchors.Fill)) MakeFree(_drag);
         }
         bool snap = (Keyboard.Modifiers & ModifierKeys.Shift) == 0;
-        if (_grip != Grip.Move)
+        if (_mode == EditMode.Crop)
         {
-            var r = LayoutMath.Resize(_startRect, _grip, p.X, p.Y, cw, ch, snap ? 12 / Scale : 0);
-            if (_kind == CanvasKind.Horizontal) { _drag.X = r.X / cw; _drag.Y = r.Y / ch; _drag.W = r.W / cw; }
-            else { _drag.VX = r.X / cw; _drag.VY = r.Y / ch; _drag.VW = r.W / cw; }
+            var (crop, r) = LayoutMath.CropDrag(_startRect, _grip, p.X, p.Y, _startCrop, _sourcePixels!.Value);
+            (_drag.CropLeft, _drag.CropTop, _drag.CropRight, _drag.CropBottom) = crop;
+            bool fill = _kind == CanvasKind.Horizontal && Anchors.Resolve(_drag) == Anchors.Fill;
+            if (!fill) Place(_drag, r, Stretched(_drag));
+            Hint?.Invoke($"Cropping {_drag.Name}: left {crop.L}, top {crop.T}, right {crop.R}, bottom {crop.B} px (applies when you let go).");
+            _changedSize = true;
+        }
+        else if (_mode != EditMode.Move)
+        {
+            // Shift: stretch freely. Plain drag: keep the shape (a source stretched earlier keeps its new shape)
+            bool stretch = _mode == EditMode.Stretch;
+            var r = LayoutMath.Resize(_startRect, _grip, p.X, p.Y, cw, ch, 12 / Scale, keepShape: !stretch);
+            Place(_drag, r, stretch || Stretched(_drag));
             _changedSize = true;
         }
         else

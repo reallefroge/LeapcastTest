@@ -137,6 +137,43 @@ Check(tiny.W >= 32, $"never shrinks below 32 px ({tiny.W:0})");
 Check(LayoutMath.GripAt(cam, 1203, 598, 8) == Grip.TopLeft && LayoutMath.GripAt(cam, 1360, 781, 8) == Grip.Bottom
       && LayoutMath.GripAt(cam, 1518, 700, 8) == Grip.Right && LayoutMath.GripAt(cam, 1360, 690, 8) == Grip.None,
     "grips: corners, edges, and the middle (moves instead)");
+
+// Shift + drag: stretch freely (each dragged edge follows the mouse)
+var wide = LayoutMath.Resize(cam, Grip.Right, 1700, 650, 1920, 1080, 0, keepShape: false);
+Check(Math.Abs(wide.W - 500) < 0.01 && Math.Abs(wide.H - cam.H) < 0.01 && wide.X == cam.X && wide.Y == cam.Y,
+    $"Shift + right edge: only the width changes, no longer 16:9 ({wide.W:0}×{wide.H:0})");
+var corner = LayoutMath.Resize(cam, Grip.BottomRight, 1600, 900, 1920, 1080, 0, keepShape: false);
+Check(Math.Abs(corner.W - 400) < 0.01 && Math.Abs(corner.H - 300) < 0.01, $"Shift + corner: width and height follow the mouse separately ({corner.W:0}×{corner.H:0})");
+// Ctrl + Shift + drag: crop (scale stays, the dragged edge cuts into the picture, in source pixels)
+var srcPx = (1280, 720);                                   // shown at 320×180 → 0.25 canvas px per source px
+var (crop1, cropRect) = LayoutMath.CropDrag(cam, Grip.Left, 1240, 650, (0, 0, 0, 0), srcPx);
+Check(crop1 == (160, 0, 0, 0) && Math.Abs(cropRect.X - 1240) < 0.01 && Math.Abs(cropRect.W - 280) < 0.01 && Math.Abs(cropRect.H - 180) < 0.01,
+    $"Ctrl+Shift + left edge: crops 160 source px, the rest of the picture stays where it was ({crop1}, {cropRect.X:0},{cropRect.W:0}×{cropRect.H:0})");
+var (crop2, _) = LayoutMath.CropDrag(cam, Grip.BottomRight, 2000, 2000, (0, 0, 0, 0), srcPx);
+Check(crop2 == (0, 0, 0, 0), $"dragging outward never crops below zero ({crop2})");
+var (crop3, _) = LayoutMath.CropDrag(cam, Grip.Top, 0, 5000, (0, 0, 0, 0), srcPx);
+Check(crop3.T == 720 - 16, $"always leaves at least 16 px ({crop3.T})");
+// a stretched source is laid out and scaled to exactly that box
+var stretchedCam = new StudioSource { Type = SourceTypes.Camera, Anchor = Anchors.Free, X = 0.5, Y = 0.5, W = 0.25, H = 0.2 };
+var sr = LayoutMath.Horizontal(stretchedCam, 1920, 1080, 16 / 9.0);
+Check(Math.Abs(sr.W - 480) < 0.01 && Math.Abs(sr.H - 216) < 0.01 && PipelineBuilder.HorizontalScale(stretchedCam, 1920, 1080, 30).StartsWith("scale=480:216:")
+      && PipelineBuilder.HorizontalScale(stretchedCam, 1920, 1080, 30).Contains("setsar=1"),
+    $"a stretched source is drawn and encoded at its box ({PipelineBuilder.HorizontalScale(stretchedCam, 1920, 1080, 30)})");
+var vStretched = new StudioSource { Type = SourceTypes.Camera, VAuto = false, VX = 0, VY = 0, VW = 1, VH = 0.3 };
+Check(PipelineBuilder.VerticalScale(vStretched, 720, 1280).StartsWith("scale=720:384:"), $"…and on the vertical canvas ({PipelineBuilder.VerticalScale(vStretched, 720, 1280)})");
+{
+    var shapeScene = new StudioScene { Name = "shape" };
+    var shapeCam = new StudioSource { Name = "Cam", Type = SourceTypes.Camera, DeviceName = "x", Anchor = Anchors.Free, X = 0.1, Y = 0.1, W = 0.3 };
+    shapeScene.Sources.Add(shapeCam);
+    string f0 = PipelineBuilder.LayoutFingerprint(new[] { shapeScene }, 1920, 1080, (720, 1280));
+    shapeCam.X = 0.4;
+    string f1 = PipelineBuilder.LayoutFingerprint(new[] { shapeScene }, 1920, 1080, (720, 1280));
+    shapeCam.H = 0.5;
+    string f2 = PipelineBuilder.LayoutFingerprint(new[] { shapeScene }, 1920, 1080, (720, 1280));
+    shapeCam.CropLeft = 100;
+    string f3 = PipelineBuilder.LayoutFingerprint(new[] { shapeScene }, 1920, 1080, (720, 1280));
+    Check(f0 == f1 && f1 != f2 && f2 != f3, "moving applies live; stretching or cropping rebuilds (applied on release)");
+}
 {
     var lockScene = new StudioScene { Name = "lock" };
     var lockCam = new StudioSource { Name = "Cam", Type = SourceTypes.Camera, DeviceName = "x" };

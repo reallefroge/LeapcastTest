@@ -40,7 +40,7 @@ public static class LayoutMath
             if (s.W <= 0 && SourceTypes.IsGraphic(k) && naturalSize is { } nat)
                 return new LayoutRect(s.X * cw, s.Y * ch, nat.w, nat.h); // free position, natural size (logos, text)
             double w = Math.Max(16, (s.W > 0 ? s.W : 0.25) * cw);
-            return new LayoutRect(s.X * cw, s.Y * ch, w, w / aspect);
+            return new LayoutRect(s.X * cw, s.Y * ch, w, s.H > 0 && s.W > 0 ? Math.Max(16, s.H * ch) : w / aspect);
         }
         double ow, oh;
         var kind = SourceTypes.KindOf(s.Type);
@@ -83,7 +83,7 @@ public static class LayoutMath
         if (!s.VAuto)
         {
             double w = Math.Max(16, s.VW * cw);
-            return new LayoutRect(s.VX * cw, s.VY * ch, w, w / aspect);
+            return new LayoutRect(s.VX * cw, s.VY * ch, w, s.VH > 0 ? Math.Max(16, s.VH * ch) : w / aspect);
         }
         if (k == SourceKind.Camera)
         {
@@ -137,13 +137,16 @@ public static class LayoutMath
 
     /// <summary>Snap a moving rectangle to canvas edges and centre lines (within <paramref name="threshold"/> px).</summary>
     /// <summary>
-    /// Resizes <paramref name="start"/> by dragging <paramref name="grip"/> to (px, py), keeping the picture's shape
-    /// (sources are never stretched). The opposite corner or edge stays put. Edges that land within
-    /// <paramref name="snap"/> of the canvas border snap to it (pass 0 for free sizing).
+    /// Resizes <paramref name="start"/> by dragging <paramref name="grip"/> to (px, py). By default the picture keeps
+    /// its shape and the opposite corner or edge stays put; with <paramref name="keepShape"/> false each dragged edge
+    /// simply follows the mouse (stretching the picture). Edges that land within <paramref name="snap"/> of the
+    /// canvas border snap to it (0 = no snapping).
     /// </summary>
-    public static LayoutRect Resize(LayoutRect start, Grip grip, double px, double py, double cw, double ch, double snap, double minW = 32)
+    public static LayoutRect Resize(LayoutRect start, Grip grip, double px, double py, double cw, double ch, double snap,
+        double minW = 32, bool keepShape = true)
     {
         if (start.W <= 0 || start.H <= 0) return start;
+        if (!keepShape) return Stretch(start, grip, px, py, cw, ch, snap, minW);
         double aspect = start.W / start.H;
         // the point that stays fixed: the opposite corner, or the middle of the opposite edge
         double fx = grip switch
@@ -192,6 +195,47 @@ public static class LayoutMath
             _ => fy - h / 2,
         };
         return new LayoutRect(x, y, w, h);
+    }
+
+    private static bool MovesLeft(Grip g) => g is Grip.TopLeft or Grip.Left or Grip.BottomLeft;
+    private static bool MovesRight(Grip g) => g is Grip.TopRight or Grip.Right or Grip.BottomRight;
+    private static bool MovesTop(Grip g) => g is Grip.TopLeft or Grip.Top or Grip.TopRight;
+    private static bool MovesBottom(Grip g) => g is Grip.BottomLeft or Grip.Bottom or Grip.BottomRight;
+
+    private static double SnapTo(double v, double edge, double snap) => snap > 0 && Math.Abs(v - edge) < snap ? edge : v;
+
+    /// <summary>Free resize: each dragged edge follows the mouse (the picture stretches).</summary>
+    private static LayoutRect Stretch(LayoutRect r, Grip grip, double px, double py, double cw, double ch, double snap, double minW)
+    {
+        double x1 = r.X, x2 = r.Right, y1 = r.Y, y2 = r.Bottom, minH = Math.Max(16, minW / 2);
+        if (MovesLeft(grip)) x1 = Math.Min(SnapTo(SnapTo(px, 0, snap), cw, snap), x2 - minW);
+        if (MovesRight(grip)) x2 = Math.Max(SnapTo(SnapTo(px, cw, snap), 0, snap), x1 + minW);
+        if (MovesTop(grip)) y1 = Math.Min(SnapTo(SnapTo(py, 0, snap), ch, snap), y2 - minH);
+        if (MovesBottom(grip)) y2 = Math.Max(SnapTo(SnapTo(py, ch, snap), 0, snap), y1 + minH);
+        return new LayoutRect(x1, y1, x2 - x1, y2 - y1);
+    }
+
+    /// <summary>
+    /// Crop by dragging an edge or corner (Ctrl + Shift on the preview): the picture keeps its scale and the dragged
+    /// edge cuts into it, in source pixels. <paramref name="crop"/> is the crop at the start of the drag (L, T, R, B)
+    /// and <paramref name="source"/> the source's full size before cropping. Crops are even (clean for 4:2:0 video)
+    /// and always leave at least 16 px.
+    /// </summary>
+    public static ((int L, int T, int R, int B) Crop, LayoutRect Rect) CropDrag(LayoutRect start, Grip grip, double px, double py,
+        (int L, int T, int R, int B) crop, (int W, int H) source)
+    {
+        int visW = source.W - crop.L - crop.R, visH = source.H - crop.T - crop.B;
+        if (visW <= 0 || visH <= 0 || start.W <= 0 || start.H <= 0) return (crop, start);
+        double kx = start.W / visW, ky = start.H / visH; // canvas px per source px
+        static int Even(double v) => 2 * (int)Math.Round(v / 2);
+        var (l, t, r, b) = crop;
+        if (MovesLeft(grip)) l = Math.Clamp(Even(crop.L + (px - start.X) / kx), 0, source.W - crop.R - 16);
+        if (MovesRight(grip)) r = Math.Clamp(Even(crop.R + (start.Right - px) / kx), 0, source.W - l - 16);
+        if (MovesTop(grip)) t = Math.Clamp(Even(crop.T + (py - start.Y) / ky), 0, source.H - crop.B - 16);
+        if (MovesBottom(grip)) b = Math.Clamp(Even(crop.B + (start.Bottom - py) / ky), 0, source.H - t - 16);
+        var rect = new LayoutRect(start.X + (l - crop.L) * kx, start.Y + (t - crop.T) * ky,
+            (source.W - l - r) * kx, (source.H - t - b) * ky);
+        return ((l, t, r, b), rect);
     }
 
     /// <summary>The resize grip under (px, py), within <paramref name="tolerance"/> canvas pixels; None if none.</summary>

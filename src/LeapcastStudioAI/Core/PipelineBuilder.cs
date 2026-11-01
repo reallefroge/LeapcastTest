@@ -325,12 +325,11 @@ public static class PipelineBuilder
                     bool alpha = SourceTypes.IsGraphic(kind);
                     double aspect = AspectFor(src, r.KnownSizes);
                     var rect = LayoutMath.Vertical(src, VW, VH, aspect, hasCam);
-                    int w = VerticalWidth(src, VW, VH);
                     string pos = $"x={LayoutMath.Px(rect.X)}:y={LayoutMath.Px(rect.Y)}";
                     string name = OverlayName(src.Id, CanvasKind.Vertical);
                     bool big = Large(rect, VW, VH);
                     if (big) sceneOverlays[k].Add(name);
-                    string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, $"scale={w}:-2:flags=bicubic,")}format={(alpha ? "rgba" : "yuv420p")}");
+                    string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, VerticalScale(src, VW, VH))}format={(alpha ? "rgba" : "yuv420p")}");
                     sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{(big ? Enabled(k) : "")}[{p}c{j}]");
                     cur = $"{p}c{j}";
                 }
@@ -752,7 +751,10 @@ public static class PipelineBuilder
         {
             if (src.W <= 0 && natural) return "";
             double frac = src.W > 0 ? src.W : 0.25;
-            return $"scale={Math.Max(16, SmartTuner.Even((int)Math.Round(frac * W)))}:-2:flags={(light ? "fast_bilinear" : "bicubic")},";
+            int sw = Math.Max(16, SmartTuner.Even((int)Math.Round(frac * W)));
+            if (src.H > 0 && src.W > 0) // stretched on purpose (Shift + drag)
+                return $"scale={sw}:{Math.Max(16, SmartTuner.Even((int)Math.Round(src.H * H)))}:flags={(light ? "fast_bilinear" : "bicubic")},setsar=1,";
+            return $"scale={sw}:-2:flags={(light ? "fast_bilinear" : "bicubic")},";
         }
         if (kind == SourceKind.Text || (kind is SourceKind.Image or SourceKind.Browser && src.SizePercent <= 0)) return "";
         return $"scale={LayoutMath.OverlayWidth(src, W)}:-2:flags={(light ? "fast_bilinear" : "bicubic")},";
@@ -778,6 +780,15 @@ public static class PipelineBuilder
     public static int VerticalWidth(StudioSource src, int VW, int VH) =>
         Math.Max(16, SmartTuner.Even((int)Math.Round(LayoutMath.Vertical(src, VW, VH, 16.0 / 9, false).W)));
 
+    /// <summary>How an overlay is scaled on the vertical canvas (keeps its shape unless stretched by hand).</summary>
+    public static string VerticalScale(StudioSource src, int VW, int VH)
+    {
+        int w = VerticalWidth(src, VW, VH);
+        return !src.VAuto && src.VH > 0
+            ? $"scale={w}:{Math.Max(16, SmartTuner.Even((int)Math.Round(src.VH * VH)))}:flags=bicubic,setsar=1,"
+            : $"scale={w}:-2:flags=bicubic,";
+    }
+
     /// <summary>
     /// What a scene collection composites, minus anything that can change live (names, positions, anchors that
     /// keep the same size): a different value means the pipeline must be rebuilt.
@@ -787,6 +798,7 @@ public static class PipelineBuilder
         var placement = new[] { nameof(StudioSource.Name), nameof(StudioSource.X), nameof(StudioSource.Y), nameof(StudioSource.W),
             nameof(StudioSource.VX), nameof(StudioSource.VY), nameof(StudioSource.VW), nameof(StudioSource.VAuto), nameof(StudioSource.VShow),
             nameof(StudioSource.Anchor), nameof(StudioSource.MarginPx), nameof(StudioSource.SizePercent),
+            nameof(StudioSource.H), nameof(StudioSource.VH), // sizes: covered by the scale strings below
             nameof(StudioSource.Locked) }; // editor-only: locking never rebuilds the pipeline
         var arr = new System.Text.Json.Nodes.JsonArray();
         foreach (var sc in scenes)
@@ -800,7 +812,7 @@ public static class PipelineBuilder
                 var o = System.Text.Json.JsonSerializer.SerializeToNode(src)!.AsObject();
                 foreach (var k in placement) o.Remove(k);
                 o["lh"] = !layers.Contains(src) ? "-" : LayoutMath.IsBaseLayer(src, layers) ? "base" : HorizontalScale(src, W, H, 30);
-                o["lv"] = vertical is { } v && vLayers.Contains(src) ? VerticalWidth(src, v.W, v.H).ToString(CultureInfo.InvariantCulture) : "-";
+                o["lv"] = vertical is { } v && vLayers.Contains(src) ? VerticalScale(src, v.W, v.H) : "-";
                 list.Add(o);
             }
             arr.Add(new System.Text.Json.Nodes.JsonObject { ["id"] = sc.Id.ToString(), ["s"] = list });

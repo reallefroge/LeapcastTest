@@ -176,7 +176,7 @@ public sealed class WindowCaptureBridge : IDisposable
                         $"{cap}:crop_left={cut.L}:crop_top={cut.T}:crop_right={cut.R}:crop_bottom={cut.B}," +
                         $"scale_d3d11=width={cut.ScaleW}:height={cut.ScaleH}:format=nv12,hwdownload,format=nv12" }, false);
                     gpuCut = cut;
-                    lock (CaptureSizes) CaptureSizes[r.Key] = (Math.Max(16, c.W - r.Crop.L - r.Crop.R), Math.Max(16, c.H - r.Crop.T - r.Crop.B));
+                    lock (CaptureSizes) CaptureSizes[r.Key] = (c.W, c.H); // the window's own size: crop is subtracted by the layout, as for CPU captures
                 }
                 else
                     input = new InputSpec(new[] { "-f", "lavfi", "-i", $"{cap},hwdownload,format=bgra" }, false);
