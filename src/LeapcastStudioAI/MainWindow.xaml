@@ -48,6 +48,8 @@
           <Border x:Name="RecTag" Background="#7A2E31" CornerRadius="6" Padding="9,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center">
             <TextBlock x:Name="RecTagText" Text="● REC" FontWeight="Bold" FontSize="12"/>
           </Border>
+          <Button x:Name="StudioModeButton" Content="Studio mode" Click="StudioMode_Click" Padding="12,8" Margin="0,0,6,0"
+                  ToolTip="Preview the next scene (and edit it) beside what's on air, then click Transition"/>
           <Button x:Name="AutoConfigButton" Content="Auto-config" Click="AutoConfig_Click" Padding="12,8" Margin="0,0,6,0"
                   ToolTip="Test this PC with your real scene and pick the smoothest settings (about a minute)"/>
           <Button x:Name="GoLiveButton" Style="{StaticResource PrimaryButton}" Content="▶  Go live" Click="GoLive_Click" Padding="18,8" MinWidth="130"
@@ -202,8 +204,6 @@
             <Button x:Name="ReplayBufferButton" Content="Replay buffer" Click="ReplayBuffer_Click"
                     ToolTip="Keep the last seconds ready to save, even when you're not live"/>
             <Button x:Name="SaveReplayButton" Content="Save replay" Click="Replay_Click" ToolTip="Save the last seconds as a clip"/>
-            <Button x:Name="StudioModeButton" Content="Studio mode" Click="StudioMode_Click"
-                    ToolTip="Preview the next scene (and edit it) beside what's on air, then click Transition"/>
           </StackPanel>
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
             <Border Style="{StaticResource Chip}" ToolTip="Frames per second (actual / planned)">
