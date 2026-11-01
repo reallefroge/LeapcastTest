@@ -10,6 +10,8 @@ namespace LeapcastStudioAI;
 /// Drag / resize editing of sources directly on a canvas preview (horizontal or vertical). Works on canvas pixels:
 /// the host grid is exactly canvas-sized inside a Viewbox, so mouse positions need no conversion.
 /// Moves are pushed to the running pipeline live (overlay commands); resizes apply when the mouse is released.
+/// Every corner and edge of the selected source is a resize grip (the picture keeps its shape: the opposite corner
+/// or edge stays put). Locked sources can be selected but not moved, resized or nudged.
 /// </summary>
 public sealed class PreviewEditor
 {
@@ -17,7 +19,7 @@ public sealed class PreviewEditor
     private readonly FrameworkElement _viewbox;
     private readonly CanvasKind _kind;
     private StudioSource? _drag;
-    private bool _resizing;
+    private Grip _grip;
     private Point _grabOffset;
     private LayoutRect _startRect;
     private bool _changedSize;
@@ -101,43 +103,67 @@ public sealed class PreviewEditor
         return null;
     }
 
-    private bool OnHandle(Point p, LayoutRect r)
+    private StudioSource? HitTestUnlocked(Point p, IReadOnlyList<StudioSource> layers)
     {
-        double h = 16 / Scale;
-        return Math.Abs(p.X - r.Right) <= h && Math.Abs(p.Y - r.Bottom) <= h;
+        for (int i = layers.Count - 1; i >= 0; i--)
+        {
+            if (layers[i].Locked) continue;
+            var r = RectOf(layers[i], layers);
+            if (p.X >= r.X && p.X <= r.Right && p.Y >= r.Y && p.Y <= r.Bottom) return layers[i];
+        }
+        return null;
     }
+
+    /// <summary>The selected (unlocked) source's resize grip under the mouse, if any.</summary>
+    private Grip GripUnder(Point p, IReadOnlyList<StudioSource> layers)
+    {
+        if (Selected is null || Selected.Locked || !layers.Contains(Selected)) return Grip.None;
+        return LayoutMath.GripAt(RectOf(Selected, layers), p.X, p.Y, 8 / Scale);
+    }
+
+    private static Cursor CursorFor(Grip g) => g switch
+    {
+        Grip.TopLeft or Grip.BottomRight => Cursors.SizeNWSE,
+        Grip.TopRight or Grip.BottomLeft => Cursors.SizeNESW,
+        Grip.Left or Grip.Right => Cursors.SizeWE,
+        Grip.Top or Grip.Bottom => Cursors.SizeNS,
+        Grip.Move => Cursors.SizeAll,
+        _ => Cursors.Arrow,
+    };
 
     private void OnDown(object sender, MouseButtonEventArgs e)
     {
         var p = e.GetPosition(_layer);
         _layer.Focus();
         var layers = Layers();
-        // the selected source's resize handle wins even where another source overlaps it
-        if (Selected is not null && layers.Contains(Selected) && OnHandle(p, RectOf(Selected, layers)))
+        // the selected source's resize grips win even where another source overlaps them
+        var grip = GripUnder(p, layers);
+        if (grip != Grip.None)
         {
-            BeginDrag(Selected, p, layers, resize: true);
+            BeginDrag(Selected!, p, layers, grip);
             e.Handled = true;
             return;
         }
-        var hit = HitTest(p, layers);
+        // locked sources are see-through for dragging: grab the unlocked source under them, else just select
+        var hit = HitTestUnlocked(p, layers) ?? HitTest(p, layers);
         if (!ReferenceEquals(hit, Selected))
         {
             Selected = hit;
             SelectionChanged?.Invoke(hit);
         }
-        if (hit is not null)
+        if (hit is { Locked: false })
         {
-            BeginDrag(hit, p, layers, resize: OnHandle(p, RectOf(hit, layers)));
+            BeginDrag(hit, p, layers, Grip.Move);
             e.Handled = true;
         }
         Redraw();
     }
 
-    private void BeginDrag(StudioSource s, Point p, IReadOnlyList<StudioSource> layers, bool resize)
+    private void BeginDrag(StudioSource s, Point p, IReadOnlyList<StudioSource> layers, Grip grip)
     {
         _startRect = RectOf(s, layers);
         _drag = s;
-        _resizing = resize;
+        _grip = grip;
         _moved = false;
         _changedSize = false;
         _grabOffset = new Point(p.X - _startRect.X, p.Y - _startRect.Y);
@@ -175,8 +201,8 @@ public sealed class PreviewEditor
         {
             // cursor feedback
             var layers = Layers();
-            bool handle = Selected is not null && layers.Contains(Selected) && OnHandle(p, RectOf(Selected, layers));
-            _layer.Cursor = handle ? Cursors.SizeNWSE : HitTest(p, layers) is not null ? Cursors.SizeAll : Cursors.Arrow;
+            var g = GripUnder(p, layers);
+            _layer.Cursor = CursorFor(g != Grip.None ? g : HitTestUnlocked(p, layers) is not null ? Grip.Move : Grip.None);
             return;
         }
         var (cw, ch) = CanvasSize();
@@ -189,11 +215,11 @@ public sealed class PreviewEditor
             MakeFree(_drag);
         }
         bool snap = (Keyboard.Modifiers & ModifierKeys.Shift) == 0;
-        if (_resizing)
+        if (_grip != Grip.Move)
         {
-            double w = Math.Clamp(p.X - _startRect.X, 32, cw * 1.5);
-            if (snap && Math.Abs(_startRect.X + w - cw) < 12 / Scale) w = cw - _startRect.X; // snap to the right edge
-            if (_kind == CanvasKind.Horizontal) _drag.W = w / cw; else _drag.VW = w / cw;
+            var r = LayoutMath.Resize(_startRect, _grip, p.X, p.Y, cw, ch, snap ? 12 / Scale : 0);
+            if (_kind == CanvasKind.Horizontal) { _drag.X = r.X / cw; _drag.Y = r.Y / ch; _drag.W = r.W / cw; }
+            else { _drag.VX = r.X / cw; _drag.VY = r.Y / ch; _drag.VW = r.W / cw; }
             _changedSize = true;
         }
         else
@@ -237,7 +263,7 @@ public sealed class PreviewEditor
     public bool Nudge(int dx, int dy)
     {
         var s = Selected;
-        if (s is null || !Layers().Contains(s)) return false;
+        if (s is null || s.Locked || !Layers().Contains(s)) return false;
         var (cw, ch) = CanvasSize();
         _startRect = RectOf(s);
         MakeFree(s);
@@ -253,8 +279,12 @@ public sealed class PreviewEditor
     private static readonly Brush Accent = new SolidColorBrush(Color.FromRgb(0x8B, 0x7C, 0xFF));
     private static readonly Brush Faint = new SolidColorBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF));
     private static readonly Brush LabelBg = new SolidColorBrush(Color.FromArgb(0xCC, 0x2C, 0x27, 0x66));
+    private static readonly Brush LockedBrush = new SolidColorBrush(Color.FromRgb(0xFF, 0xC9, 0x78));
+    private static readonly Grip[] Handles =
+        { Grip.TopLeft, Grip.Top, Grip.TopRight, Grip.Right, Grip.BottomRight, Grip.Bottom, Grip.BottomLeft, Grip.Left };
 
-    /// <summary>Outlines for every source, a highlighted frame + resize handle for the selected one.</summary>
+    /// <summary>Outlines for every source; the selected one gets a highlighted frame and eight resize handles
+    /// (or a lock badge when it's locked).</summary>
     public void Redraw()
     {
         _layer.Children.Clear();
@@ -268,21 +298,29 @@ public sealed class PreviewEditor
             var box = new Rectangle
             {
                 Width = Math.Max(1, r.W), Height = Math.Max(1, r.H),
-                Stroke = sel ? Accent : Faint, StrokeThickness = sel ? thick : thin,
+                Stroke = sel ? (s.Locked ? LockedBrush : Accent) : Faint, StrokeThickness = sel ? thick : thin,
                 StrokeDashArray = sel ? null : new DoubleCollection { 4, 3 },
                 IsHitTestVisible = false,
             };
             Canvas.SetLeft(box, r.X); Canvas.SetTop(box, r.Y);
             _layer.Children.Add(box);
             if (!sel) continue;
-            double hs = 12 / scale;
-            var handle = new Rectangle { Width = hs, Height = hs, Fill = Accent, IsHitTestVisible = false };
-            Canvas.SetLeft(handle, r.Right - hs / 2); Canvas.SetTop(handle, r.Bottom - hs / 2);
-            _layer.Children.Add(handle);
+            if (!s.Locked)
+            {
+                double hs = 10 / scale;
+                foreach (var g in Handles)
+                {
+                    double hx = g switch { Grip.TopLeft or Grip.Left or Grip.BottomLeft => r.X, Grip.Top or Grip.Bottom => r.X + r.W / 2, _ => r.Right };
+                    double hy = g switch { Grip.TopLeft or Grip.Top or Grip.TopRight => r.Y, Grip.Left or Grip.Right => r.Y + r.H / 2, _ => r.Bottom };
+                    var handle = new Rectangle { Width = hs, Height = hs, Fill = Brushes.White, Stroke = Accent, StrokeThickness = thin * 1.5, IsHitTestVisible = false };
+                    Canvas.SetLeft(handle, hx - hs / 2); Canvas.SetTop(handle, hy - hs / 2);
+                    _layer.Children.Add(handle);
+                }
+            }
             var label = new Border
             {
                 Background = LabelBg, CornerRadius = new CornerRadius(3 / scale), Padding = new Thickness(5 / scale, 2 / scale, 5 / scale, 2 / scale),
-                Child = new TextBlock { Text = s.Name, Foreground = Brushes.White, FontSize = 12 / scale },
+                Child = new TextBlock { Text = s.Locked ? "🔒 " + s.Name + " (locked)" : s.Name, Foreground = Brushes.White, FontSize = 12 / scale },
                 IsHitTestVisible = false,
             };
             Canvas.SetLeft(label, Math.Max(0, r.X));

@@ -64,6 +64,29 @@
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="BorderBrush" Value="Transparent"/>
     </Style>
+    <!-- Lock toggle in the sources list: faint open padlock, amber closed padlock when locked -->
+    <Style x:Key="LockToggle" TargetType="ToggleButton">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border Background="Transparent" Padding="4,3">
+              <TextBlock x:Name="Glyph" FontFamily="{StaticResource IconFont}" FontSize="13" Text="&#xE785;"
+                         Foreground="{StaticResource MutedBrush}" Opacity="0.45"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Glyph" Property="Opacity" Value="1"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Glyph" Property="Text" Value="&#xE72E;"/>
+                <Setter TargetName="Glyph" Property="Foreground" Value="#FFC978"/>
+                <Setter TargetName="Glyph" Property="Opacity" Value="1"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Background" Value="{StaticResource StartBrush}"/>
       <Setter Property="BorderBrush" Value="#6B5DE0"/>

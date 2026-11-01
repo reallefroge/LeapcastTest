@@ -73,6 +73,8 @@ public sealed class StudioSource
     public string Name { get; set; } = SourceTypes.Display;
     public string Type { get; set; } = SourceTypes.Display;
     public bool Visible { get; set; } = true;
+    /// <summary>Locked sources can't be moved or resized on the preview (Properties still edits them).</summary>
+    public bool Locked { get; set; }
 
     // Placement (video sources). Sources later in the scene list are drawn on top.
     public string Anchor { get; set; } = Anchors.Auto;

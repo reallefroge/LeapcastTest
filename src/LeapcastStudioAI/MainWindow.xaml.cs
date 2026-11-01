@@ -764,9 +764,11 @@ public partial class MainWindow : Window
         void Item(string header, Action act, bool isChecked = false)
         {
             var mi = new MenuItem { Header = header, IsChecked = isChecked };
-            mi.Click += (_, _) => { act(); SceneEdited(); RedrawEditors(); };
+            mi.Click += (_, _) => { act(); SceneEdited(); RedrawEditors(); SourcesList.Items.Refresh(); };
             menu.Items.Add(mi);
         }
+        Item(s.Locked ? "Unlock (allow moving and resizing)" : "Lock (prevent moving and resizing)", () => s.Locked = !s.Locked, s.Locked);
+        menu.Items.Add(new Separator());
         if (kind == CanvasKind.Horizontal)
         {
             var k = SourceTypes.KindOf(s.Type);
@@ -978,6 +980,13 @@ public partial class MainWindow : Window
     private void SourcesList_MouseDoubleClick(object sender, MouseButtonEventArgs e) => SourceProperties_Click(sender, e);
 
     private void SourceVisible_Click(object sender, RoutedEventArgs e) { SceneEdited(); RedrawEditors(); }
+
+    private void SourceLock_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: StudioSource s }) Status(s.Locked ? $"{s.Name} is locked in place." : $"{s.Name} can be moved again.");
+        Save();
+        RedrawEditors();
+    }
 
     private void RemoveSource_Click(object sender, RoutedEventArgs e)
     {

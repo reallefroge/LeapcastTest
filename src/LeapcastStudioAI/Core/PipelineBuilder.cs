@@ -786,7 +786,8 @@ public static class PipelineBuilder
     {
         var placement = new[] { nameof(StudioSource.Name), nameof(StudioSource.X), nameof(StudioSource.Y), nameof(StudioSource.W),
             nameof(StudioSource.VX), nameof(StudioSource.VY), nameof(StudioSource.VW), nameof(StudioSource.VAuto), nameof(StudioSource.VShow),
-            nameof(StudioSource.Anchor), nameof(StudioSource.MarginPx), nameof(StudioSource.SizePercent) };
+            nameof(StudioSource.Anchor), nameof(StudioSource.MarginPx), nameof(StudioSource.SizePercent),
+            nameof(StudioSource.Locked) }; // editor-only: locking never rebuilds the pipeline
         var arr = new System.Text.Json.Nodes.JsonArray();
         foreach (var sc in scenes)
         {

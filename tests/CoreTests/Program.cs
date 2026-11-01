@@ -119,6 +119,35 @@ Check(!string.Join(" ", freeSpec.Args).Contains("-re -f lavfi -i color") && free
 var snapped = LayoutMath.Snap(new LayoutRect(745, 7, 100, 50), 1600, 900, 12);
 Check(snapped == (750, 0), $"snaps to the centre line and the top edge ({snapped})");
 
+// resizing on the preview: any corner or edge, the picture keeps its shape, the opposite side stays put
+var cam = new LayoutRect(1200, 600, 320, 180); // 16:9 camera, bottom right area of a 1920×1080 canvas
+var tl = LayoutMath.Resize(cam, Grip.TopLeft, 1040, 510, 1920, 1080, 0);
+Check(Math.Abs(tl.Right - cam.Right) < 0.01 && Math.Abs(tl.Bottom - cam.Bottom) < 0.01 && Math.Abs(tl.W / tl.H - 16 / 9.0) < 0.001 && tl.W > cam.W,
+    $"top-left corner: grows up and left, bottom-right corner fixed, 16:9 kept ({tl})");
+var left = LayoutMath.Resize(cam, Grip.Left, 1300, 650, 1920, 1080, 0);
+Check(Math.Abs(left.W - 220) < 0.01 && Math.Abs(left.Right - cam.Right) < 0.01 && Math.Abs(left.Y + left.H / 2 - (cam.Y + cam.H / 2)) < 0.01,
+    $"left edge: narrower from the left, right edge and vertical centre fixed ({left})");
+var bottom = LayoutMath.Resize(cam, Grip.Bottom, 0, 870, 1920, 1080, 0);
+Check(Math.Abs(bottom.H - 270) < 0.01 && Math.Abs(bottom.Y - cam.Y) < 0.01 && Math.Abs(bottom.W / bottom.H - 16 / 9.0) < 0.001,
+    $"bottom edge: taller, top fixed, width follows the shape ({bottom})");
+var snapRight = LayoutMath.Resize(cam, Grip.Right, 1912, 650, 1920, 1080, 12);
+Check(Math.Abs(snapRight.Right - 1920) < 0.01, $"the dragged edge snaps to the canvas border ({snapRight.Right:0})");
+var tiny = LayoutMath.Resize(cam, Grip.BottomRight, 1201, 601, 1920, 1080, 0);
+Check(tiny.W >= 32, $"never shrinks below 32 px ({tiny.W:0})");
+Check(LayoutMath.GripAt(cam, 1203, 598, 8) == Grip.TopLeft && LayoutMath.GripAt(cam, 1360, 781, 8) == Grip.Bottom
+      && LayoutMath.GripAt(cam, 1518, 700, 8) == Grip.Right && LayoutMath.GripAt(cam, 1360, 690, 8) == Grip.None,
+    "grips: corners, edges, and the middle (moves instead)");
+{
+    var lockScene = new StudioScene { Name = "lock" };
+    var lockCam = new StudioSource { Name = "Cam", Type = SourceTypes.Camera, DeviceName = "x" };
+    lockScene.Sources.Add(lockCam);
+    string lockBefore = PipelineBuilder.LayoutFingerprint(new[] { lockScene }, 1920, 1080, null);
+    lockCam.Locked = true;
+    Check(PipelineBuilder.LayoutFingerprint(new[] { lockScene }, 1920, 1080, null) == lockBefore, "locking a source never rebuilds the pipeline");
+    var round = System.Text.Json.JsonSerializer.Deserialize<StudioSource>(System.Text.Json.JsonSerializer.Serialize(lockCam))!;
+    Check(round.Locked, "the lock is saved with the scene");
+}
+
 // ---------------------------------------------------------------- GPU window cut
 var cut1 = WindowCaptureBridge.PlanGpuCut(1280, 800, (0, 0, 0, 0), Anchors.FillCrop, 1600, 900);
 Check(cut1 is { L: 0, R: 0, T: 40, B: 40, ScaleW: 1600, ScaleH: 900, Pad: false },

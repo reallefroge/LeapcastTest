@@ -11,6 +11,9 @@ public readonly record struct LayoutRect(double X, double Y, double W, double H)
 
 public enum CanvasKind { Horizontal, Vertical }
 
+/// <summary>Which part of a source's frame the mouse grabbed on the preview.</summary>
+public enum Grip { None, Move, TopLeft, Top, TopRight, Right, BottomRight, Bottom, BottomLeft, Left }
+
 /// <summary>
 /// Where every source sits on each canvas. Shared by the pipeline builder (what gets composited) and the preview
 /// editor (what you drag), so the two can never disagree.
@@ -133,6 +136,87 @@ public static class LayoutMath
         SmartTuner.TryParseResolution(text, out var w, out var h) && h > w ? (w, h) : (720, 1280);
 
     /// <summary>Snap a moving rectangle to canvas edges and centre lines (within <paramref name="threshold"/> px).</summary>
+    /// <summary>
+    /// Resizes <paramref name="start"/> by dragging <paramref name="grip"/> to (px, py), keeping the picture's shape
+    /// (sources are never stretched). The opposite corner or edge stays put. Edges that land within
+    /// <paramref name="snap"/> of the canvas border snap to it (pass 0 for free sizing).
+    /// </summary>
+    public static LayoutRect Resize(LayoutRect start, Grip grip, double px, double py, double cw, double ch, double snap, double minW = 32)
+    {
+        if (start.W <= 0 || start.H <= 0) return start;
+        double aspect = start.W / start.H;
+        // the point that stays fixed: the opposite corner, or the middle of the opposite edge
+        double fx = grip switch
+        {
+            Grip.TopLeft or Grip.BottomLeft or Grip.Left => start.Right,
+            Grip.TopRight or Grip.BottomRight or Grip.Right => start.X,
+            _ => start.X + start.W / 2,
+        };
+        double fy = grip switch
+        {
+            Grip.TopLeft or Grip.TopRight or Grip.Top => start.Bottom,
+            Grip.BottomLeft or Grip.BottomRight or Grip.Bottom => start.Y,
+            _ => start.Y + start.H / 2,
+        };
+        bool horizontal = grip is not (Grip.Top or Grip.Bottom);
+        bool vertical = grip is not (Grip.Left or Grip.Right);
+        // snap the edge being dragged to the canvas border
+        if (snap > 0)
+        {
+            if (horizontal && fx <= start.X + 0.5 && Math.Abs(px - cw) < snap) px = cw;
+            if (horizontal && fx >= start.Right - 0.5 && Math.Abs(px) < snap) px = 0;
+            if (vertical && fy <= start.Y + 0.5 && Math.Abs(py - ch) < snap) py = ch;
+            if (vertical && fy >= start.Bottom - 0.5 && Math.Abs(py) < snap) py = 0;
+        }
+        double wFromX = Math.Abs(px - fx);
+        double wFromY = Math.Abs(py - fy) * aspect;
+        double w = grip switch
+        {
+            Grip.Left or Grip.Right => wFromX,
+            Grip.Top or Grip.Bottom => wFromY,
+            // corners: follow whichever direction the mouse moved further
+            _ => Math.Abs(wFromX - start.W) >= Math.Abs(wFromY - start.W) ? wFromX : wFromY,
+        };
+        w = Math.Clamp(w, minW, Math.Max(minW, cw * 1.5));
+        double h = w / aspect;
+        double x = grip switch
+        {
+            Grip.TopLeft or Grip.BottomLeft or Grip.Left => fx - w,
+            Grip.TopRight or Grip.BottomRight or Grip.Right => fx,
+            _ => fx - w / 2,
+        };
+        double y = grip switch
+        {
+            Grip.TopLeft or Grip.TopRight or Grip.Top => fy - h,
+            Grip.BottomLeft or Grip.BottomRight or Grip.Bottom => fy,
+            _ => fy - h / 2,
+        };
+        return new LayoutRect(x, y, w, h);
+    }
+
+    /// <summary>The resize grip under (px, py), within <paramref name="tolerance"/> canvas pixels; None if none.</summary>
+    public static Grip GripAt(LayoutRect r, double px, double py, double tolerance)
+    {
+        bool nearL = Math.Abs(px - r.X) <= tolerance, nearR = Math.Abs(px - r.Right) <= tolerance;
+        bool nearT = Math.Abs(py - r.Y) <= tolerance, nearB = Math.Abs(py - r.Bottom) <= tolerance;
+        bool inX = px >= r.X - tolerance && px <= r.Right + tolerance, inY = py >= r.Y - tolerance && py <= r.Bottom + tolerance;
+        if (nearT && nearL) return Grip.TopLeft;
+        if (nearT && nearR) return Grip.TopRight;
+        if (nearB && nearR) return Grip.BottomRight;
+        if (nearB && nearL) return Grip.BottomLeft;
+        double cx = r.X + r.W / 2, cy = r.Y + r.H / 2;
+        if (nearT && Math.Abs(px - cx) <= tolerance) return Grip.Top;
+        if (nearB && Math.Abs(px - cx) <= tolerance) return Grip.Bottom;
+        if (nearL && Math.Abs(py - cy) <= tolerance) return Grip.Left;
+        if (nearR && Math.Abs(py - cy) <= tolerance) return Grip.Right;
+        // anywhere else along an edge still resizes (handles are small on a scaled-down preview)
+        if (inY && nearR) return Grip.Right;
+        if (inY && nearL) return Grip.Left;
+        if (inX && nearB) return Grip.Bottom;
+        if (inX && nearT) return Grip.Top;
+        return Grip.None;
+    }
+
     public static (double x, double y) Snap(LayoutRect r, int cw, int ch, double threshold)
     {
         double x = r.X, y = r.Y;
