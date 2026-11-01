@@ -4,6 +4,15 @@ using System.Net;
 using System.Net.Sockets;
 using LeapcastStudioAI;
 
+// helper mode for the overload test: a stand-in "game" that keeps every core busy in its own process
+if (args.Length > 0 && args[0] == "--burn")
+{
+    for (int i = 0; i < Environment.ProcessorCount; i++)
+        new Thread(() => { double x = 1; while (true) x = Math.Sqrt(x + 1); }) { IsBackground = true }.Start();
+    Thread.Sleep(TimeSpan.FromMinutes(10));
+    return 0;
+}
+
 int failures = 0;
 double lastDriftMs = 0; // set by LipSyncAsync: second-half minus first-half offset
 void Check(bool ok, string what) { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) failures++; }
@@ -279,10 +288,11 @@ async Task AdaptSection(StudioScene light)
     engine.InputOverride = (src, origin) => SourceTypes.KindOf(src.Type) == SourceKind.Display
         ? new InputSpec(new[] { "-f", "lavfi", "-i", "testsrc2=s=800x450:r=30,noise=alls=30:allf=t+u,scale=1600:900:flags=neighbor,realtime=limit=1000" }, false)
         : oldOverride?.Invoke(src, origin);
-    // ...and the game itself keeps every core busy (as a game does), leaving Leapcast a fraction of the CPU
-    using var gameLoad = new CancellationTokenSource();
-    for (int i = 0; i < Environment.ProcessorCount; i++)
-        new Thread(() => { double x = 1; while (!gameLoad.IsCancellationRequested) x = Math.Sqrt(x + 1); }) { IsBackground = true }.Start();
+    // ...and the game itself (another process, normal priority) keeps every core busy, as a game does
+    var burnPsi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
+    if (Path.GetFileNameWithoutExtension(Environment.ProcessPath!) == "dotnet") burnPsi.ArgumentList.Add(System.Reflection.Assembly.GetEntryAssembly()!.Location);
+    burnPsi.ArgumentList.Add("--burn");
+    using var gameLoad = Process.Start(burnPsi)!;
     var busy = new StudioScene { Name = "busy game" };
     busy.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, CaptureMethod = "Auto" });
     busy.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone });
@@ -303,7 +313,7 @@ async Task AdaptSection(StudioScene light)
         if (aw.Elapsed - lastChange > TimeSpan.FromSeconds(25) && st.Speed >= 0.95) break;
     }
     var final = engine.Snapshot();
-    gameLoad.Cancel();
+    try { gameLoad.Kill(true); } catch { }
     File.WriteAllText(Path.Combine(work, "adapt-run.log"), ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")));
     Console.WriteLine($"    rungs: {(rungs.Count == 0 ? "none needed" : string.Join(", ", rungs))}; final {engine.CurrentPlan?.Summary}, speed {final.Speed:0.00}, {final.Health}");
     bool adapted;
