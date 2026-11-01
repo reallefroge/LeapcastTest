@@ -34,6 +34,7 @@ public sealed class TsBus : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly string? _fifo;
     private readonly NamedPipeServerStream? _server;
+    private readonly string? _pipeName;
     private long _total;
 
     public string Path { get; }
@@ -46,7 +47,8 @@ public sealed class TsBus : IDisposable
         string name = $"leapcast_bus_{tag}_{Guid.NewGuid():N}";
         if (OperatingSystem.IsWindows())
         {
-            _server = new NamedPipeServerStream(name, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 1 << 20, 0);
+            _server = LocalPipe.Server(name, PipeDirection.In, 1 << 20, 0);
+            _pipeName = name;
             Path = @"\\.\pipe\" + name;
         }
         else
@@ -64,7 +66,7 @@ public sealed class TsBus : IDisposable
         Stream? s = null;
         try
         {
-            if (_server is not null) { _server.WaitForConnectionAsync(_cts.Token).GetAwaiter().GetResult(); s = _server; }
+            if (_server is not null) { LocalPipe.WaitForClient(_server, _pipeName!, _cts.Token); s = _server; }
             else s = new FileStream(_fifo!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16);
             var buf = new byte[1 << 16];
             while (!_cts.IsCancellationRequested)

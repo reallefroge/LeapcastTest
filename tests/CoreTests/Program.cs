@@ -948,8 +948,7 @@ static class PacedPipe
         string name = $"leapcast_test_{Guid.NewGuid():N}";
         if (OperatingSystem.IsWindows())
         {
-            var server = new System.IO.Pipes.NamedPipeServerStream(name, System.IO.Pipes.PipeDirection.Out, 1,
-                System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous, 0, 1 << 16);
+            var server = LocalPipe.Server(name, System.IO.Pipes.PipeDirection.Out, 0, 1 << 16); // same transport as the app
             new Thread(() =>
             {
                 try { server.WaitForConnection(); Pump(server, chunk, chunksPerSecond, origin, pad, ct); }

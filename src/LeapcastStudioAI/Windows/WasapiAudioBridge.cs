@@ -167,11 +167,10 @@ public sealed class WasapiAudioBridge : IAudioBridge
                 if (feed.Capture is null || feed.Stereo48k is null) continue;
                 string name = $"leapcast_{feed.SourceId:N}_{Environment.TickCount64}";
                 // Created synchronously so the pipe exists before ffmpeg tries to open it.
-                var pipe = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous, 0, 1 << 16);
+                var pipe = LocalPipe.Server(name, PipeDirection.Out, 0, 1 << 16);
                 feed.Pipe = pipe;
                 var f = feed;
-                feed.Writer = new Thread(() => PipeWriter(f, pipe, wallclockOrigin, cts.Token))
+                feed.Writer = new Thread(() => PipeWriter(f, pipe, name, wallclockOrigin, cts.Token))
                 {
                     IsBackground = true, Name = "Leapcast audio " + feed.Name, Priority = ThreadPriority.AboveNormal
                 };
@@ -184,13 +183,13 @@ public sealed class WasapiAudioBridge : IAudioBridge
 
     private static double NowUnix() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
 
-    private static void PipeWriter(Feed feed, NamedPipeServerStream pipe, double origin, CancellationToken ct)
+    private static void PipeWriter(Feed feed, NamedPipeServerStream pipe, string name, double origin, CancellationToken ct)
     {
         const int chunk = 480; // 10 ms
         var samples = new float[chunk * 2];
         try
         {
-            pipe.WaitForConnectionAsync(ct).GetAwaiter().GetResult();
+            LocalPipe.WaitForClient(pipe, name, ct);
             feed.Buffer?.ClearBuffer(); // don't send audio that piled up while ffmpeg was starting
 
             // Sample 0 == the pipeline's time origin. One clock, anchored to wall time *before* padding, so the

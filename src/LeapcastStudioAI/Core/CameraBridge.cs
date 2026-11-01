@@ -19,6 +19,7 @@ public sealed class CountedFramePipe : IDisposable
     private readonly double _fps, _origin;
     private readonly string? _fifoPath;
     private NamedPipeServerStream? _server;
+    private string? _pipeName;
 
     public long Sampled, Dropped, Written, FromLatest;
 
@@ -38,8 +39,8 @@ public sealed class CountedFramePipe : IDisposable
         Stream? stream = null;
         if (OperatingSystem.IsWindows())
         {
-            _server = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous, 0, Math.Max(1 << 16, frameBytes * 2));
+            _server = LocalPipe.Server(name, PipeDirection.Out, 0, Math.Max(1 << 16, frameBytes * 2));
+            _pipeName = name;
             Path = @"\\.\pipe\" + name;
         }
         else
@@ -60,7 +61,7 @@ public sealed class CountedFramePipe : IDisposable
         Stream? s = null;
         try
         {
-            if (_server is not null) { _server.WaitForConnectionAsync(ct).GetAwaiter().GetResult(); s = _server; }
+            if (_server is not null) { LocalPipe.WaitForClient(_server, _pipeName!, ct); s = _server; }
             else s = new FileStream(_fifoPath!, FileMode.Open, FileAccess.Write); // blocks until ffmpeg opens it
 
             // One clock for everything, anchored to wall time *now* (before any padding is written): frame k is
