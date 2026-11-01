@@ -293,6 +293,17 @@ async Task AdaptSection(StudioScene light)
     if (Path.GetFileNameWithoutExtension(Environment.ProcessPath!) == "dotnet") burnPsi.ArgumentList.Add(System.Reflection.Assembly.GetEntryAssembly()!.Location);
     burnPsi.ArgumentList.Add("--burn");
     using var gameLoad = Process.Start(burnPsi)!;
+    // diagnostics: how fast this machine generates and encodes the stand-in game on its own (no engine)
+    foreach (var (label, extra) in new[] { ("source only", new[] { "-f", "null", "-" }),
+                 ("source + 1080p60 x264", new[] { "-vf", "scale=1920:1080,fps=60", "-c:v", "libx264", "-preset", "superfast", "-f", "null", "-" }) })
+    {
+        var dpsi = new ProcessStartInfo(ffmpeg) { RedirectStandardError = true, UseShellExecute = false };
+        foreach (var a in new[] { "-hide_banner", "-nostats", "-progress", "pipe:2", "-f", "lavfi", "-i", "testsrc2=s=800x450:r=30,noise=alls=30:allf=t+u,scale=1600:900:flags=neighbor", "-t", "6" }.Concat(extra)) dpsi.ArgumentList.Add(a);
+        var dp = Process.Start(dpsi)!;
+        string derr = await dp.StandardError.ReadToEndAsync();
+        await dp.WaitForExitAsync();
+        Console.WriteLine($"    diag {label}: " + (derr.Split('\n').LastOrDefault(l => l.StartsWith("speed=")) ?? "?").Trim());
+    }
     var busy = new StudioScene { Name = "busy game" };
     busy.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, CaptureMethod = "Auto" });
     busy.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone });
