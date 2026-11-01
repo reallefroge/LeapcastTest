@@ -153,6 +153,13 @@ public sealed class OutputManager : IDisposable
         public Process? Proc;
         public TsBus? Bus;
         public TsBus.Subscriber? Sub;
+        /// <summary>The buses this process is fed from, in order: a pipeline rebuild hands the running connection
+        /// over to the new encoder's bus instead of reconnecting.</summary>
+        public BlockingCollection<TsBus.Subscriber>? Feeds;
+        /// <summary>What the destination was set up with (codec + picture size): a rebuild with the same signature
+        /// can continue on the same connection.</summary>
+        public string Signature = "";
+        public volatile bool Overflowed;
         public DateTime? LiveSince;
         public int Attempt;
         public string? Message;
@@ -167,6 +174,11 @@ public sealed class OutputManager : IDisposable
     /// <summary>Outputs that failed before going live (bad key/URL): shown with their error, not running.</summary>
     private readonly Dictionary<Guid, (StreamOutput Output, string Message)> _failed = new();
     private readonly Dictionary<string, TsBus> _buses = new();
+    private readonly Dictionary<string, string> _signatures = new();
+    /// <summary>How long a connection waits for the next encoder while the pipeline is rebuilt.</summary>
+    public static readonly TimeSpan HandoverWait = TimeSpan.FromSeconds(12);
+    /// <summary>Rebuilds that kept every connection open (no reconnect).</summary>
+    public int Handovers { get; private set; }
     private readonly object _lock = new();
     private readonly Func<string?> _ffmpeg;
     private readonly string _logDir;
@@ -187,25 +199,56 @@ public sealed class OutputManager : IDisposable
     public bool IsActive(Guid id) { lock (_lock) return _pushers.ContainsKey(id); }
     public IReadOnlyList<StreamOutput> ActiveOutputs() { lock (_lock) return _pushers.Values.Select(p => p.Output).ToList(); }
 
-    /// <summary>New encoder run: attach every active output to its (new) bus.</summary>
-    public void BindBuses(IReadOnlyDictionary<string, TsBus> buses)
+    /// <summary>
+    /// New encoder run: attach every active output to its (new) bus. A connection whose encode is unchanged (same
+    /// codec and picture size) simply continues on the new bus: the destination never sees a disconnect, only a
+    /// short pause while the pipeline was rebuilt. Anything else reconnects.
+    /// </summary>
+    public void BindBuses(IReadOnlyDictionary<string, TsBus> buses, IReadOnlyDictionary<string, string>? signatures = null)
     {
+        bool handedOver = false;
         lock (_lock)
         {
             _buses.Clear();
+            _signatures.Clear();
             foreach (var (k, v) in buses) _buses[k] = v;
-            foreach (var p in _pushers.Values) Restart(p, immediate: true);
+            if (signatures is not null) foreach (var (k, v) in signatures) _signatures[k] = v;
+            foreach (var p in _pushers.Values)
+            {
+                string key = BusKey(p.Output);
+                _signatures.TryGetValue(key, out var sig);
+                if (p.Proc is { HasExited: false } && p.Feeds is { IsAddingCompleted: false } feeds && !p.Overflowed
+                    && sig is not null && sig == p.Signature && _buses.TryGetValue(key, out var bus) && !bus.Ended)
+                {
+                    p.Bus = bus;
+                    p.Sub = bus.Subscribe();
+                    feeds.Add(p.Sub);
+                    if (p.State == OutputState.Live) p.Message = null;
+                    handedOver = true;
+                }
+                else Restart(p, immediate: true);
+            }
+            if (handedOver) Handovers++;
         }
         Changed?.Invoke();
     }
 
-    /// <summary>Encoder stopped: outputs stay "active" and wait for the next bus.</summary>
+    /// <summary>
+    /// Encoder stopped (or is being rebuilt): connections stay open for <see cref="HandoverWait"/>, waiting for the
+    /// next encoder's bus; after that they close and wait as "Waiting for the encoder…".
+    /// </summary>
     public void UnbindBuses()
     {
         lock (_lock)
         {
             _buses.Clear();
-            foreach (var p in _pushers.Values) { KillProcess(p); p.State = OutputState.Reconnecting; p.Message = "Waiting for the encoder…"; }
+            foreach (var p in _pushers.Values)
+            {
+                if (p.Sub is not null && p.Bus is not null) p.Bus.Unsubscribe(p.Sub); // the feed thread drains it, then waits
+                p.Sub = null;
+                p.Bus = null;
+                if (p.Proc is null) { p.State = OutputState.Reconnecting; p.Message = "Waiting for the encoder…"; }
+            }
         }
         Changed?.Invoke();
     }
@@ -248,6 +291,7 @@ public sealed class OutputManager : IDisposable
     private static async Task GracefulStopAsync(Pusher p)
     {
         var proc = p.Proc;
+        p.Feeds?.CompleteAdding();
         if (p.Sub is not null && p.Bus is not null) p.Bus.Unsubscribe(p.Sub); // closes the pusher's stdin → clean RTMP close
         if (proc is null) return;
         try
@@ -313,23 +357,33 @@ public sealed class OutputManager : IDisposable
         p.Proc = proc;
         p.Bus = bus;
         p.Sub = bus.Subscribe();
+        p.Overflowed = false;
+        p.Signature = _signatures.TryGetValue(BusKey(p.Output), out var sig) ? sig : "";
+        var feeds = new BlockingCollection<TsBus.Subscriber>();
+        feeds.Add(p.Sub);
+        p.Feeds = feeds;
         p.State = OutputState.Starting;
         p.Message = "Connecting…";
         p.LastBytes = 0;
         lock (p.Window) p.Window.Clear();
-        var sub = p.Sub;
 
-        // feed: bus → pusher stdin. A dedicated thread: this loop blocks on the pusher's stdin, and blocking
-        // thread-pool threads (one per destination) starves the async readers that drain the preview pipe.
+        // feed: bus → pusher stdin, one bus after another (a pipeline rebuild hands over to the next bus without
+        // closing the connection; the demuxer re-bases the new encoder's timestamps). A dedicated thread: this
+        // loop blocks on the pusher's stdin, and blocking thread-pool threads would starve other readers.
         new Thread(() =>
         {
             var stdin = proc.StandardInput.BaseStream;
             try
             {
-                foreach (var chunk in sub.Queue.GetConsumingEnumerable())
+                while (feeds.TryTake(out var sub, HandoverWait))
                 {
-                    stdin.Write(chunk, 0, chunk.Length);
-                    Interlocked.Add(ref sub.QueuedBytes, -chunk.Length);
+                    foreach (var chunk in sub.Queue.GetConsumingEnumerable())
+                    {
+                        stdin.Write(chunk, 0, chunk.Length);
+                        Interlocked.Add(ref sub.QueuedBytes, -chunk.Length);
+                    }
+                    if (sub.Overflowed) { p.Overflowed = true; break; }
+                    stdin.Flush();
                 }
             }
             catch { }
@@ -362,7 +416,7 @@ public sealed class OutputManager : IDisposable
             }
             catch { }
             finally { log?.Dispose(); }
-            OnExited(p, proc, sub, errors);
+            OnExited(p, proc, errors);
         });
     }
 
@@ -398,15 +452,16 @@ public sealed class OutputManager : IDisposable
         if (changed) Changed?.Invoke();
     }
 
-    private void OnExited(Pusher p, Process proc, TsBus.Subscriber sub, List<string> errors)
+    private void OnExited(Pusher p, Process proc, List<string> errors)
     {
         lock (_lock)
         {
             if (p.Proc != proc) return; // replaced (restart on a new bus) or stopped
-            if (p.Bus is not null) p.Bus.Unsubscribe(sub);
+            p.Feeds?.CompleteAdding();
+            if (p.Bus is not null && p.Sub is not null) p.Bus.Unsubscribe(p.Sub);
             p.Proc = null;
             if (p.Stopping || !_pushers.ContainsKey(p.Output.Id)) return;
-            string why = sub.Overflowed
+            string why = p.Overflowed
                 ? "Upload couldn't keep up with this destination"
                 : StreamEngine.Explain(errors.LastOrDefault(e => e.Contains("rror", StringComparison.Ordinal) || e.Contains("fail", StringComparison.OrdinalIgnoreCase)) ?? errors.LastOrDefault() ?? "disconnected");
             bool busEnded = p.Bus?.Ended ?? true;
@@ -443,6 +498,7 @@ public sealed class OutputManager : IDisposable
     {
         var proc = p.Proc;
         p.Proc = null;
+        p.Feeds?.CompleteAdding();
         if (p.Sub is not null && p.Bus is not null) p.Bus.Unsubscribe(p.Sub);
         p.Sub = null;
         if (proc is null) return;

@@ -25,6 +25,7 @@ public partial class SourcePropertiesWindow : Window
         HeaderText.Text = source.Name;
         TypeText.Text = source.Type;
         NameBox.Text = source.Name;
+        HotkeyBox.Text = HotkeyText.Normalize(source.Hotkey);
 
         bool video = SourceTypes.IsVideo(_kind);
         Toggle(DisplayGroup, _kind == SourceKind.Display);
@@ -167,6 +168,29 @@ public partial class SourcePropertiesWindow : Window
     private static double Dbl(string text, double fallback, double min, double max) =>
         double.TryParse(text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? Math.Clamp(v, min, max) : fallback;
 
+    /// <summary>Records the key combination pressed in the hotkey box (modifier keys alone don't count).</summary>
+    private void HotkeyBox_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        e.Handled = true;
+        var key = e.Key == System.Windows.Input.Key.System ? e.SystemKey : e.Key;
+        if (key is System.Windows.Input.Key.LeftCtrl or System.Windows.Input.Key.RightCtrl or System.Windows.Input.Key.LeftAlt
+            or System.Windows.Input.Key.RightAlt or System.Windows.Input.Key.LeftShift or System.Windows.Input.Key.RightShift
+            or System.Windows.Input.Key.LWin or System.Windows.Input.Key.RWin) return;
+        if (key is System.Windows.Input.Key.Back or System.Windows.Input.Key.Delete or System.Windows.Input.Key.Escape
+            && System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.None) { HotkeyBox.Text = ""; return; }
+        var m = System.Windows.Input.Keyboard.Modifiers;
+        var mods = HotkeyText.Mods.None;
+        if (m.HasFlag(System.Windows.Input.ModifierKeys.Control)) mods |= HotkeyText.Mods.Ctrl;
+        if (m.HasFlag(System.Windows.Input.ModifierKeys.Alt)) mods |= HotkeyText.Mods.Alt;
+        if (m.HasFlag(System.Windows.Input.ModifierKeys.Shift)) mods |= HotkeyText.Mods.Shift;
+        if (m.HasFlag(System.Windows.Input.ModifierKeys.Windows)) mods |= HotkeyText.Mods.Win;
+        string name = key.ToString();
+        if (name.Length == 2 && name[0] == 'D' && char.IsDigit(name[1])) name = name[1..]; // D1 → 1
+        HotkeyBox.Text = HotkeyText.Format(mods, name);
+    }
+
+    private void ClearHotkey_Click(object sender, RoutedEventArgs e) => HotkeyBox.Text = "";
+
     private void Ok_Click(object sender, RoutedEventArgs e)
     {
         if (_kind == SourceKind.Camera && string.IsNullOrWhiteSpace(CameraBox.Text))
@@ -197,6 +221,7 @@ public partial class SourcePropertiesWindow : Window
 
         var s = _source;
         s.Name = string.IsNullOrWhiteSpace(NameBox.Text) ? s.Type : NameBox.Text.Trim();
+        s.Hotkey = HotkeyText.Normalize(HotkeyBox.Text);
         s.MonitorIndex = Int(TagOf(MonitorBox, "0"), 0, 0, 16);
         s.CaptureMethod = TagOf(MethodBox, "Auto");
         s.CaptureCursor = CursorBox.IsChecked == true;

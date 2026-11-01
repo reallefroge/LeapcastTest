@@ -84,7 +84,7 @@ jobs:
               { "Name": "Wizard101", "Sources": [
                 { "Name": "Wizard101 (screen)", "Type": "Display Capture", "CaptureMethod": "GDI", "Anchor": "Fill", "FillMode": "Crop" },
                 { "Name": "Title", "Type": "Text", "Text": "Leapcast multistream", "Locked": true, "Anchor": "Free", "X": 0.04, "Y": 0.05, "W": 0 },
-                { "Name": "Chat (browser source)", "Type": "Browser", "Anchor": "Free", "X": 0.55, "Y": 0.62, "W": 0, "BrowserWidth": 640, "BrowserHeight": 200, "BrowserFps": 15,
+                { "Name": "Chat (browser source)", "Type": "Browser", "Hotkey": "Ctrl+Shift+F9", "Anchor": "Free", "X": 0.55, "Y": 0.62, "W": 0, "BrowserWidth": 640, "BrowserHeight": 200, "BrowserFps": 15,
                   "Url": "data:text/html,<html><body><div style='margin:12px;padding:14px 20px;border-radius:14px;background:rgba(87,72,199,0.85);color:rgb(255,255,255);font:600 34px Segoe UI,sans-serif'>Chat: hello from a browser source!</div><div id='t' style='margin:0 12px;color:rgb(255,214,102);font:28px Segoe UI,sans-serif'></div><script>let n=0;setInterval(()=>document.getElementById('t').textContent='live tick '+(n++),500)</script></body></html>" }
               ] },
               { "Name": "Be right back", "Sources": [

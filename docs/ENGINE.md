@@ -45,6 +45,24 @@ Decisions:
 
 `HardwareProfile.Classify` sorts PCs into Low / Mid / High tiers. Low-end PCs start on the 30 FPS rung.
 
+## Live show/hide and studio mode
+- **Hidden sources stay in the graph.** `PipelineBuilder.CompositedLayers` keeps them, minus anything under a *visible* full-screen capture. Each source's overlay has a timeline `enable` switch, listed in `PipelineSpec.Visibility`.
+  - The full-screen bottom layer is drawn by padding, not an overlay, so hiding it enables a blank-canvas cover overlay (`overlay@x{id}`, or `overlay@y{id}` for the vertical canvas's blurred background).
+  - `StreamEngine.ApplyLiveState` diffs the wanted switches against what it last sent, then sends `enable 0/1` and `volume@gN volume v`.
+  - Every audio device now always has a named gain stage, so hiding a mic mutes it live.
+  - `Visible`, `VolumeDb`, `Locked` and `Hotkey` are excluded from the layout fingerprint, so changing them never rebuilds.
+- **Transitions** skip the overlays of hidden sources and crossfade each audio device between the scenes' *current* levels.
+- **Studio mode** splits every scene's composite once more and feeds the copies to `streamselect@stage` (`map k` switches it live).
+  - The staged picture is placed left of the program in the preview frame.
+  - Big overlays draw while their scene is on air *or* staged.
+
+## Rebuilds without disconnecting
+Each destination's ffmpeg pusher reads TS from stdin, which is fed by a dedicated thread working through a queue of bus subscriptions.
+- When the compositor stops, the pusher keeps its RTMP connection open for up to 12 s.
+- When the next compositor binds its buses with the same signature (encoder + picture size), the new bus is queued on the same stdin.
+- ffmpeg's mpegts demuxer detects the backward timestamp jump (an `AVFMT_TS_DISCONT` format) and re-bases it, so the destination sees one continuous stream with a short pause.
+- A different signature (for example, the governor's smaller-picture rungs) reconnects as before.
+
 ## Scene transitions
 All scenes are composited in the same filter graph from shared, de-duplicated inputs (`split` per device), then stacked
 bottom → top. Every scene above the first is laid over the stack through its own alpha mask: a black frame whose

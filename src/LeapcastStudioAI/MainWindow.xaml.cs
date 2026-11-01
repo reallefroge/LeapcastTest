@@ -103,7 +103,12 @@ public partial class MainWindow : Window
     private bool _busy;
     private bool _closeConfirmed;
     private bool _ready;
-    private readonly PreviewEditor _hEditor, _vEditor;
+    private readonly PreviewEditor _hEditor, _vEditor, _sEditor;
+    private IEnumerable<PreviewEditor> Editors => new[] { _hEditor, _vEditor, _sEditor };
+    /// <summary>Studio mode: the scene list picks what's staged in the Preview; this is what's on air.</summary>
+    private bool _studio;
+    private StudioScene? _programScene;
+    private WriteableBitmap? _sBitmap;
     private (int W, int H) _hCanvas = (1600, 900), _vCanvas = (720, 1280);
     private int _sizesSeen;
     private bool _syncingSelection;
@@ -127,8 +132,12 @@ public partial class MainWindow : Window
         _engine.PerformanceChanged += _ => Dispatcher.BeginInvoke(() => { _shownPlan = null; UpdatePlanDisplay(); UpdateCanvasLayout(); });
         _audio.DeviceError += msg => Dispatcher.BeginInvoke(() => Log(msg, true));
 
-        _hEditor = MakeEditor(HEditLayer, HViewbox, CanvasKind.Horizontal, () => _hCanvas);
-        _vEditor = MakeEditor(VEditLayer, VViewbox, CanvasKind.Vertical, () => _vCanvas);
+        // in studio mode the Program isn't edited (it's on air); the staged scene is edited in the Preview
+        _hEditor = MakeEditor(HEditLayer, HViewbox, CanvasKind.Horizontal, () => _hCanvas, () => _studio ? null : SelectedScene);
+        _vEditor = MakeEditor(VEditLayer, VViewbox, CanvasKind.Vertical, () => _vCanvas, () => _studio ? null : SelectedScene);
+        _sEditor = MakeEditor(SEditLayer, SViewbox, CanvasKind.Horizontal, () => _hCanvas, () => _studio ? SelectedScene : null);
+        SelectTag(TransitionKindBox, _state.Settings.Transition == "Cut" ? "Cut|0"
+            : $"Fade|{new[] { 300, 600, 1000, 2000 }.MinBy(ms => Math.Abs(ms - _state.Settings.TransitionMs))}");
 
         ScenesList.ItemsSource = _state.Scenes;
         MixerList.ItemsSource = _mixer;
@@ -160,11 +169,11 @@ public partial class MainWindow : Window
         SizeChanged += (_, _) => RedrawEditors();
     }
 
-    private PreviewEditor MakeEditor(Canvas layer, FrameworkElement viewbox, CanvasKind kind, Func<(int, int)> size)
+    private PreviewEditor MakeEditor(Canvas layer, FrameworkElement viewbox, CanvasKind kind, Func<(int, int)> size, Func<StudioScene?> scene)
     {
         var ed = new PreviewEditor(layer, viewbox, kind)
         {
-            Scene = () => SelectedScene,
+            Scene = scene,
             CanvasSize = size,
             Aspect = s => _engine.SourceAspect(s),
             NaturalSize = s => SourceTypes.KindOf(s.Type) is SourceKind.Text or SourceKind.Image ? _engine.SourceSize(s) : null,
@@ -176,9 +185,9 @@ public partial class MainWindow : Window
             _syncingSelection = true;
             SourcesList.SelectedItem = s;
             _syncingSelection = false;
-            (ed == _hEditor ? _vEditor : _hEditor).Select(s);
+            foreach (var other in Editors.Where(o => o != ed)) other.Select(s);
         };
-        ed.Moving += () => { _engine.RefreshLayout(); if (ed == _hEditor) _vEditor.Redraw(); else _hEditor.Redraw(); };
+        ed.Moving += () => { _engine.RefreshLayout(); foreach (var other in Editors.Where(o => o != ed)) other.Redraw(); };
         ed.Committed += () => { SceneEdited(); RedrawEditors(); };
         ed.ContextMenuRequested += (s, k) => ShowSourceMenu(s, k, layer);
         return ed;
@@ -186,8 +195,41 @@ public partial class MainWindow : Window
 
     // ------------------------------------------------------------------ startup / shutdown
 
+    // ------------------------------------------------------------------ hotkeys (show / hide sources)
+
+    private GlobalHotkeys? _hotkeys;
+    private string _registeredHotkeys = "";
+
+    /// <summary>(Re)registers every source hotkey when the set changed. Called on every save.</summary>
+    private void RegisterHotkeys()
+    {
+        if (_hotkeys is null) return;
+        var keys = HotkeyText.Map(_state.Scenes).Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+        string joined = string.Join("|", keys);
+        if (joined == _registeredHotkeys) return;
+        _registeredHotkeys = joined;
+        var failed = _hotkeys.Register(keys);
+        if (failed.Count > 0) Status($"Hotkey {string.Join(", ", failed)} is already used by another program; pick a different one.");
+    }
+
+    private void OnHotkey(string hotkey)
+    {
+        if (!HotkeyText.Map(_state.Scenes).TryGetValue(hotkey, out var group) || group.Count == 0) return;
+        bool shown = HotkeyText.Toggle(group);
+        Status($"{group[0].Name} {(shown ? "shown" : "hidden")} ({hotkey}).");
+        RedrawEditors();
+        SceneEdited(); // live: no rebuild, the stream doesn't notice
+    }
+
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        try
+        {
+            _hotkeys = new GlobalHotkeys(new System.Windows.Interop.WindowInteropHelper(this).Handle);
+            _hotkeys.Pressed += OnHotkey;
+            RegisterHotkeys();
+        }
+        catch { /* hotkeys are a convenience */ }
         RedrawEditors();
         var ffmpeg = FfmpegLocator.Find(_state.Settings.FfmpegPath);
         if (ffmpeg is null)
@@ -237,7 +279,7 @@ public partial class MainWindow : Window
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
         Save();
-        if (_closeConfirmed) { _uiTimer.Stop(); _engine.Dispose(); return; }
+        if (_closeConfirmed) { _uiTimer.Stop(); _hotkeys?.Dispose(); _engine.Dispose(); return; }
         if (_engine.Live)
         {
             var answer = MessageBox.Show(this, "You're live. End the stream on every platform and quit?", "Leapcast Studio AI",
@@ -263,7 +305,8 @@ public partial class MainWindow : Window
 
     private Task ApplyToEngineAsync(bool restart)
     {
-        var scene = SelectedScene;
+        if (_studio && (_programScene is null || !_state.Scenes.Contains(_programScene))) _programScene = SelectedScene;
+        var scene = _studio ? _programScene : SelectedScene;
         if (scene is null) return Task.CompletedTask;
         return _engine.UpdateAsync(_state.Scenes.ToList(), scene, _state.Settings, restart);
     }
@@ -292,7 +335,17 @@ public partial class MainWindow : Window
                     _hBitmap = new WriteableBitmap(pf.HorizontalWidth, pf.Height, 96, 96, PixelFormats.Bgra32, null);
                     HPreviewImage.Source = _hBitmap;
                 }
-                _hBitmap.WritePixels(new Int32Rect(0, 0, pf.HorizontalWidth, pf.Height), _frame, pf.Width * 4, 0);
+                // frame layout: [staged scene (studio mode) | program | vertical]
+                _hBitmap.WritePixels(new Int32Rect(0, 0, pf.HorizontalWidth, pf.Height), _frame, pf.Width * 4, pf.StagedWidth * 4);
+                if (pf.StagedWidth > 0)
+                {
+                    if (_sBitmap is null || _sBitmap.PixelWidth != pf.StagedWidth || _sBitmap.PixelHeight != pf.Height)
+                    {
+                        _sBitmap = new WriteableBitmap(pf.StagedWidth, pf.Height, 96, 96, PixelFormats.Bgra32, null);
+                        SPreviewImage.Source = _sBitmap;
+                    }
+                    _sBitmap.WritePixels(new Int32Rect(0, 0, pf.StagedWidth, pf.Height), _frame, pf.Width * 4, 0);
+                }
                 if (pf.VerticalWidth > 0)
                 {
                     if (_vBitmap is null || _vBitmap.PixelWidth != pf.VerticalWidth || _vBitmap.PixelHeight != pf.Height)
@@ -301,7 +354,7 @@ public partial class MainWindow : Window
                         VPreviewImage.Source = _vBitmap;
                     }
                     // the vertical canvas sits to the right of the horizontal one in the same frame
-                    _vBitmap.WritePixels(new Int32Rect(0, 0, pf.VerticalWidth, pf.Height), _frame, pf.Width * 4, pf.HorizontalWidth * 4);
+                    _vBitmap.WritePixels(new Int32Rect(0, 0, pf.VerticalWidth, pf.Height), _frame, pf.Width * 4, (pf.StagedWidth + pf.HorizontalWidth) * 4);
                 }
                 _frameDirty = false;
             }
@@ -316,6 +369,7 @@ public partial class MainWindow : Window
         bool encoding = st.Live || st.Recording || st.ReplayBuffer;
         PreviewPlaceholder.Visibility = st.Running ? Visibility.Collapsed : Visibility.Visible;
         HPreviewImage.Visibility = st.Running ? Visibility.Visible : Visibility.Hidden;
+        SPreviewImage.Visibility = st.Running && _engine.PreviewFrame.StagedWidth > 0 ? Visibility.Visible : Visibility.Hidden;
         VPreviewImage.Visibility = st.Running && _engine.PreviewFrame.VerticalWidth > 0 ? Visibility.Visible : Visibility.Hidden;
 
         var enabled = _state.Settings.Outputs.Where(o => o.Enabled).ToList();
@@ -405,10 +459,11 @@ public partial class MainWindow : Window
         _hCanvas = (plan.Width, plan.Height);
         _vCanvas = v;
         HCanvasHost.Width = _hCanvas.W; HCanvasHost.Height = _hCanvas.H;
+        SCanvasHost.Width = _hCanvas.W; SCanvasHost.Height = _hCanvas.H;
         VCanvasHost.Width = _vCanvas.W; VCanvasHost.Height = _vCanvas.H;
-        HorizontalCaption.Text = $"HORIZONTAL · {_hCanvas.W}×{_hCanvas.H}";
+        HorizontalCaption.Text = $"{(_studio ? "PROGRAM" : "HORIZONTAL")} · {_hCanvas.W}×{_hCanvas.H}";
         VerticalCaption.Text = $"VERTICAL · {_vCanvas.W}×{_vCanvas.H}";
-        bool vOn = _state.Settings.VerticalCanvas;
+        bool vOn = _state.Settings.VerticalCanvas && !_studio; // studio mode needs the room (the vertical stream keeps running)
         VerticalPanel.Visibility = vOn ? Visibility.Visible : Visibility.Collapsed;
         VerticalColumn.Width = vOn ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
         VerticalToggle.IsChecked = vOn;
@@ -420,7 +475,71 @@ public partial class MainWindow : Window
     private void RedrawEditors()
     {
         _hEditor.Redraw();
+        _sEditor.Redraw();
         if (_state.Settings.VerticalCanvas) _vEditor.Redraw();
+    }
+
+    // ------------------------------------------------------------------ studio mode
+
+    private async void StudioMode_Click(object sender, RoutedEventArgs e)
+    {
+        _studio = !_studio;
+        if (_studio) _programScene = SelectedScene;
+        else if (_programScene is not null && _state.Scenes.Contains(_programScene) && !ReferenceEquals(_programScene, SelectedScene))
+        {
+            // leaving studio mode: the list selection follows what's on air again
+            _studio = true; // so the selection change below only stages, it doesn't switch scenes
+            ScenesList.SelectedItem = _programScene;
+            _studio = false;
+        }
+        ApplyStudioLayout();
+        try { await _engine.SetStudioModeAsync(_studio, SelectedScene); }
+        catch (Exception ex) { Log(ex.Message, true); }
+        Status(_studio ? "Studio mode: pick a scene to preview and edit it, then click Transition to put it on air." : "Studio mode off.");
+    }
+
+    private void ApplyStudioLayout()
+    {
+        StagePanel.Visibility = TransitionPanel.Visibility = _studio ? Visibility.Visible : Visibility.Collapsed;
+        StageColumn.Width = _studio ? new GridLength(3.2, GridUnitType.Star) : new GridLength(0);
+        StudioModeButton.Content = _studio ? "■  Studio mode" : "Studio mode";
+        UpdateCanvasLayout();
+        UpdateStudioLabels();
+        foreach (var ed in Editors) ed.Select(null);
+        RedrawEditors();
+    }
+
+    private void UpdateStudioLabels()
+    {
+        StageSceneLabel.Text = SelectedScene?.Name ?? "";
+        SelectedSceneLabel.Text = (_studio ? _programScene : SelectedScene)?.Name ?? "";
+        HorizontalCaption.Text = $"{(_studio ? "PROGRAM" : "HORIZONTAL")} · {_hCanvas.W}×{_hCanvas.H}";
+    }
+
+    private async void Transition_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_studio || SelectedScene is null) return;
+        if (ReferenceEquals(_programScene, SelectedScene)) { Status($"\"{SelectedScene.Name}\" is already on air."); return; }
+        _programScene = SelectedScene;
+        UpdateStudioLabels();
+        string how = _state.Settings.Transition == "Cut" ? "Cut" : "Fade";
+        await ApplySceneSafelyAsync(restart: false, $"{how} to \"{SelectedScene.Name}\"…", "On air: " + SelectedScene.Name);
+    }
+
+    private void TransitionKind_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || TransitionKindBox.SelectedItem is not ComboBoxItem { Tag: string tag }) return; // not while restoring it
+        var parts = tag.Split('|');
+        _state.Settings.Transition = parts[0];
+        if (int.TryParse(parts[1], out var ms) && ms > 0) _state.Settings.TransitionMs = ms;
+        Save();
+        if (_ready) _ = ApplyToEngineAsync(restart: false); // the engine reads the transition from its settings
+    }
+
+    private static void SelectTag(ComboBox box, string tag)
+    {
+        foreach (var item in box.Items)
+            if (item is ComboBoxItem ci && (ci.Tag as string) == tag) { box.SelectedItem = ci; return; }
     }
 
     private void SetBadge(string text, string bg, string fg)
@@ -817,7 +936,7 @@ public partial class MainWindow : Window
     {
         // only when the preview was clicked last (lists keep their own arrow-key navigation)
         if (Keyboard.FocusedElement is not Canvas focused) return;
-        var ed = ReferenceEquals(focused, VEditLayer) ? _vEditor : _hEditor;
+        var ed = ReferenceEquals(focused, VEditLayer) ? _vEditor : ReferenceEquals(focused, SEditLayer) ? _sEditor : _hEditor;
         if (ed.Selected is null) return;
         int step = (Keyboard.Modifiers & ModifierKeys.Shift) != 0 ? 10 : 1;
         (int dx, int dy) = e.Key switch
@@ -839,6 +958,7 @@ public partial class MainWindow : Window
     {
         try { StateStore.Save(_state); }
         catch (Exception ex) { Status("Could not save settings: " + ex.Message); }
+        RegisterHotkeys();
     }
 
     private async void RefreshScene()
@@ -856,9 +976,16 @@ public partial class MainWindow : Window
         foreach (var s in SelectedScene.Sources.Where(s => s.Visible && SourceTypes.IsAudio(SourceTypes.KindOf(s.Type))))
             _mixer.Add(new MixerChannel { SourceId = s.Id, Name = s.Name });
         _state.SelectedSceneId = SelectedScene.Id;
-        _hEditor.Select(null); _vEditor.Select(null);
+        foreach (var ed in Editors) ed.Select(null);
         RedrawEditors();
         Save();
+        if (_studio)
+        {
+            // studio mode: the selected scene is staged in the Preview; nothing changes on air
+            UpdateStudioLabels();
+            if (_ready) _engine.StageScene(SelectedScene);
+            return;
+        }
         if (_ready)
         {
             string how = _state.Settings.Transition == "Cut" ? "Cut" : "Fade";
@@ -904,8 +1031,7 @@ public partial class MainWindow : Window
     {
         if (_syncingSelection) return;
         var s = SourcesList.SelectedItem as StudioSource;
-        _hEditor.Select(s);
-        _vEditor.Select(s);
+        foreach (var ed in Editors) ed.Select(s);
     }
 
     private void AddScene_Click(object sender, RoutedEventArgs e)
@@ -918,9 +1044,7 @@ public partial class MainWindow : Window
         {
             foreach (var s in SelectedScene.Sources)
             {
-                var copy = System.Text.Json.JsonSerializer.Deserialize<StudioSource>(System.Text.Json.JsonSerializer.Serialize(s))!;
-                copy.Id = Guid.NewGuid();
-                scene.Sources.Add(copy);
+                scene.Sources.Add(s.Copy());
             }
         }
         _state.Scenes.Add(scene);
@@ -956,8 +1080,20 @@ public partial class MainWindow : Window
     private void AddSource_Click(object sender, RoutedEventArgs e)
     {
         if (SelectedScene is null) return;
-        var picker = new SourcePickerWindow { Owner = this };
-        if (picker.ShowDialog() != true || string.IsNullOrWhiteSpace(picker.SelectedType)) return;
+        var picker = new SourcePickerWindow(_state.Scenes, SelectedScene) { Owner = this };
+        if (picker.ShowDialog() != true) return;
+        if (picker.SelectedExisting is { } existing)
+        {
+            // a copy with every setting: no properties dialog, it's ready to go
+            var copy = existing.Copy();
+            SelectedScene.Sources.Add(copy);
+            SourcesList.SelectedItem = copy;
+            Status($"Added {copy.Name} with the same settings as in the other scene.");
+            SceneEdited();
+            RedrawEditors();
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(picker.SelectedType)) return;
         var source = new StudioSource { Type = picker.SelectedType, Name = picker.SelectedType };
         if (source.Type == SourceTypes.Camera) source.Name = "Webcam";
         if (source.Type == SourceTypes.Window) source.Name = "Wizard101 window";

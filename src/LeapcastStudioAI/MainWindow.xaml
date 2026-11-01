@@ -128,11 +128,37 @@
         <Border Grid.Row="0" Background="#07080C" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="10" Padding="10">
           <Grid>
             <Grid.ColumnDefinitions>
+              <ColumnDefinition x:Name="StageColumn" Width="0"/>
+              <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="3.2*"/>
               <ColumnDefinition x:Name="VerticalColumn" Width="0"/>
             </Grid.ColumnDefinitions>
-            <!-- Horizontal canvas -->
-            <DockPanel Grid.Column="0">
+            <!-- Studio mode: the staged scene (editable) -->
+            <DockPanel x:Name="StagePanel" Grid.Column="0" Visibility="Collapsed">
+              <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
+                <TextBlock x:Name="StageSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#BEB6FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="PREVIEW" Style="{StaticResource SectionHeader}" Margin="0" ToolTip="Arrange the next scene here; nothing changes on air until you click Transition"/>
+              </DockPanel>
+              <Viewbox x:Name="SViewbox" Stretch="Uniform">
+                <Grid x:Name="SCanvasHost" Width="1600" Height="900" Background="#0E1016">
+                  <Image x:Name="SPreviewImage" Stretch="Fill" RenderOptions.BitmapScalingMode="Linear"/>
+                  <Canvas x:Name="SEditLayer" Background="Transparent" ClipToBounds="True"/>
+                </Grid>
+              </Viewbox>
+            </DockPanel>
+            <StackPanel x:Name="TransitionPanel" Grid.Column="1" VerticalAlignment="Center" Margin="10,0" Visibility="Collapsed" Width="118">
+              <Button x:Name="TransitionButton" Content="Transition ➜" Style="{StaticResource PrimaryButton}" Click="Transition_Click"
+                      ToolTip="Put the Preview scene on air (Program)" Padding="8,9"/>
+              <ComboBox x:Name="TransitionKindBox" Margin="0,8,0,0" SelectionChanged="TransitionKind_SelectionChanged" ToolTip="How the scene switch looks">
+                <ComboBoxItem Content="Fade · 0.3 s" Tag="Fade|300"/>
+                <ComboBoxItem Content="Fade · 0.6 s" Tag="Fade|600"/>
+                <ComboBoxItem Content="Fade · 1 s" Tag="Fade|1000"/>
+                <ComboBoxItem Content="Fade · 2 s" Tag="Fade|2000"/>
+                <ComboBoxItem Content="Cut" Tag="Cut|0"/>
+              </ComboBox>
+            </StackPanel>
+            <!-- Horizontal canvas (Program in studio mode) -->
+            <DockPanel Grid.Column="2">
               <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
                 <TextBlock x:Name="SelectedSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#BEB6FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
                 <TextBlock x:Name="HorizontalCaption" Text="HORIZONTAL · 16:9" Style="{StaticResource SectionHeader}" Margin="0" TextTrimming="CharacterEllipsis"/>
@@ -152,7 +178,7 @@
               </Grid>
             </DockPanel>
             <!-- Vertical canvas (TikTok / Shorts) -->
-            <DockPanel x:Name="VerticalPanel" Grid.Column="1" Margin="12,0,0,0" Visibility="Collapsed">
+            <DockPanel x:Name="VerticalPanel" Grid.Column="3" Margin="12,0,0,0" Visibility="Collapsed">
               <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
                 <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" FontSize="11" Padding="4,2"
                         Click="ResetVertical_Click" ToolTip="Reset the vertical layout to automatic (camera on top, game below)"/>
@@ -176,6 +202,8 @@
             <Button x:Name="ReplayBufferButton" Content="Replay buffer" Click="ReplayBuffer_Click"
                     ToolTip="Keep the last seconds ready to save, even when you're not live"/>
             <Button x:Name="SaveReplayButton" Content="Save replay" Click="Replay_Click" ToolTip="Save the last seconds as a clip"/>
+            <Button x:Name="StudioModeButton" Content="Studio mode" Click="StudioMode_Click"
+                    ToolTip="Preview the next scene (and edit it) beside what's on air, then click Transition"/>
           </StackPanel>
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
             <Border Style="{StaticResource Chip}" ToolTip="Frames per second (actual / planned)">
@@ -291,7 +319,7 @@
     <!-- ===================== Status bar ===================== -->
     <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="14,5">
       <DockPanel>
-        <TextBlock DockPanel.Dock="Right" Text="v0.7.3 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
+        <TextBlock DockPanel.Dock="Right" Text="v0.8.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
         <TextBlock x:Name="HardwareLabel" DockPanel.Dock="Right" Text="Detecting hardware…" Foreground="{StaticResource MutedBrush}" FontSize="11"
                    VerticalAlignment="Center" Margin="0,0,16,0" TextTrimming="CharacterEllipsis" MaxWidth="560"/>
         <TextBlock x:Name="EngineStatus" Text="Starting…" Foreground="{StaticResource WarnBrush}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>

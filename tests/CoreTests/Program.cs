@@ -195,6 +195,47 @@ var cut3 = WindowCaptureBridge.PlanGpuCut(2560, 1080, (0, 0, 0, 0), Anchors.Fill
 Check(cut3 is { L: 320, R: 320, T: 0, B: 0 }, $"GPU cut: an ultrawide window loses its sides ({cut3})");
 
 // ---------------------------------------------------------------- performance governor (pure logic)
+Console.WriteLine("Hotkeys, add existing source, live show/hide in the graph");
+Check(HotkeyText.Normalize("shift+ctrl+f1") == "Ctrl+Shift+F1" && HotkeyText.Normalize("Alt+1") == "Alt+1"
+      && HotkeyText.Normalize("Ctrl+Shift") == "" && HotkeyText.Normalize("Ctrl+A+B") == "",
+    $"hotkey text is normalised; modifiers alone or two keys are rejected ({HotkeyText.Normalize("shift+ctrl+f1")})");
+{
+    var s1 = new StudioScene { Name = "Game" }; var s2 = new StudioScene { Name = "BRB" };
+    var camA = new StudioSource { Name = "Webcam", Type = SourceTypes.Camera, DeviceName = "cam", Hotkey = "ctrl+shift+1", CropLeft = 12, X = 0.6 };
+    s1.Sources.Add(camA);
+    s1.Sources.Add(new StudioSource { Name = "Chat", Type = SourceTypes.Browser, Url = "https://example.com/chat" });
+    s2.Sources.Add(new StudioSource { Name = "BRB card", Type = SourceTypes.Image });
+    var offered = SourceLibrary.FromOtherScenes(new[] { s1, s2 }, s2);
+    Check(offered.Count == 2 && offered.All(o => o.Scene == "Game"), $"\"+\" offers the sources of other scenes ({string.Join(", ", offered.Select(o => o.Source.Name))})");
+    var camB = camA.Copy();
+    s2.Sources.Add(camB);
+    Check(camB.Id != camA.Id && camB.DeviceName == "cam" && camB.CropLeft == 12 && camB.X == 0.6 && camB.Hotkey == camA.Hotkey,
+        "adding one makes a copy with every setting and its own id");
+    Check(SourceLibrary.FromOtherScenes(new[] { s1, s2 }, s2).All(o => o.Source.Name != "Webcam"), "…and it isn't offered again in that scene");
+    var map = HotkeyText.Map(new[] { s1, s2 });
+    Check(map.TryGetValue("Ctrl+Shift+1", out var group) && group.Count == 2, "one hotkey switches the source in every scene it's in");
+    bool shownNow = HotkeyText.Toggle(group!);
+    Check(!shownNow && !camA.Visible && !camB.Visible, "pressing it hides them all…");
+    HotkeyText.Toggle(group!);
+    Check(camA.Visible && camB.Visible, "…and pressing it again shows them all");
+    // hidden sources stay in the graph, switched off; the full-screen bottom layer gets a cover
+    var g1 = new StudioScene { Name = "g" };
+    var game = new StudioSource { Name = "Game", Type = SourceTypes.Display, Anchor = Anchors.Fill, Visible = false };
+    var logo = new StudioSource { Name = "Logo", Type = SourceTypes.Image, FilePath = "x.png", Anchor = Anchors.TopRight, Visible = false };
+    g1.Sources.Add(game); g1.Sources.Add(logo);
+    var gs = PipelineBuilder.Build(new PipelineRequest
+    {
+        Scenes = new[] { g1 }, Plan = new EncodePlan(1280, 720, 30, 2500, 22, "libx264", EncoderTier.Rich, false, false, "veryfast", "t", Array.Empty<string>()),
+        InputOverride = (src, o) => new InputSpec(new[] { "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30" }, true),
+    });
+    Check(gs.FilterGraph.Contains($"overlay@x{game.Id:N}=eof_action=repeat:format=yuv420:enable=1")
+          && gs.FilterGraph.Contains($"{PipelineBuilder.OverlayName(logo.Id, CanvasKind.Horizontal)}=") && gs.Visibility.Count == 2,
+        "hidden sources are built in, switched off (cover on the bottom layer, overlay off for the logo)");
+    string lockBefore2 = PipelineBuilder.LayoutFingerprint(new[] { g1 }, 1280, 720, null);
+    logo.Visible = true;
+    Check(PipelineBuilder.LayoutFingerprint(new[] { g1 }, 1280, 720, null) == lockBefore2, "showing a source doesn't change the graph (no rebuild)");
+}
+
 Console.WriteLine("Performance governor");
 Check(HardwareProfile.Classify(4, 8L << 30, new[] { new ProbedEncoder("libx264", EncoderTier.Rich) }) == HardwareTier.Low
       && HardwareProfile.Classify(8, 16L << 30, new[] { new ProbedEncoder("libx264", EncoderTier.Rich) }) == HardwareTier.Low
@@ -445,6 +486,13 @@ async Task SyncSection()
     engine.CameraDeviceOverride = oldCam;
 }
 
+if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_LIVE") == "1")
+{
+    await LiveSwitchSection(new StudioScene { Name = "light" });
+    await engine.StopAllAsync();
+    Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(S)");
+    return failures == 0 ? 0 : 1;
+}
 if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_ADAPT") == "1")
 {
     var light0 = new StudioScene { Name = "light" };
@@ -866,6 +914,9 @@ await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"
 // ---------------------------------------------------------------- adapting to an overloaded PC
 await AdaptSection(light);
 
+// ---------------------------------------------------------------- show/hide live, studio mode, rebuilds stay connected
+await LiveSwitchSection(light);
+
 // ---------------------------------------------------------------- reconnects
 Console.WriteLine("A destination that drops reconnects on its own; the others don't notice");
 var srvA3 = RtmpServer.Start(ffmpeg, portA, "a", Path.Combine(liveDir, "a3.flv"));
@@ -906,6 +957,118 @@ foreach (var srv in new[] { srvA5, srvB5 }) { srv.WaitForExit(4000); try { srv.K
 engine.Dispose();
 Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(S)");
 return failures == 0 ? 0 : 1;
+
+async Task LiveSwitchSection(StudioScene light)
+{
+    Console.WriteLine("Showing / hiding sources is live (no rebuild), including the full-screen bottom layer and audio");
+    string bluePng = Path.Combine(work, "blue.png"), redPng = Path.Combine(work, "red2.png");
+    await RunAsync(new[] { "-y", "-f", "lavfi", "-i", "color=c=blue:s=1280x720", "-frames:v", "1", bluePng });
+    await RunAsync(new[] { "-y", "-f", "lavfi", "-i", "color=c=red:s=1280x720", "-frames:v", "1", redPng });
+    byte[]? frame = null;
+    void Take(byte[] f) { var pf = engine.PreviewFrame; if (f.Length == pf.Width * pf.Height * 4) frame = (byte[])f.Clone(); }
+    // colour at (fx, fy) of a preview part starting xOff pixels into the frame: (R, G, B)
+    (int r, int g, int b) Px(int xOff, int partWidth, double fx, double fy)
+    {
+        var f = frame; var pf = engine.PreviewFrame;
+        if (f is null) return (-1, -1, -1);
+        int x = xOff + (int)(fx * partWidth), y = (int)(fy * pf.Height);
+        int i = (y * pf.Width + x) * 4;
+        return (f[i + 2], f[i + 1], f[i]);
+    }
+    (int r, int g, int b) Program(double fx, double fy) => Px(engine.PreviewFrame.StagedWidth, engine.PreviewFrame.HorizontalWidth, fx, fy);
+    engine.FrameReady += Take;
+
+    var hs = new StudioScene { Name = "hide test" };
+    var bgCam = new StudioSource { Name = "Game", Type = SourceTypes.Camera, DeviceName = "synthetic", Anchor = Anchors.Fill, CameraDenoise = false };
+    var card = new StudioSource { Name = "Red card", Type = SourceTypes.Image, FilePath = redPng, Anchor = Anchors.Free, X = 0.05, Y = 0.05, W = 0.2 };
+    var mic = new StudioSource { Name = "Mic", Type = SourceTypes.Microphone };
+    hs.Sources.Add(bgCam); hs.Sources.Add(card); hs.Sources.Add(mic);
+    var hset = WithEncoder(settings, "libx264");
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await engine.SetReplayBufferAsync(true); // an encode running, like a stream or recording
+    await Task.Delay(3500);
+    int starts = engine.PipelineStarts, switches = engine.LiveSwitches;
+    var onCard = Program(0.15, (0.05 * 360 + 36) / 360);
+    Check(onCard.r > 150 && onCard.g < 80, $"card shown ({onCard})");
+    card.Visible = false;
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await Task.Delay(1200);
+    var hidden = Program(0.15, (0.05 * 360 + 36) / 360);
+    Check(!(hidden.r > 150 && hidden.g < 80) && engine.PipelineStarts == starts && engine.LiveSwitches > switches,
+        $"hiding the card takes it off the picture live ({hidden}), starts {starts} → {engine.PipelineStarts}");
+    card.Visible = true;
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await Task.Delay(1200);
+    onCard = Program(0.15, (0.05 * 360 + 36) / 360);
+    Check(onCard.r > 150 && engine.PipelineStarts == starts, $"showing it again is live too ({onCard})");
+    var baseOn = Program(0.7, 0.7);
+    bgCam.Visible = false;
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await Task.Delay(1200);
+    var baseOff = Program(0.7, 0.7);
+    Check(engine.PipelineStarts == starts && Math.Abs(baseOff.r - 14) < 20 && Math.Abs(baseOff.b - 22) < 20,
+        $"hiding the full-screen bottom layer shows the blank canvas, live ({baseOn} → {baseOff})");
+    bgCam.Visible = true; mic.Visible = false;
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await Task.Delay(1200);
+    Check(engine.PipelineStarts == starts && Program(0.7, 0.7) != baseOff, "the bottom layer comes back and muting the mic by hiding it is live too");
+    mic.Visible = true;
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await Task.Delay(500);
+    Check(!ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")).Contains("ret:-"), "ffmpeg accepted every show/hide command");
+
+    Console.WriteLine("Studio mode: the Preview stages a scene beside the Program; Transition puts it on air");
+    var blueScene = new StudioScene { Name = "Blue" };
+    blueScene.Sources.Add(new StudioSource { Name = "Blue card", Type = SourceTypes.Image, FilePath = bluePng, Anchor = Anchors.Fill });
+    var redScene = new StudioScene { Name = "Red" };
+    redScene.Sources.Add(new StudioSource { Name = "Red card", Type = SourceTypes.Image, FilePath = redPng, Anchor = Anchors.Fill });
+    var studioScenes = new List<StudioScene> { hs, redScene, blueScene };
+    await engine.UpdateAsync(studioScenes, redScene, hset, false);
+    await engine.SetStudioModeAsync(true, blueScene);
+    await Task.Delay(3000);
+    var pf = engine.PreviewFrame;
+    var staged = Px(0, pf.StagedWidth, 0.5, 0.5); var prog = Program(0.5, 0.5);
+    Check(pf.StagedWidth > 0 && staged.b > 200 && staged.r < 50 && prog.r > 200 && prog.b < 50,
+        $"Preview shows the staged scene (blue {staged}), Program what's on air (red {prog})");
+    int sStarts = engine.PipelineStarts;
+    engine.StageScene(hs);
+    await Task.Delay(1200);
+    staged = Px(0, pf.StagedWidth, 0.15, (0.05 * 360 + 36) / 360);
+    Check(staged.r > 150 && staged.g < 80 && Program(0.5, 0.5).r > 200 && engine.PipelineStarts == sStarts,
+        $"staging another scene is instant and doesn't touch the Program ({staged})");
+    engine.StageScene(blueScene);
+    await engine.UpdateAsync(studioScenes, blueScene, hset, false); // Transition
+    await Task.Delay(2000);
+    prog = Program(0.5, 0.5);
+    Check(prog.b > 200 && prog.r < 50 && engine.PipelineStarts == sStarts, $"Transition puts the staged scene on air, no rebuild ({prog})");
+    await engine.SetStudioModeAsync(false);
+    await Task.Delay(1500);
+    Check(engine.PreviewFrame.StagedWidth == 0 && engine.Running, "studio mode off: just the Program again");
+    engine.FrameReady -= Take;
+    await engine.SetReplayBufferAsync(false);
+
+    Console.WriteLine("A rebuild while live keeps the destination connected (no reconnect)");
+    var srvH = RtmpServer.Start(ffmpeg, portA, "a", Path.Combine(liveDir, "handover.flv"));
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await engine.StartOutputsAsync(new[] { (outA.Id, (string?)null) });
+    await Task.Delay(7000);
+    int hStarts = engine.PipelineStarts, handovers = engine.OutputHandovers;
+    var liveBefore = Out(outA)?.LiveFor ?? TimeSpan.Zero;
+    card.CropLeft = 40; // changes the graph: rebuild
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await Task.Delay(8000);
+    var o = Out(outA);
+    Check(engine.PipelineStarts == hStarts + 1 && engine.OutputHandovers > handovers && !srvH.HasExited
+          && o?.State == OutputState.Live && (o?.LiveFor ?? TimeSpan.Zero) > liveBefore + TimeSpan.FromSeconds(7),
+        $"rebuilt (starts {hStarts} → {engine.PipelineStarts}) and the same connection carried on ({o?.State}, live {o?.LiveFor.TotalSeconds:0}s, server {(srvH.HasExited ? "disconnected" : "still connected")})");
+    await engine.StopOutputAsync(outA.Id);
+    srvH.WaitForExit(5000);
+    try { srvH.Kill(true); } catch { }
+    var hp = await ProbeAsync(Path.Combine(liveDir, "handover.flv"));
+    Check(hp.ok && hp.duration > 12, $"the destination received one continuous stream across the rebuild ({hp.duration:0.0}s)");
+    card.CropLeft = 0;
+    await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
+}
 
 // ---------------------------------------------------------------- helpers
 static string ReadShared(string path)

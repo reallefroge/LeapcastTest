@@ -169,6 +169,8 @@ public sealed class StreamEngine : IDisposable
     public PlanSet? CurrentPlans { get; private set; }
     /// <summary>How many times an ffmpeg pipeline has been started (diagnostics/tests: transitions must not bump it).</summary>
     public int PipelineStarts { get; private set; }
+    /// <summary>Pipeline rebuilds the live destinations rode through without reconnecting.</summary>
+    public int OutputHandovers => _outputs.Handovers;
     public string CameraStats() => _cameras.Stats();
     public bool IsOutputActive(Guid id) => _outputs.IsActive(id);
     /// <summary>Diagnostics/tests: process id of the running compositor/encoder.</summary>
@@ -176,7 +178,44 @@ public sealed class StreamEngine : IDisposable
     public IReadOnlyList<OutputStatus> OutputStatuses() => _outputs.Snapshot();
 
     /// <summary>Preview frame layout: total width/height, and where the vertical canvas starts (0 = none).</summary>
-    public (int Width, int Height, int HorizontalWidth, int VerticalWidth) PreviewFrame { get; private set; } = (768, 432, 768, 0);
+    /// <summary>Preview frame: [staged scene (studio mode) | program | vertical canvas], side by side.</summary>
+    public (int Width, int Height, int HorizontalWidth, int VerticalWidth, int StagedWidth) PreviewFrame { get; private set; } = (768, 432, 768, 0, 0);
+
+    // ------------------------------------------------------------------ studio mode
+
+    /// <summary>Studio mode: the Preview shows a staged scene next to the Program; "Transition" puts it on air.</summary>
+    public bool StudioMode { get; private set; }
+    private int _stagedIndex;
+
+    /// <summary>Turns studio mode on/off (rebuilds the preview once; live outputs stay connected).</summary>
+    public Task SetStudioModeAsync(bool on, StudioScene? staged = null) => Locked(async () =>
+    {
+        if (staged is not null && IndexOf(staged) is int i and >= 0) _stagedIndex = i; else _stagedIndex = _activeIndex;
+        if (StudioMode == on) return;
+        StudioMode = on;
+        if (_runner is not null) await RestartAsync();
+    });
+
+    /// <summary>Studio mode: shows <paramref name="scene"/> in the Preview (instant; nothing changes on air).</summary>
+    public void StageScene(StudioScene scene)
+    {
+        int i = IndexOf(scene);
+        if (i < 0) return;
+        _stagedIndex = i;
+        var r = _runner; var spec = _runnerSpec;
+        if (r is null || spec is null || spec.PreviewStageWidth == 0 || ActiveSceneOnly) return;
+        if (spec.SceneCount > 1) r.SendCommands(new[] { $"{PipelineBuilder.StageFilter} -1 map {i}" });
+        ApplyLiveState(); // the staged scene's big overlays draw, the previously staged one's stop
+    }
+
+    private int IndexOf(StudioScene scene)
+    {
+        int i = _scenes.FindIndex(s => ReferenceEquals(s, scene));
+        return i >= 0 ? i : _scenes.FindIndex(s => s.Id == scene.Id);
+    }
+
+    /// <summary>The staged scene's index in the composited list (null when it isn't composited).</summary>
+    private int? StagedComposited => StudioMode && !ActiveSceneOnly && _stagedIndex < _scenes.Count ? _stagedIndex : null;
 
     /// <summary>Picture size of a source as ffmpeg reported it (null until the pipeline has opened it once).</summary>
     public (int W, int H)? SourceSize(StudioSource s) =>
@@ -268,7 +307,7 @@ public sealed class StreamEngine : IDisposable
         var set = OutputBudget.Resolve(s, pool, vertical, Encoders, Environment.ProcessorCount, _governor.BitrateScale);
         var plan = set.Main;
         var reasons = plan.Reasons.ToList();
-        var shown = _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)).ToList();
+        var shown = _scenes.SelectMany(sc => PipelineBuilder.CompositedLayers(sc.Sources)).ToList();
         // Old-style (GDI) capture can't deliver 60 smooth frames from a DirectX game; 60 FPS output would just
         // repeat frames unevenly (judder). Cap at 30 when it's in use.
         bool gdi = shown.Any(x =>
@@ -316,7 +355,7 @@ public sealed class StreamEngine : IDisposable
     /// <summary>Scenes other than the one on air capture or draw something (what "active scene only" saves).</summary>
     private bool HasHiddenSceneWork() =>
         _scenes.Count > 1 && _scenes.Where((sc, i) => i != _activeIndex)
-            .Any(sc => PipelineBuilder.VisibleLayers(sc.Sources).Any(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))));
+            .Any(sc => PipelineBuilder.CompositedLayers(sc.Sources).Any(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))));
 
     /// <summary>The performance governor has put the pipeline in "active scene only" mode.</summary>
     private bool ActiveSceneOnly => Performance.ActiveSceneOnly && _scenes.Count > 1;
@@ -369,6 +408,7 @@ public sealed class StreamEngine : IDisposable
             Transition(_activeIndex, index);
             _activeIndex = index;
         }
+        ApplyLiveState(); // sources shown/hidden, volume changes: switched live, no rebuild
         RefreshLayout();
         await ReconcileAsync(); // e.g. vertical canvas switched on, an output enabled with its own encoder
     });
@@ -404,9 +444,9 @@ public sealed class StreamEngine : IDisposable
         {
             foreach (var sc in _scenes)
             {
-                var layers = PipelineBuilder.VerticalLayers(sc.Sources.ToList())
+                var layers = PipelineBuilder.VerticalLayers(sc.Sources.ToList(), includeHidden: true)
                     .Where(s => names.Contains(PipelineBuilder.OverlayName(s.Id, CanvasKind.Vertical))).ToList();
-                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto);
+                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto && x.Visible);
                 foreach (var src in layers)
                 {
                     var rect = LayoutMath.Vertical(src, vc.W, vc.H, PipelineBuilder.AspectFor(src, _knownSizes), hasCam);
@@ -451,7 +491,7 @@ public sealed class StreamEngine : IDisposable
         var r = _runner; var spec = _runnerSpec;
         if (r is null || spec is null) return;
         double seconds = Settings.Transition == "Cut" ? 0.001 : Math.Clamp(Settings.TransitionMs, 100, 3000) / 1000.0;
-        PipelineBuilder.TransitionCommands(spec, from, to, 0, seconds, out int lineCount);
+        PipelineBuilder.TransitionCommands(spec, from, to, 0, seconds, out int lineCount, IsHiddenFilter, CurrentGains);
         // Schedule against the pipeline's own clock (ffmpeg's latest output time, which tracks the frames being
         // composited), not the wall clock: if the machine falls behind real time, a wall-clock start time would
         // lie seconds in the future and the switch would appear frozen. Start after every command line has landed
@@ -460,10 +500,92 @@ public sealed class StreamEngine : IDisposable
         bool fresh = _lastProgress is not null && (DateTime.UtcNow - _lastProgressAt) < TimeSpan.FromSeconds(1.5);
         double now = fresh && !double.IsNaN(reported) ? reported : wall;
         double startAt = now + 0.15 * lineCount + 0.2;
-        var lines = PipelineBuilder.TransitionCommands(spec, from, to, startAt, seconds, out _);
+        var lines = PipelineBuilder.TransitionCommands(spec, from, to, startAt, seconds, out _, IsHiddenFilter, CurrentGains);
         _pumpPausedUntil = DateTime.UtcNow + TimeSpan.FromSeconds(0.15 * lines.Count + 0.3); // keep stdin free for the fade
         r.SendCommands(lines);
+        // what the switch left on: the incoming scene's big overlays, the outgoing scene's off; levels of the new scene
+        lock (_liveLock)
+        {
+            foreach (var st in spec.Visibility.Where(v => v.OnlyWhileSceneShown && (v.Scene == from || v.Scene == to)))
+                _sentEnable[st.Filter] = (st.Scene == to || st.Scene == StagedComposited) && !IsHiddenFilter(st.Filter);
+            foreach (var g in spec.AudioGains) { var lv = CurrentGains(g); if (to < lv.Count) _sentGain[g.FilterName] = lv[to]; }
+        }
     }
+
+    // ------------------------------------------------------------------ live show / hide / volume
+
+    private readonly object _liveLock = new();
+    private readonly Dictionary<string, bool> _sentEnable = new();
+    private readonly Dictionary<string, double> _sentGain = new();
+    private Dictionary<string, Guid> _filterSource = new();
+
+    private StudioSource? SourceById(Guid id) =>
+        _scenes.SelectMany(sc => sc.Sources).FirstOrDefault(s => s.Id == id);
+
+    /// <summary>Is this overlay's source hidden right now (transitions must leave it switched off)?</summary>
+    private bool IsHiddenFilter(string filter) =>
+        _filterSource.TryGetValue(filter, out var id) && SourceById(id) is { Visible: false };
+
+    /// <summary>Each scene's level for an audio device as the scenes are now (hidden = 0).</summary>
+    private IReadOnlyList<double> CurrentGains(AudioGainStage g) => PipelineBuilder.SceneGains(Composited(), g.Key);
+
+    private int ActiveCompositedIndex => ActiveSceneOnly ? 0 : _activeIndex;
+
+    /// <summary>What a visibility switch should be now.</summary>
+    private bool WantEnabled(VisibilityStage st, int active)
+    {
+        var s = SourceById(st.SourceId);
+        bool visible = s?.Visible ?? false;
+        return st.Cover ? !visible : visible && (!st.OnlyWhileSceneShown || st.Scene == active || st.Scene == StagedComposited);
+    }
+
+    /// <summary>Remember what the freshly built graph starts with.</summary>
+    private void InitLiveState(PipelineSpec spec)
+    {
+        int active = ActiveCompositedIndex;
+        lock (_liveLock)
+        {
+            _sentEnable.Clear(); _sentGain.Clear();
+            _filterSource = spec.Visibility.GroupBy(v => v.Filter).ToDictionary(g => g.Key, g => g.First().SourceId);
+            foreach (var st in spec.Visibility) _sentEnable[st.Filter] = WantEnabled(st, active);
+            foreach (var g in spec.AudioGains) if (active < g.LinearGainPerScene.Count) _sentGain[g.FilterName] = g.LinearGainPerScene[active];
+        }
+    }
+
+    /// <summary>
+    /// Shows/hides sources and sets audio levels in the running pipeline: a timeline switch on the overlay (or a cover
+    /// over the bottom layer) and the device's gain stage. Instant, and the stream never notices.
+    /// </summary>
+    private void ApplyLiveState()
+    {
+        var r = _runner; var spec = _runnerSpec;
+        if (r is null || spec is null) return;
+        int active = ActiveCompositedIndex;
+        var lines = new List<string>();
+        lock (_liveLock)
+        {
+            foreach (var st in spec.Visibility)
+            {
+                bool want = WantEnabled(st, active);
+                if (_sentEnable.TryGetValue(st.Filter, out var cur) && cur == want) continue;
+                _sentEnable[st.Filter] = want;
+                lines.Add($"{st.Filter} -1 enable {(want ? 1 : 0)}");
+            }
+            foreach (var g in spec.AudioGains)
+            {
+                var lv = CurrentGains(g);
+                if (active >= lv.Count) continue;
+                double want = lv[active];
+                if (_sentGain.TryGetValue(g.FilterName, out var cur) && Math.Abs(cur - want) < 1e-4) continue;
+                _sentGain[g.FilterName] = want;
+                lines.Add($"{g.FilterName} -1 volume {want.ToString("0.######", CultureInfo.InvariantCulture)}");
+            }
+        }
+        if (lines.Count > 0) { LiveSwitches += lines.Count; r.SendCommands(lines); }
+    }
+
+    /// <summary>Diagnostics/tests: show/hide/volume commands sent without a rebuild.</summary>
+    public int LiveSwitches { get; private set; }
 
     private string RunnerFingerprint(IEnumerable<StudioScene> scenes)
     {
@@ -812,7 +934,7 @@ public sealed class StreamEngine : IDisposable
         // Pre-render text overlays.
         var rendered = new Dictionary<Guid, string>();
         var scenes = Composited();
-        foreach (var s in scenes.SelectMany(sc => sc.Sources).Where(s => s.Visible && SourceTypes.KindOf(s.Type) == SourceKind.Text))
+        foreach (var s in scenes.SelectMany(sc => sc.Sources).Where(s => SourceTypes.KindOf(s.Type) == SourceKind.Text))
         {
             try { if (_platform.RenderText(s, plan.Height) is { } png) rendered[s.Id] = png; } catch { }
         }
@@ -824,8 +946,8 @@ public sealed class StreamEngine : IDisposable
 
         // Webcams: one warm reader per device, fed to this run through counted pipes.
         var camUses = new Dictionary<string, (InputSpec device, List<StudioSource> uses)>();
-        var shownVideo = scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)
-            .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources) : Enumerable.Empty<StudioSource>()));
+        var shownVideo = scenes.SelectMany(sc => PipelineBuilder.CompositedLayers(sc.Sources)
+            .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources, includeHidden: true) : Enumerable.Empty<StudioSource>()));
         foreach (var src in shownVideo.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera))
         {
             string key = PipelineBuilder.InputKey(src);
@@ -836,8 +958,8 @@ public sealed class StreamEngine : IDisposable
         var camFeeds = _cameras.Open(ffmpeg, camUses, plan.Width, plan.Height, plan.Fps, origin);
         var winFeeds = _windows.Open(ffmpeg, WindowNeeds(plan, shape.Vertical ? vSize : null), plan.Fps, origin);
         var browserUses = new Dictionary<string, StudioSource>();
-        foreach (var src in scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)
-                     .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources) : Enumerable.Empty<StudioSource>()))
+        foreach (var src in scenes.SelectMany(sc => PipelineBuilder.CompositedLayers(sc.Sources)
+                     .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources, includeHidden: true) : Enumerable.Empty<StudioSource>()))
                      .Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && x.Url.Trim().Length > 0))
             browserUses.TryAdd(PipelineBuilder.InputKey(src), src);
         var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)));
@@ -846,9 +968,12 @@ public sealed class StreamEngine : IDisposable
 
         // One TS bus per encode that feeds destinations; outputs subscribe/unsubscribe at will.
         var buses = new Dictionary<string, TsBus>();
+        // what each destination was connected with: same codec + picture size → a rebuild keeps the connection
+        var signatures = new Dictionary<string, string>();
+        static string Sig(EncodePlan p) => $"{p.Encoder}|{p.Width}x{p.Height}";
         var extra = new List<(string BusPath, bool Vertical, EncodePlan Plan)>();
-        if (shape.MainBus) buses["main"] = new TsBus(_pipeDir, "main");
-        if (shape.VerticalEncode) buses["vertical"] = new TsBus(_pipeDir, "vertical");
+        if (shape.MainBus) { buses["main"] = new TsBus(_pipeDir, "main"); signatures["main"] = Sig(plan); }
+        if (shape.VerticalEncode && plans.Vertical is not null) { buses["vertical"] = new TsBus(_pipeDir, "vertical"); signatures["vertical"] = Sig(plans.Vertical); }
         if (shape.Own.Length > 0)
             foreach (var o in Pool(Settings).Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || shape.Vertical)))
             {
@@ -856,6 +981,7 @@ public sealed class StreamEngine : IDisposable
                 if (buses.ContainsKey(k) || !plans.Own.TryGetValue(o.Id, out var op)) continue;
                 var bus = new TsBus(_pipeDir, "own" + extra.Count);
                 buses[k] = bus;
+                signatures[k] = Sig(op);
                 extra.Add((bus.Path, o.IsVertical, op));
             }
 
@@ -863,6 +989,7 @@ public sealed class StreamEngine : IDisposable
         {
             Scenes = scenes,
             ActiveSceneIndex = ActiveSceneOnly ? 0 : _activeIndex,
+            StagedSceneIndex = StagedComposited,
             Plan = plan,
             MainBusPath = buses.TryGetValue("main", out var mb) ? mb.Path : null,
             VerticalCanvas = shape.Vertical ? vSize : null,
@@ -892,11 +1019,12 @@ public sealed class StreamEngine : IDisposable
         try { spec = PipelineBuilder.Build(request); }
         catch { foreach (var b in buses.Values) b.Dispose(); throw; }
         _runnerSpec = spec;
+        InitLiveState(spec);
         _runnerRequest = request;
         _runnerOrigin = request.WallclockOrigin;
         _runnerFingerprint = RunnerFingerprint(scenes);
         var (phw, pvw, ph) = spec.PreviewLayout;
-        PreviewFrame = (phw + pvw, ph, phw, pvw);
+        PreviewFrame = (spec.PreviewStageWidth + phw + pvw, ph, phw, pvw, spec.PreviewStageWidth);
         foreach (var w in spec.Warnings) Message?.Invoke(this, new EngineMessageEventArgs(w, false));
         lock (_posLock)
         {
@@ -931,7 +1059,7 @@ public sealed class StreamEngine : IDisposable
         lock (_progressWindow) _progressWindow.Clear();
         _health = _outputs.AnyActive ? "Connecting…" : "Running";
         _ = runner.Completion.ContinueWith(t => OnRunnerExited(runner, t.Result), TaskScheduler.Default);
-        _outputs.BindBuses(buses);
+        _outputs.BindBuses(buses, signatures);
 
         if (requireSuccess)
         {
@@ -970,14 +1098,14 @@ public sealed class StreamEngine : IDisposable
         }
         foreach (var sc in Composited())
         {
-            var layers = PipelineBuilder.VisibleLayers(sc.Sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
+            var layers = PipelineBuilder.CompositedLayers(sc.Sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
             foreach (var s in layers.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.WindowTitle.Trim().Length > 0))
             {
                 if (Anchors.Resolve(s) == Anchors.Fill) fill.TryAdd(PipelineBuilder.InputKey(s), new WindowCaptureBridge.Need(s, W, H, s.FillMode, plan.Light));
                 else Want(s, LayoutMath.Horizontal(s, W, H, PipelineBuilder.AspectFor(s, _knownSizes)).W);
             }
             if (vertical is { } v)
-                foreach (var s in PipelineBuilder.VerticalLayers(sc.Sources.ToList()).Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.WindowTitle.Trim().Length > 0))
+                foreach (var s in PipelineBuilder.VerticalLayers(sc.Sources.ToList(), includeHidden: true).Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.WindowTitle.Trim().Length > 0))
                     Want(s, PipelineBuilder.VerticalWidth(s, v.W, v.H));
         }
         var needs = new Dictionary<string, WindowCaptureBridge.Need>(fill);
@@ -1219,10 +1347,12 @@ public sealed class StreamEngine : IDisposable
         string text = d.Action switch
         {
             PerformanceGovernor.Action.LowerBitrate =>
-                $"Your upload couldn't keep up ({string.Join(", ", slow)}), so the bitrate was lowered 25%. Outputs will reconnect for a second.",
+                $"Your upload couldn't keep up ({string.Join(", ", slow)}), so the bitrate was lowered 25% (the stream stays connected).",
             PerformanceGovernor.Action.StepDown =>
                 $"Adapting to this PC: {d.Reason}, so Leapcast switched to {PerfLevel.At(d.Level).Explanation}" +
-                (_outputs.AnyActive ? " (outputs reconnect for a second)." : "."),
+                (!_outputs.AnyActive ? "."
+                 : PlansFor(Settings, before).Main is var was && PlansFor(Settings, d.Level).Main is var now && (was.Width, was.Height) == (now.Width, now.Height)
+                    ? " (the stream stays connected; viewers may see a short pause)." : " (outputs reconnect for a second)."),
             _ => $"This PC has headroom again, so Leapcast stepped back up to {PerfLevel.At(d.Level).Name.ToLowerInvariant()}.",
         };
         _ = Locked(async () =>

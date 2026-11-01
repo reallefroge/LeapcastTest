@@ -33,6 +33,9 @@ public sealed class PipelineRequest
     public int PreviewWidth { get; init; } = 768;
     public int PreviewHeight { get; init; } = 432;
     public int PreviewFps { get; init; } = 30;
+    /// <summary>Studio mode: the scene staged in the Preview (shown left of the program in the preview frame, and
+    /// switched live with "streamselect@stage map k"). Null = no studio mode.</summary>
+    public int? StagedSceneIndex { get; init; }
 
     /// <summary>Audio source id → raw f32le 48 kHz stereo input path (Windows named pipe).
     /// Keys are the representatives returned by <see cref="PipelineBuilder.AudioRepresentatives"/>.</summary>
@@ -63,8 +66,19 @@ public sealed class PipelineRequest
     public IReadOnlyDictionary<string, BrowserBridge.BrowserFeed> BrowserInputs { get; init; } = new Dictionary<string, BrowserBridge.BrowserFeed>();
 }
 
-/// <summary>A per-device audio gain stage whose level differs between scenes (crossfaded on scene switch).</summary>
-public sealed record AudioGainStage(string FilterName, IReadOnlyList<double> LinearGainPerScene);
+/// <summary>A per-device audio gain stage: its level per scene (0 where hidden), crossfaded on scene switch and
+/// set live when a source is shown or hidden.</summary>
+public sealed record AudioGainStage(string FilterName, IReadOnlyList<double> LinearGainPerScene)
+{
+    /// <summary>The audio device (input key) this stage controls.</summary>
+    public string Key { get; init; } = "";
+}
+
+/// <summary>
+/// A filter whose timeline "enable" shows or hides one source live (no rebuild): its overlay, or for a full-screen
+/// bottom layer, a blank cover laid over it (<see cref="Cover"/>: enabled = hidden).
+/// </summary>
+public sealed record VisibilityStage(Guid SourceId, int Scene, string Filter, bool Cover, bool OnlyWhileSceneShown);
 
 public sealed record PipelineSpec(
     IReadOnlyList<string> Args,
@@ -82,6 +96,10 @@ public sealed record PipelineSpec(
     public (int HW, int VW, int H) PreviewLayout { get; init; }
     /// <summary>Per scene: every overlay filter that only matters while that scene is visible (switched on/off).</summary>
     public IReadOnlyList<IReadOnlyList<string>> SceneOverlays { get; init; } = Array.Empty<IReadOnlyList<string>>();
+    /// <summary>Studio mode: width of the staged scene's picture at the left of the preview frame (0 = none).</summary>
+    public int PreviewStageWidth { get; init; }
+    /// <summary>Every source's live show/hide switch.</summary>
+    public IReadOnlyList<VisibilityStage> Visibility { get; init; } = Array.Empty<VisibilityStage>();
 }
 
 public static class PipelineBuilder
@@ -91,6 +109,9 @@ public static class PipelineBuilder
 
     /// <summary>Mask filter name prefix; scene k (k ≥ 1) is controlled by "eq@fade{k}".</summary>
     public const string FadeFilter = "eq@fade";
+
+    /// <summary>Studio mode's scene picker for the Preview picture.</summary>
+    public const string StageFilter = "streamselect@stage";
 
     /// <summary>Two sources that capture the same thing share one ffmpeg input (a camera can only be opened once).</summary>
     public static string InputKey(StudioSource s)
@@ -126,6 +147,32 @@ public static class PipelineBuilder
         }
     }
 
+    /// <summary>
+    /// What the pipeline composites: every video-capable source, shown <b>or hidden</b> (hidden ones are switched off
+    /// in the graph, so showing or hiding one is instant and never interrupts the stream), minus sources under a
+    /// visible full-screen capture (never seen, so never captured).
+    /// </summary>
+    public static IEnumerable<StudioSource> CompositedLayers(IEnumerable<StudioSource> sources)
+    {
+        var list = sources.ToList();
+        int cover = list.FindLastIndex(s => s.Visible && SourceTypes.KindOf(s.Type) is SourceKind.Display or SourceKind.Window or SourceKind.Camera
+                                            && Anchors.Resolve(s) == Anchors.Fill);
+        for (int i = 0; i < list.Count; i++)
+        {
+            bool isVideo = SourceTypes.IsVideo(SourceTypes.KindOf(list[i].Type));
+            if (isVideo && i < cover) continue;
+            yield return list[i];
+        }
+    }
+
+    /// <summary>Linear gain of one audio device in each scene (0 where it's hidden or absent).</summary>
+    public static List<double> SceneGains(IEnumerable<StudioScene> scenes, string key) =>
+        scenes.Select(sc =>
+        {
+            var s = sc.Sources.FirstOrDefault(x => x.Visible && InputKey(x) == key);
+            return s is null ? 0.0 : Math.Pow(10, s.VolumeDb / 20.0);
+        }).ToList();
+
     /// <summary>Lanczos is the sharpest downscale (good for Wizard101's UI text) but costs ~3× bicubic per frame.</summary>
     /// <remarks>On the governor's light rungs the cheapest good-looking scaler is used (several times faster).</remarks>
     private static string ScaleFlags(int fps, bool light = false) => light ? "fast_bilinear" : fps > 30 ? "bicubic" : "lanczos";
@@ -136,7 +183,7 @@ public static class PipelineBuilder
         var seen = new HashSet<string>();
         var list = new List<StudioSource>();
         foreach (var sc in scenes)
-            foreach (var s in sc.Sources.Where(s => s.Visible && SourceTypes.IsAudio(SourceTypes.KindOf(s.Type))))
+            foreach (var s in sc.Sources.Where(s => SourceTypes.IsAudio(SourceTypes.KindOf(s.Type)))) // hidden too: shown live
                 if (seen.Add(InputKey(s))) list.Add(s);
         return list;
     }
@@ -168,15 +215,16 @@ public static class PipelineBuilder
         string shift = "setpts=PTS-" + I(r.WallclockOrigin) + "/TB,";
 
         // ---------- which sources each canvas shows ----------
-        var hLayers = scenes.Select(sc => VisibleLayers(sc.Sources)
+        var hLayers = scenes.Select(sc => CompositedLayers(sc.Sources)
             .Where(s => SourceTypes.IsVideo(SourceTypes.KindOf(s.Type))).ToList()).ToList();
-        var vLayers = scenes.Select(sc => vertical ? VerticalLayers(sc.Sources) : new List<StudioSource>()).ToList();
+        var vLayers = scenes.Select(sc => vertical ? VerticalLayers(sc.Sources, includeHidden: true) : new List<StudioSource>()).ToList();
+        var visibility = new List<VisibilityStage>();
 
         // ---------- video inputs (deduplicated across scenes and canvases) ----------
         var inputs = new Dictionary<string, (int index, bool wall, List<string> uses)>();
         var warned = new HashSet<Guid>();
         var failedKeys = new HashSet<string>();
-        foreach (var s in scenes.SelectMany(sc => sc.Sources).Where(s => s.Visible))
+        foreach (var s in scenes.SelectMany(sc => sc.Sources))
         {
             var kind = SourceTypes.KindOf(s.Type);
             if (kind == SourceKind.Unsupported)
@@ -260,7 +308,11 @@ public static class PipelineBuilder
         // Only the scene on air (and, during a fade, the one coming in) is blended: the overlays of hidden scenes
         // are switched off with ffmpeg's timeline "enable" and switched on by the transition commands.
         var sceneOverlays = Enumerable.Range(0, N).Select(_ => new List<string>()).ToList();
-        string Enabled(int k) => k == active ? "" : ":enable=0";
+        int? staged = r.Preview && r.StagedSceneIndex is int si ? Math.Clamp(si, 0, N - 1) : null;
+        // a scene's own big overlays draw while it's on air or staged in the studio-mode preview
+        string Enabled(int k) => k == active || k == staged ? "" : ":enable=0";
+        // the program stack blends only the scene on air
+        string OnAir(int k) => k == active ? "" : ":enable=0";
         bool Large(LayoutRect rect, int cw, int ch) => rect.W * rect.H >= 0.25 * cw * ch;
 
         var sceneGraph = new List<string>();
@@ -274,7 +326,10 @@ public static class PipelineBuilder
             {
                 var b = layers[0];
                 string chain = $"{Crop(b)}{CameraPrep(b, SourceTypes.KindOf(b.Type), null)}{FillChain(b, W, H, F, pad: true, light: plan.Light)}format=yuv420p";
-                sceneGraph.Add($"[{Prep(InputKey(b), chain)}]null[{p}base]");
+                // hiding the full-screen bottom layer lays a blank cover over it (switched live, no rebuild)
+                string coverName = "overlay@x" + b.Id.ToString("N");
+                sceneGraph.Add($"[{Prep(InputKey(b), chain)}][{ColorUse(W, H)}]{coverName}=eof_action=repeat:format=yuv420:enable={(b.Visible ? 0 : 1)}[{p}base]");
+                visibility.Add(new VisibilityStage(b.Id, k, coverName, Cover: true, OnlyWhileSceneShown: false));
                 start = 1;
             }
             else
@@ -294,11 +349,13 @@ public static class PipelineBuilder
                 string name = OverlayName(src.Id, CanvasKind.Horizontal);
                 bool big = Large(LayoutMath.Horizontal(src, W, H, AspectFor(src, r.KnownSizes)), W, H);
                 if (big) sceneOverlays[k].Add(name);
+                visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
                 string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, scale)}format={(alpha ? "rgba" : "yuv420p")}");
-                sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{(big ? Enabled(k) : "")}[{p}c{j}]");
+                string on = !src.Visible ? ":enable=0" : big ? Enabled(k) : "";
+                sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                 cur = $"{p}c{j}";
             }
-            sceneGraph.Add($"[{cur}]fps={F},format=yuv420p[scene{k}]");
+            sceneGraph.Add($"[{cur}]fps={F},format=yuv420p{(staged is not null ? $",split=2[scene{k}][stg{k}]" : $"[scene{k}]")}");
         }
 
         // ---------- vertical canvas, per scene (game over a blurred copy of itself, camera on top) ----------
@@ -309,12 +366,17 @@ public static class PipelineBuilder
             {
                 var layers = vLayers[k];
                 string p = $"v{k}";
-                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto);
+                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto && x.Visible);
                 var bgGame = layers.FirstOrDefault(x => LayoutMath.IsGame(SourceTypes.KindOf(x.Type)));
                 if (bgGame is not null)
+                {
                     // blur at quarter resolution: ~1/16 of the work of a full-size blur, looks the same
+                    string coverName = "overlay@y" + bgGame.Id.ToString("N");
                     sceneGraph.Add($"[{Prep(InputKey(bgGame), $"{Crop(bgGame)}scale={bw}:{bh}:force_original_aspect_ratio=increase:flags=fast_bilinear," +
-                                   $"crop={bw}:{bh},boxblur=6:2,scale={VW}:{VH}:flags=bilinear,setsar=1,format=yuv420p,eq=brightness=-0.08")}]null[{p}base]");
+                                   $"crop={bw}:{bh},boxblur=6:2,scale={VW}:{VH}:flags=bilinear,setsar=1,format=yuv420p,eq=brightness=-0.08")}]" +
+                                   $"[{ColorUse(VW, VH)}]{coverName}=eof_action=repeat:format=yuv420:enable={(bgGame.Visible ? 0 : 1)}[{p}base]");
+                    visibility.Add(new VisibilityStage(bgGame.Id, k, coverName, Cover: true, OnlyWhileSceneShown: false));
+                }
                 else
                     sceneGraph.Add($"[{ColorUse(VW, VH)}]format=yuv420p[{p}base]");
                 string cur = $"{p}base";
@@ -329,8 +391,10 @@ public static class PipelineBuilder
                     string name = OverlayName(src.Id, CanvasKind.Vertical);
                     bool big = Large(rect, VW, VH);
                     if (big) sceneOverlays[k].Add(name);
+                    visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
                     string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, VerticalScale(src, VW, VH))}format={(alpha ? "rgba" : "yuv420p")}");
-                    sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{(big ? Enabled(k) : "")}[{p}c{j}]");
+                    string on = !src.Visible ? ":enable=0" : big ? Enabled(k) : "";
+                    sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                     cur = $"{p}c{j}";
                 }
                 sceneGraph.Add($"[{cur}]fps={F},format=yuv420p[vscene{k}]");
@@ -374,7 +438,7 @@ public static class PipelineBuilder
                 sceneOverlays[k].Add(name);
                 graph.Add($"color=c=black:s={cw}x{ch}:r={F},format=gray,{fadePrefix}{k}=eval=frame:brightness={initial}[{scenePrefix}m{k}]");
                 graph.Add($"[{scenePrefix}{k}][{scenePrefix}m{k}]alphamerge[{scenePrefix}a{k}]");
-                graph.Add($"[{cur}][{scenePrefix}a{k}]{name}=format=yuv420:eof_action=repeat{Enabled(k)}[{scenePrefix}st{k}]");
+                graph.Add($"[{cur}][{scenePrefix}a{k}]{name}=format=yuv420:eof_action=repeat{OnAir(k)}[{scenePrefix}st{k}]");
                 cur = $"{scenePrefix}st{k}";
             }
             graph.Add($"[{cur}]format=nv12[{outLabel}]");
@@ -401,16 +465,27 @@ public static class PipelineBuilder
 
         int PH = r.PreviewHeight, PW = r.PreviewWidth;
         int VPW = vertical ? SmartTuner.Even((int)Math.Round(PH * VW / (double)VH)) : 0;
+        int SPW = staged is not null ? PW : 0;
         if (r.Preview)
         {
             int pf = Math.Min(r.PreviewFps, F);
+            var parts = new List<string>();
+            if (staged is int st)
+            {
+                // studio mode: the staged scene, picked live from every scene's composite (streamselect "map")
+                graph.Add(N == 1 ? "[stg0]null[stagesrc]"
+                    : $"{string.Concat(Enumerable.Range(0, N).Select(k => $"[stg{k}]"))}{StageFilter}=inputs={N}:map={st}[stagesrc]");
+                graph.Add($"[stagesrc]fps={pf},scale={PW}:{PH}:flags=bilinear,format=bgra[sprev]");
+                parts.Add("[sprev]");
+            }
+            graph.Add($"[hprevsrc]fps={pf},scale={PW}:{PH}:flags=bilinear,format=bgra[hprev]");
+            parts.Add("[hprev]");
             if (vertical)
             {
-                graph.Add($"[hprevsrc]fps={pf},scale={PW}:{PH}:flags=bilinear,format=bgra[hprev]");
                 graph.Add($"[vprevsrc]fps={pf},scale={VPW}:{PH}:flags=bilinear,format=bgra[vprev]");
-                graph.Add("[hprev][vprev]hstack=inputs=2[prev]");
+                parts.Add("[vprev]");
             }
-            else graph.Add($"[hprevsrc]fps={pf},scale={PW}:{PH}:flags=bilinear,format=bgra[prev]");
+            graph.Add(parts.Count == 1 ? "[hprev]null[prev]" : $"{string.Concat(parts)}hstack=inputs={parts.Count}[prev]");
         }
 
         // ---------- audio: one input per device; per-scene level via a runtime-adjustable volume stage ----------
@@ -432,12 +507,8 @@ public static class PipelineBuilder
                 args.AddRange(WithWallclock(spec));
                 int idx = inputCount++;
 
-                var perScene = scenes.Select(sc =>
-                {
-                    var s = sc.Sources.FirstOrDefault(x => x.Visible && InputKey(x) == key);
-                    return s is null ? 0.0 : Math.Pow(10, s.VolumeDb / 20.0);
-                }).ToList();
-                bool cleanup = scenes.SelectMany(sc => sc.Sources).Any(x => x.Visible && InputKey(x) == key && x.NoiseCleanup)
+                var perScene = SceneGains(scenes, key);
+                bool cleanup = scenes.SelectMany(sc => sc.Sources).Any(x => InputKey(x) == key && x.NoiseCleanup)
                                && kind == SourceKind.Microphone;
                 string gainName = $"volume@g{idx}";
 
@@ -445,12 +516,9 @@ public static class PipelineBuilder
                 if (spec.Wallclock) chain.Append("asetpts=PTS-" + I(r.WallclockOrigin) + "/TB,");
                 chain.Append("aresample=48000:async=1000,"); // absorbs device clock drift + pipe jitter
                 if (cleanup) chain.Append("highpass=f=80,afftdn=nr=12:nf=-40:tn=1,"); // adaptive background-noise removal
-                bool varies = perScene.Distinct().Count() > 1;
-                if (varies || Math.Abs(perScene[active] - 1.0) > 1e-6)
-                {
-                    chain.Append($"{gainName}=volume={I(perScene[active])}:eval=frame,");
-                    if (varies) gains.Add(new AudioGainStage(gainName, perScene));
-                }
+                // always a named gain stage: scene switches crossfade it, show/hide sets it live
+                chain.Append($"{gainName}=volume={I(perScene[active])}:eval=frame,");
+                gains.Add(new AudioGainStage(gainName, perScene) { Key = key });
                 chain.Append($"aformat=sample_fmts=fltp:channel_layouts=stereo[a{idx}]");
                 graph.Add(chain.ToString());
                 mixInputs.Add($"[a{idx}]");
@@ -517,15 +585,15 @@ public static class PipelineBuilder
 
         return new PipelineSpec(args, warnings, encoded, r.Preview, filterGraph, N, gains)
         {
-            HasVertical = vertical, InputKeys = inputKeys, PreviewLayout = (PW, VPW, PH),
-            SceneOverlays = sceneOverlays,
+            HasVertical = vertical, InputKeys = inputKeys, PreviewLayout = (PW, VPW, PH), PreviewStageWidth = SPW,
+            SceneOverlays = sceneOverlays, Visibility = visibility,
         };
     }
 
     /// <summary>Sources on the vertical canvas, bottom → top. In auto layout only the top-most game capture is used.</summary>
-    public static List<StudioSource> VerticalLayers(IEnumerable<StudioSource> sources)
+    public static List<StudioSource> VerticalLayers(IEnumerable<StudioSource> sources, bool includeHidden = false)
     {
-        var shown = sources.Where(LayoutMath.ShownVertical).ToList();
+        var shown = sources.Where(includeHidden ? LayoutMath.OnVerticalCanvas : LayoutMath.ShownVertical).ToList();
         var autoGames = shown.Where(s => s.VAuto && LayoutMath.IsGame(SourceTypes.KindOf(s.Type))).ToList();
         if (autoGames.Count > 1) shown = shown.Where(s => !autoGames.Take(autoGames.Count - 1).Contains(s)).ToList();
         return shown;
@@ -554,8 +622,11 @@ public static class PipelineBuilder
 
     /// <param name="critical">How many leading lines must reach ffmpeg before the fade starts (the rest are
     /// expressions of time that may land later, such as switching the old scene off once it is hidden).</param>
-    public static List<string> TransitionCommands(PipelineSpec spec, int from, int to, double startAt, double seconds, out int critical)
+    public static List<string> TransitionCommands(PipelineSpec spec, int from, int to, double startAt, double seconds, out int critical,
+        Func<string, bool>? hidden = null, Func<AudioGainStage, IReadOnlyList<double>>? gainsNow = null)
     {
+        hidden ??= _ => false;
+        gainsNow ??= g => g.LinearGainPerScene;
         var lines = new List<string>();
         critical = 0;
         if (spec.SceneCount < 2 || from == to) return lines;
@@ -563,7 +634,7 @@ public static class PipelineBuilder
         string ramp = $"clip((t-{I(startAt)})/{I(d)},0,1)";
         // the incoming scene's switched-off overlays come on first (still invisible under its mask)
         if (to < spec.SceneOverlays.Count)
-            foreach (var name in spec.SceneOverlays[to]) lines.Add($"{name} -1 enable 1");
+            foreach (var name in spec.SceneOverlays[to].Where(n => !hidden(n))) lines.Add($"{name} -1 enable 1");
         // brightness is added to a black mask: ≤ -0.1 → fully transparent, ≥ 1 → fully opaque
         foreach (var fade in spec.HasVertical ? new[] { FadeFilter, VerticalFadeFilter } : new[] { FadeFilter })
         {
@@ -582,14 +653,16 @@ public static class PipelineBuilder
         }
         foreach (var g in spec.AudioGains)
         {
-            double a = g.LinearGainPerScene[from], b = g.LinearGainPerScene[to];
+            var levels = gainsNow(g);
+            if (from >= levels.Count || to >= levels.Count) continue;
+            double a = levels[from], b = levels[to];
             if (Math.Abs(a - b) < 1e-6) continue;
             lines.Add($"{g.FilterName} -1 volume {I(a)}+({I(b - a)})*{ramp}");
         }
         critical = lines.Count;
         // the outgoing scene stops being blended once the fade has finished
         if (from < spec.SceneOverlays.Count)
-            foreach (var name in spec.SceneOverlays[from]) lines.Add($"{name} -1 enable lt(t,{I(startAt + d + 0.1)})");
+            foreach (var name in spec.SceneOverlays[from].Where(n => !hidden(n))) lines.Add($"{name} -1 enable lt(t,{I(startAt + d + 0.1)})");
         return lines;
     }
 
@@ -799,13 +872,15 @@ public static class PipelineBuilder
             nameof(StudioSource.VX), nameof(StudioSource.VY), nameof(StudioSource.VW), nameof(StudioSource.VAuto), nameof(StudioSource.VShow),
             nameof(StudioSource.Anchor), nameof(StudioSource.MarginPx), nameof(StudioSource.SizePercent),
             nameof(StudioSource.H), nameof(StudioSource.VH), // sizes: covered by the scale strings below
-            nameof(StudioSource.Locked) }; // editor-only: locking never rebuilds the pipeline
+            nameof(StudioSource.Locked), // editor-only: locking never rebuilds the pipeline
+            nameof(StudioSource.Visible), nameof(StudioSource.VolumeDb), // switched live (enable / volume commands)
+            nameof(StudioSource.Hotkey) };
         var arr = new System.Text.Json.Nodes.JsonArray();
         foreach (var sc in scenes)
         {
             var sources = sc.Sources.ToList();
-            var layers = VisibleLayers(sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
-            var vLayers = vertical is null ? new List<StudioSource>() : VerticalLayers(sources);
+            var layers = CompositedLayers(sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
+            var vLayers = vertical is null ? new List<StudioSource>() : VerticalLayers(sources, includeHidden: true);
             var list = new System.Text.Json.Nodes.JsonArray();
             foreach (var src in sources)
             {

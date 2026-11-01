@@ -69,12 +69,24 @@ public static class Anchors
 
 public sealed class StudioSource
 {
+    /// <summary>An independent copy with every setting (device, crop, size, position, filters, hotkey) and a new
+    /// id: "add existing source" into another scene without setting it up again.</summary>
+    public StudioSource Copy()
+    {
+        var c = JsonSerializer.Deserialize<StudioSource>(JsonSerializer.Serialize(this))!;
+        c.Id = Guid.NewGuid();
+        return c;
+    }
+
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = SourceTypes.Display;
     public string Type { get; set; } = SourceTypes.Display;
     public bool Visible { get; set; } = true;
     /// <summary>Locked sources can't be moved or resized on the preview (Properties still edits them).</summary>
     public bool Locked { get; set; }
+    /// <summary>Global hotkey that shows/hides this source (e.g. "Ctrl+Shift+F1"); works while the game has focus.
+    /// Every source with the same hotkey (copies in other scenes) toggles together.</summary>
+    public string Hotkey { get; set; } = "";
 
     // Placement (video sources). Sources later in the scene list are drawn on top.
     public string Anchor { get; set; } = Anchors.Auto;

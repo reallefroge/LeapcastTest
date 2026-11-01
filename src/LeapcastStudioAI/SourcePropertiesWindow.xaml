@@ -17,6 +17,13 @@
       <StackPanel Margin="0,6,8,0">
         <TextBlock Text="Name" Style="{StaticResource FieldLabel}"/>
         <TextBox x:Name="NameBox"/>
+        <TextBlock Text="Show / hide hotkey" Style="{StaticResource FieldLabel}"/>
+        <DockPanel>
+          <Button DockPanel.Dock="Right" Content="Clear" Margin="6,0,0,0" Click="ClearHotkey_Click"/>
+          <TextBox x:Name="HotkeyBox" IsReadOnly="True" PreviewKeyDown="HotkeyBox_PreviewKeyDown" ToolTip="Click here, then press the keys"/>
+        </DockPanel>
+        <TextBlock Text="Click the box and press a combination such as Ctrl+Shift+1. It works while the game has focus; copies of this source in other scenes with the same hotkey switch together."
+                   Style="{StaticResource Hint}"/>
 
         <!-- Display -->
         <StackPanel x:Name="DisplayGroup">
