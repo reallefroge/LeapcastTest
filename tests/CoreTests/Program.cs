@@ -272,10 +272,12 @@ async Task AdaptSection(StudioScene light)
     engine.SimulatePerformanceLevel(0);
     int adaptStarts = engine.PipelineStarts;
     // a demanding "game": busy, noisy 1600×900 (expensive to encode, like fast gameplay), frame-counted like the
-    // app's capture pipes, so a pipeline that can't keep up falls behind real time instead of skipping frames
+    // app's capture pipes, so a pipeline that can't keep up falls behind real time instead of skipping frames.
+    // Paced by the realtime filter, not -re: FFmpeg 7+'s -re only catches up at 1.05× after a hiccup, which would
+    // look like a PC that never recovers.
     var oldOverride = engine.InputOverride;
     engine.InputOverride = (src, origin) => SourceTypes.KindOf(src.Type) == SourceKind.Display
-        ? new InputSpec(new[] { "-re", "-f", "lavfi", "-i", "testsrc2=s=800x450:r=30,noise=alls=30:allf=t+u,scale=1600:900:flags=neighbor" }, false)
+        ? new InputSpec(new[] { "-f", "lavfi", "-i", "testsrc2=s=800x450:r=30,noise=alls=30:allf=t+u,scale=1600:900:flags=neighbor,realtime=limit=1000" }, false)
         : oldOverride?.Invoke(src, origin);
     // ...and the game itself keeps every core busy (as a game does), leaving Leapcast a fraction of the CPU
     using var gameLoad = new CancellationTokenSource();
