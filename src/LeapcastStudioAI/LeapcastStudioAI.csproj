@@ -7,9 +7,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>LeapcastStudioAI</RootNamespace>
     <AssemblyName>Leapcast Studio AI</AssemblyName>
-    <Version>0.7.1</Version>
+    <Version>0.7.2</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- exe / taskbar / Start menu icon (source art: Assets/leapcast.svg, leapcast-small.svg for 16–32 px) -->
+    <ApplicationIcon>Assets\leapcast.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\leapcast.ico" />
+    <Resource Include="Assets\leapcast-64.png" />
+  </ItemGroup>
   <ItemGroup>
     <!-- WASAPI mic + desktop (loopback) audio capture -->
     <PackageReference Include="NAudio.Core" Version="2.2.1" />

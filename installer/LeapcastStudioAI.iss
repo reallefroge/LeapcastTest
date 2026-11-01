@@ -1,5 +1,5 @@
 #define AppName "Leapcast Studio AI"
-#define AppVersion "0.7.1"
+#define AppVersion "0.7.2"
 #define AppPublisher "Leapcast Studio AI"
 #define AppExeName "Leapcast Studio AI.exe"
 
@@ -22,6 +22,7 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile=..\src\LeapcastStudioAI\Assets\leapcast.ico
 DisableProgramGroupPage=yes
 SetupLogging=yes
 

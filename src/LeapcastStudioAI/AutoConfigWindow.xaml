@@ -1,6 +1,7 @@
 <Window x:Class="LeapcastStudioAI.AutoConfigWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Icon="pack://application:,,,/Assets/leapcast.ico"
         Title="Auto-config wizard" Width="600" Height="640" MinHeight="520" ResizeMode="CanResize"
         WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}">
   <DockPanel Margin="20,16,20,14">

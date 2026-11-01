@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="bg" cx="38%" cy="30%" r="80%">
+      <stop offset="0" stop-color="#3A3290"/>
+      <stop offset="0.55" stop-color="#211C55"/>
+      <stop offset="1" stop-color="#110F2B"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#8B7CFF"/>
+      <stop offset="1" stop-color="#5BD6FF"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#B9AFFF"/>
+      <stop offset="1" stop-color="#FFFFFF"/>
+    </linearGradient>
+  </defs>
+  <!-- badge -->
+  <circle cx="128" cy="128" r="120" fill="url(#bg)"/>
+  <circle cx="128" cy="128" r="114" fill="none" stroke="url(#ring)" stroke-width="16"/>
+  <!-- the leap: a bold arc from the lower left up to the signal -->
+  <path d="M62 188 C 72 114, 112 88, 150 100" fill="none" stroke="url(#arc)" stroke-width="30" stroke-linecap="round"/>
+  <!-- launch pad -->
+  <circle cx="62" cy="188" r="14" fill="#8B7CFF"/>
+  <!-- the signal it lands on -->
+  <circle cx="162" cy="108" r="22" fill="#FFFFFF"/>
+  <!-- broadcast waves -->
+  <path d="M187 76 A 40 40 0 0 1 195 131" fill="none" stroke="#5BD6FF" stroke-width="20" stroke-linecap="round"/>
+</svg>
