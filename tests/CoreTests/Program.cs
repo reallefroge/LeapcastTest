@@ -275,7 +275,7 @@ async Task AdaptSection(StudioScene light)
     // app's capture pipes, so a pipeline that can't keep up falls behind real time instead of skipping frames
     var oldOverride = engine.InputOverride;
     engine.InputOverride = (src, origin) => SourceTypes.KindOf(src.Type) == SourceKind.Display
-        ? new InputSpec(new[] { "-re", "-f", "lavfi", "-i", "testsrc2=s=1600x900:r=30,noise=alls=30:allf=t+u" }, false)
+        ? new InputSpec(new[] { "-re", "-f", "lavfi", "-i", "testsrc2=s=800x450:r=30,noise=alls=30:allf=t+u,scale=1600:900:flags=neighbor" }, false)
         : oldOverride?.Invoke(src, origin);
     // ...and the game itself keeps every core busy (as a game does), leaving Leapcast a fraction of the CPU
     using var gameLoad = new CancellationTokenSource();
@@ -302,6 +302,7 @@ async Task AdaptSection(StudioScene light)
     }
     var final = engine.Snapshot();
     gameLoad.Cancel();
+    File.WriteAllText(Path.Combine(work, "adapt-run.log"), ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")));
     Console.WriteLine($"    rungs: {(rungs.Count == 0 ? "none needed" : string.Join(", ", rungs))}; final {engine.CurrentPlan?.Summary}, speed {final.Speed:0.00}, {final.Health}");
     bool adapted;
     lock (messages) adapted = messages.Any(m => m.StartsWith("Adapting to this PC"));
