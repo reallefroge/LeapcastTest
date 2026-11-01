@@ -38,12 +38,18 @@ public sealed record EncodePlan(
     IReadOnlyList<string> Reasons)
 {
     public int GopFrames => Fps * 2; // 2 s keyframes: required by Twitch/YouTube, also our segment length
+    /// <summary>Faster encoder settings (performance governor): less GPU/CPU per frame for slightly more bits.</summary>
+    public bool Light { get; init; }
     public string Summary =>
         $"{Width}×{Height} · {Fps} FPS · {EncoderCatalog.DisplayName(Encoder)} · " +
         (Cbr ? $"CBR {CapKbps} kbps" : $"Smart VBR ≤ {CapKbps} kbps");
 }
 
-public sealed record ProbedEncoder(string Name, EncoderTier Tier);
+public sealed record ProbedEncoder(string Name, EncoderTier Tier)
+{
+    /// <summary>The faster "light" argument set also works on this PC (tested at startup).</summary>
+    public bool LightOk { get; init; } = true;
+}
 
 /// <summary>
 /// Picks resolution / frame rate / bitrate cap / encoder from the content type, measured upload,

@@ -32,16 +32,19 @@ public static class EncoderCatalog
         string q = plan.Quality.ToString(CultureInfo.InvariantCulture);
         string hwq = (plan.Quality + 2).ToString(CultureInfo.InvariantCulture); // hardware CQ scale ≈ x264 CRF + 2
         bool rich = plan.Tier == EncoderTier.Rich;
+        bool light = plan.Light; // performance governor: trade a little efficiency for speed
         var a = new List<string> { "-c:v", plan.Encoder };
 
         switch (plan.Encoder)
         {
             case "h264_nvenc":
-                a.AddRange(new[] { "-preset", rich ? "p5" : "p4", "-profile:v", "high" });
-                if (rich) a.AddRange(new[] { "-tune", "hq" });
+                a.AddRange(new[] { "-preset", light ? "p2" : rich ? "p5" : "p4", "-profile:v", "high" });
+                if (rich) a.AddRange(new[] { "-tune", light ? "ll" : "hq" });
                 if (plan.Cbr) a.AddRange(new[] { "-rc", "cbr", "-b:v", K(cap), "-maxrate", K(cap), "-bufsize", K(cap) });
                 else a.AddRange(new[] { "-rc", "vbr", "-cq", hwq, "-b:v", "0", "-maxrate", K(cap), "-bufsize", K(cap) });
-                if (rich)
+                if (rich && light)
+                    a.AddRange(new[] { "-spatial-aq", "1", "-bf", "0", "-multipass", "disabled" }); // no look-ahead, no extra passes
+                else if (rich)
                 {
                     a.AddRange(new[] { "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "8",
                         "-rc-lookahead", plan.LowLatency ? "8" : "20",
@@ -52,7 +55,7 @@ public static class EncoderCatalog
                 break;
 
             case "h264_qsv":
-                a.AddRange(new[] { "-preset", rich ? "slower" : "medium", "-profile:v", "high" });
+                a.AddRange(new[] { "-preset", light ? "veryfast" : rich ? "slower" : "medium", "-profile:v", "high" });
                 if (plan.Cbr) a.AddRange(new[] { "-b:v", K(cap), "-maxrate", K(cap), "-bufsize", K(cap) });
                 else
                 {
@@ -61,25 +64,25 @@ public static class EncoderCatalog
                 }
                 if (rich)
                 {
-                    a.AddRange(new[] { "-bf", plan.LowLatency ? "0" : "3" });
-                    if (!plan.LowLatency) a.AddRange(new[] { "-look_ahead_depth", "40", "-extbrc", "1" });
+                    a.AddRange(new[] { "-bf", plan.LowLatency || light ? "0" : "3" });
+                    if (!plan.LowLatency && !light) a.AddRange(new[] { "-look_ahead_depth", "40", "-extbrc", "1" });
                 }
                 a.AddRange(new[] { "-g", gop, "-idr_interval", "0" });
                 break;
 
             case "h264_amf":
                 a.AddRange(new[] { "-usage", plan.LowLatency ? "lowlatency" : "transcoding",
-                    "-quality", rich ? "quality" : "balanced", "-profile:v", "high" });
+                    "-quality", light ? "speed" : rich ? "quality" : "balanced", "-profile:v", "high" });
                 if (plan.Cbr) a.AddRange(new[] { "-rc", "cbr", "-b:v", K(cap), "-maxrate", K(cap), "-bufsize", K(cap) });
                 else a.AddRange(new[] { "-rc", "vbr_peak", "-b:v", K(target), "-maxrate", K(cap), "-bufsize", K(cap) });
-                if (rich) a.AddRange(new[] { "-vbaq", "1", "-preanalysis", "1" });
+                if (rich) a.AddRange(light ? new[] { "-vbaq", "1" } : new[] { "-vbaq", "1", "-preanalysis", "1" });
                 a.AddRange(new[] { "-g", gop });
                 break;
 
             default: // libx264
-                string preset = rich ? plan.X264Preset : "veryfast";
+                string preset = light ? LighterX264(plan.X264Preset) : rich ? plan.X264Preset : "veryfast";
                 a.AddRange(new[] { "-preset", preset, "-profile:v", "high" });
-                string xp = $"aq-mode=3:rc-lookahead={(plan.LowLatency ? 10 : 40)}";
+                string xp = $"aq-mode=3:rc-lookahead={(plan.LowLatency || light ? 10 : 40)}";
                 if (plan.Cbr)
                 {
                     a.AddRange(new[] { "-b:v", K(cap), "-minrate", K(cap), "-maxrate", K(cap), "-bufsize", K(cap) });
@@ -87,11 +90,19 @@ public static class EncoderCatalog
                 }
                 else a.AddRange(new[] { "-crf", q, "-maxrate", K(cap), "-bufsize", K(cap) });
                 if (rich) a.AddRange(new[] { "-x264-params", xp });
-                a.AddRange(new[] { "-bf", plan.LowLatency ? "1" : "3", "-g", gop, "-keyint_min", gop, "-sc_threshold", "0" });
+                a.AddRange(new[] { "-bf", plan.LowLatency || light ? "1" : "3", "-g", gop, "-keyint_min", gop, "-sc_threshold", "0" });
                 break;
         }
         return a;
     }
+
+    /// <summary>Two x264 presets faster (each step roughly halves the CPU time per frame).</summary>
+    public static string LighterX264(string preset) => preset switch
+    {
+        "slow" or "medium" => "veryfast",
+        "fast" or "faster" => "superfast",
+        _ => "ultrafast",
+    };
 
     /// <summary>Test-encodes a few frames with each candidate (rich, then basic) and returns what works.</summary>
     public static async Task<List<ProbedEncoder>> ProbeAsync(string ffmpeg, CancellationToken ct = default)
@@ -107,7 +118,15 @@ public static class EncoderCatalog
                 args.AddRange(BuildVideoArgs(plan));
                 args.AddRange(new[] { "-f", "null", "-" });
                 var (code, _) = await RunQuietAsync(ffmpeg, args, TimeSpan.FromSeconds(20), ct);
-                if (code == 0) { found.Add(new ProbedEncoder(enc, tier)); break; }
+                if (code != 0) continue;
+                // the governor's lighter settings must work too (older drivers lack some options)
+                var light = new List<string> { "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "testsrc2=size=1280x720:rate=30", "-frames:v", "20", "-vf", "format=nv12" };
+                light.AddRange(BuildVideoArgs(plan with { Light = true }));
+                light.AddRange(new[] { "-f", "null", "-" });
+                var (lightCode, _) = await RunQuietAsync(ffmpeg, light, TimeSpan.FromSeconds(20), ct);
+                found.Add(new ProbedEncoder(enc, tier) { LightOk = lightCode == 0 });
+                break;
             }
         }
         return found;

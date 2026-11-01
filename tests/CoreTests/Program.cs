@@ -119,6 +119,53 @@ Check(cut2 is { ScaleW: 1440, ScaleH: 900, Pad: true }, $"GPU cut, fit mode: sca
 var cut3 = WindowCaptureBridge.PlanGpuCut(2560, 1080, (0, 0, 0, 0), Anchors.FillCrop, 1920, 1080);
 Check(cut3 is { L: 320, R: 320, T: 0, B: 0 }, $"GPU cut: an ultrawide window loses its sides ({cut3})");
 
+// ---------------------------------------------------------------- performance governor (pure logic)
+Console.WriteLine("Performance governor");
+Check(HardwareProfile.Classify(4, 8L << 30, new[] { new ProbedEncoder("libx264", EncoderTier.Rich) }) == HardwareTier.Low
+      && HardwareProfile.Classify(8, 16L << 30, new[] { new ProbedEncoder("libx264", EncoderTier.Rich) }) == HardwareTier.Low
+      && HardwareProfile.Classify(8, 16L << 30, new[] { new ProbedEncoder("h264_amf", EncoderTier.Rich) }) == HardwareTier.Mid
+      && HardwareProfile.Classify(16, 32L << 30, new[] { new ProbedEncoder("h264_nvenc", EncoderTier.Rich) }) == HardwareTier.High,
+    "hardware tiers: 4 threads or CPU-only encoding on 8 threads = low end; GPU encoder = mid; 16 threads + GPU = high");
+Check(HardwareProfile.StartLevel(HardwareTier.Low) == 2 && HardwareProfile.StartLevel(HardwareTier.Mid) == 0, "a low-end PC starts at 30 FPS with light encoder settings");
+{
+    var gov = new PerformanceGovernor();
+    gov.Reset(0);
+    var t0 = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+    bool Every(int l) => true;
+    PerformanceGovernor.Decision Run(double speed, double backlog, double seconds, double from, bool mayUp = false, double upload = 0)
+    {
+        PerformanceGovernor.Decision last = new(PerformanceGovernor.Action.None, gov.Level, "");
+        for (double t = from; t < from + seconds; t += 1)
+        {
+            var d = gov.Evaluate(new PerformanceGovernor.Sample(speed, backlog, upload, TimeSpan.FromSeconds(30 + t)), t0.AddSeconds(t), Every, mayUp, true);
+            if (d.Action != PerformanceGovernor.Action.None) return d;
+            last = d;
+        }
+        return last;
+    }
+    var d1 = Run(1.0, 0.02, 60, 0);
+    Check(d1.Action == PerformanceGovernor.Action.None && gov.Level == 0, "keeping up: no change");
+    var d2 = Run(0.80, 0.0, 10, 60);
+    Check(d2.Action == PerformanceGovernor.Action.StepDown && gov.Level == 1, $"heavy lag (80% speed) steps down within seconds ({d2.Reason})");
+    var d3 = Run(0.80, 0.0, 12, 70);
+    Check(d3.Action == PerformanceGovernor.Action.None && gov.Level == 1, "then gives the lighter settings 20 s to settle (no cascade)");
+    var d4 = Run(1.0, 0.6, 25, 85);
+    Check(d4.Action == PerformanceGovernor.Action.StepDown && gov.Level == 2, "frames piling up in front of the compositor (0.6 s) step down before stutter is visible");
+    var d5 = Run(1.0, 0.0, 200, 110, mayUp: false);
+    Check(d5.Action == PerformanceGovernor.Action.None && gov.Level == 2, "healthy, but live or recording: never steps up mid-stream");
+    var d6 = Run(1.0, 0.0, 200, 310, mayUp: true);
+    Check(d6.Action == PerformanceGovernor.Action.None && gov.Level == 2, "won't step back up into a rung that failed minutes ago (no flapping)");
+    var d7 = Run(1.0, 0.0, 400, 700, mayUp: true);
+    Check(d7.Action == PerformanceGovernor.Action.StepUp && gov.Level == 1, "after 10 calm minutes, steps back up one rung");
+    var d8 = Run(1.0, 0.0, 20, 1200, upload: 4);
+    Check(d8.Action == PerformanceGovernor.Action.LowerBitrate && Math.Abs(gov.BitrateScale - 0.75) < 1e-9, "a destination that keeps falling behind lowers the bitrate 25%");
+    gov.Reset(0);
+    for (int k = 0; k < 10; k++) Run(0.5, 2, 30, 2000 + k * 30);
+    var dl = Run(0.5, 2, 30, 2400);
+    Check(gov.Level == PerfLevel.Ladder.Length - 1 && dl.Action == PerformanceGovernor.Action.None && gov.Condition.Contains("lightest"),
+        $"never below the last rung, and says so ({gov.Condition})");
+}
+
 // ---------------------------------------------------------------- webcam modes
 var camModes = CameraModes.Parse("""
 [dshow @ 000001] vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30
@@ -211,9 +258,64 @@ string liveDir = Path.Combine(work, "live");
 Directory.CreateDirectory(liveDir);
 
 // 640×360 keeps the 2-vCPU test machines real-time, so timing measurements reflect the design, not CPU starvation.
+// Adaptation is off for the timing-sensitive tests (a rung change would rebuild the pipeline mid-test);
+// it gets its own end-to-end test below.
 var settings = new StudioSettings { QualityProfile = "Custom", Resolution = "640 × 360", FrameRate = 30, MaxBitrateKbps = 1500, Encoder = "libx264", RecordingFolder = Path.Combine(work, "videos"),
-    ReplaySeconds = 6, Outputs = new() { outA, outB, outV } };
+    ReplaySeconds = 6, Outputs = new() { outA, outB, outV }, AdaptivePerformance = false };
 await engine.UpdateAsync(scene, settings, false);
+async Task AdaptSection(StudioScene light)
+{
+    Console.WriteLine("Adapting to an overloaded PC (a 1080p60 encode this machine can't sustain)");
+
+    var over = WithEncoder(settings, "libx264");
+    over.AdaptivePerformance = true; over.Resolution = "1920 × 1080"; over.FrameRate = 60; over.MaxBitrateKbps = 6000;
+    engine.SimulatePerformanceLevel(0);
+    int adaptStarts = engine.PipelineStarts;
+    // a demanding "game": busy, noisy 1600×900 (expensive to encode, like fast gameplay), frame-counted like the
+    // app's capture pipes, so a pipeline that can't keep up falls behind real time instead of skipping frames
+    var oldOverride = engine.InputOverride;
+    engine.InputOverride = (src, origin) => SourceTypes.KindOf(src.Type) == SourceKind.Display
+        ? new InputSpec(new[] { "-re", "-f", "lavfi", "-i", "testsrc2=s=1600x900:r=30,noise=alls=30:allf=t+u" }, false)
+        : oldOverride?.Invoke(src, origin);
+    // ...and the game itself keeps every core busy (as a game does), leaving Leapcast a fraction of the CPU
+    using var gameLoad = new CancellationTokenSource();
+    for (int i = 0; i < Environment.ProcessorCount; i++)
+        new Thread(() => { double x = 1; while (!gameLoad.IsCancellationRequested) x = Math.Sqrt(x + 1); }) { IsBackground = true }.Start();
+    var busy = new StudioScene { Name = "busy game" };
+    busy.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, CaptureMethod = "Auto" });
+    busy.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone });
+    await engine.UpdateAsync(new[] { busy }, busy, over, false);
+    await engine.SetReplayBufferAsync(true); // encodes like a recording or stream
+    var aw = Stopwatch.StartNew();
+    var rungs = new List<string>();
+    var lastChange = aw.Elapsed;
+    string rung = engine.Performance.Name;
+    while (aw.Elapsed < TimeSpan.FromSeconds(170))
+    {
+        await Task.Delay(1000);
+        if (engine.Performance.Name != rung) { rung = engine.Performance.Name; rungs.Add($"{aw.Elapsed.TotalSeconds:0}s→{rung}"); lastChange = aw.Elapsed; }
+        var st = engine.Snapshot();
+        var sig = engine.PerformanceSignals();
+        if ((int)aw.Elapsed.TotalSeconds % 10 == 0) Console.WriteLine($"    t={aw.Elapsed.TotalSeconds:0}s {engine.Performance.Name}: speed {sig.Speed:0.00}, backlog {sig.Backlog:0.00}s, stalls {engine.StallRestarts}");
+        // settled: 25 s on one rung, keeping up with real time without repeating frames
+        if (aw.Elapsed - lastChange > TimeSpan.FromSeconds(25) && st.Speed >= 0.95) break;
+    }
+    var final = engine.Snapshot();
+    gameLoad.Cancel();
+    Console.WriteLine($"    rungs: {(rungs.Count == 0 ? "none needed" : string.Join(", ", rungs))}; final {engine.CurrentPlan?.Summary}, speed {final.Speed:0.00}, {final.Health}");
+    bool adapted;
+    lock (messages) adapted = messages.Any(m => m.StartsWith("Adapting to this PC"));
+    Check(final.Running && final.Speed >= 0.95 && !final.Health.StartsWith("Struggling"),
+        $"ends up keeping up with real time on its own (speed {final.Speed:0.00}, {final.Health})");
+    if (engine.StallRestarts > 0) Console.WriteLine($"    note: the stall watchdog restarted a frozen pipeline {engine.StallRestarts}× along the way");
+    if (!OperatingSystem.IsWindows()) // 2-core test VM: 1080p60 is out of reach, so it must have stepped down
+        Check(adapted && rungs.Count > 0 && engine.PipelineStarts > adaptStarts, $"stepped down the ladder to get there ({string.Join(", ", rungs)})");
+    await engine.SetReplayBufferAsync(false);
+    engine.InputOverride = oldOverride;
+    engine.SimulatePerformanceLevel(0);
+    await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
+}
+
 async Task SyncSection()
 {
     Console.WriteLine("Camera delay: the clap test measures it and the offset fixes it");
@@ -251,6 +353,15 @@ async Task SyncSection()
         Check(m2 is { Reliable: true } && Math.Abs(m2.OffsetMs) < 90, $"after the fix the camera matches the sound ({m2?.OffsetMs:0} ms)");
     await engine.SetPreviewAsync(false);
     engine.CameraDeviceOverride = oldCam;
+}
+
+if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_ADAPT") == "1")
+{
+    var light0 = new StudioScene { Name = "light" };
+    await AdaptSection(light0);
+    await engine.StopAllAsync();
+    Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(S)");
+    return failures == 0 ? 0 : 1;
 }
 
 if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_SYNC") == "1")
@@ -323,16 +434,24 @@ Check(lip.events >= 4 && Math.Abs(lip.offsetMs) < 150 && (OperatingSystem.IsWind
 var dims = await RunCaptureAsync("ffprobe", new[] { "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate", "-of", "csv=p=0", rec });
 Check(dims.Trim().StartsWith("640,360,"), $"output is 640x360@30 ({dims.Trim()})");
 
-// ---------------------------------------------------------------- performance guard
-var heavy = WithEncoder(settings, "libx264"); heavy.Resolution = "1600 × 900"; heavy.FrameRate = 60;
+// ---------------------------------------------------------------- performance ladder (engine)
+var heavy = WithEncoder(settings, "libx264"); heavy.Resolution = "1600 × 900"; heavy.FrameRate = 60; heavy.AdaptivePerformance = true;
 // (the Windows CI scene captures with GDI, which Leapcast always caps at 30 FPS)
 int honoured = OperatingSystem.IsWindows() ? 30 : 60;
-Check(engine.PlanFor(heavy).Fps == honoured && engine.PlanFor(heavy).Width == 1600, $"custom 1600×900 @ 60 is honoured while the PC keeps up ({engine.PlanFor(heavy).Summary})");
-engine.SimulatePerformanceGuard(1);
-Check(engine.PlanFor(heavy) is { Fps: 30, Width: 1600 }, "falling behind: the guard drops to 30 FPS first");
-engine.SimulatePerformanceGuard(2);
-Check(engine.PlanFor(heavy) is { Fps: 30, Width: 1280, Height: 720 }, $"still behind: then a smaller picture ({engine.PlanFor(heavy).Summary})");
-engine.SimulatePerformanceGuard(0);
+engine.SimulatePerformanceLevel(0);
+Check(engine.PlanFor(heavy).Fps == honoured && engine.PlanFor(heavy).Width == 1600 && !engine.PlanFor(heavy).Light,
+    $"rung 0: custom 1600×900 @ 60 as configured ({engine.PlanFor(heavy).Summary})");
+engine.SimulatePerformanceLevel(1);
+Check(engine.PlanFor(heavy) is { Light: true, Width: 1600 } && engine.PlanFor(heavy).Fps == honoured, "rung 1: lighter encoder settings first (same picture)");
+engine.SimulatePerformanceLevel(2);
+Check(engine.PlanFor(heavy) is { Fps: 30, Width: 1600 }, "rung 2: then 30 FPS");
+engine.SimulatePerformanceLevel(4);
+Check(engine.PlanFor(heavy) is { Fps: 30, Width: 1280, Height: 720 }, $"rung 4: then a smaller picture ({engine.PlanFor(heavy).Summary})");
+engine.SimulatePerformanceLevel(5);
+Check(engine.PlanFor(heavy) is { Width: 1024, Height: 576 }, $"rung 5: the smallest ({engine.PlanFor(heavy).Summary})");
+var lightArgs = string.Join(" ", EncoderCatalog.BuildVideoArgs(engine.PlanFor(heavy)));
+Check(lightArgs.Contains("-preset ultrafast") || lightArgs.Contains("-preset superfast"), $"light x264 runs two presets faster ({lightArgs.Split("-profile")[0].Trim()})");
+engine.SimulatePerformanceLevel(0);
 
 // ---------------------------------------------------------------- bad destination
 Console.WriteLine("A destination that refuses the connection fails on its own");
@@ -653,6 +772,9 @@ await engine.SetPreviewAsync(false);
 // ---------------------------------------------------------------- camera sync (clap test)
 await SyncSection();
 await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
+
+// ---------------------------------------------------------------- adapting to an overloaded PC
+await AdaptSection(light);
 
 // ---------------------------------------------------------------- reconnects
 Console.WriteLine("A destination that drops reconnects on its own; the others don't notice");

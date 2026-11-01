@@ -124,6 +124,7 @@ public partial class MainWindow : Window
         _engine.StatusChanged += st => Dispatcher.BeginInvoke(() => ApplyStatus(st));
         _engine.Message += (_, e) => Dispatcher.BeginInvoke(() => Log(e.Text, e.IsError));
         _engine.ModesChanged += () => Dispatcher.BeginInvoke(() => ApplyStatus(_engine.Snapshot()));
+        _engine.PerformanceChanged += _ => Dispatcher.BeginInvoke(() => { _shownPlan = null; UpdatePlanDisplay(); UpdateCanvasLayout(); });
         _audio.DeviceError += msg => Dispatcher.BeginInvoke(() => Log(msg, true));
 
         _hEditor = MakeEditor(HEditLayer, HViewbox, CanvasKind.Horizontal, () => _hCanvas);
@@ -277,6 +278,8 @@ public partial class MainWindow : Window
 
     private void OnUiTick()
     {
+        // minimized: don't spend CPU drawing a preview nobody sees
+        if (WindowState == WindowState.Minimized) { lock (_frameLock) _frameDirty = false; return; }
         lock (_frameLock)
         {
             var pf = _engine.PreviewFrame;
@@ -370,7 +373,8 @@ public partial class MainWindow : Window
     {
         var plans = _engine.Running && _engine.CurrentPlans is not null ? _engine.CurrentPlans : _engine.PlansFor(_state.Settings);
         var plan = plans.Main;
-        string key = plan.Summary + "|" + plan.ProfileName + "|" + string.Join("|", plan.Reasons) + "|" + plans.Vertical?.Summary + "|" + plans.UploadKbps;
+        string key = plan.Summary + "|" + plan.ProfileName + "|" + string.Join("|", plan.Reasons) + "|" + plans.Vertical?.Summary + "|" + plans.UploadKbps
+                     + "|" + _engine.Performance.Index + "|" + _engine.Tier + "|" + _state.Settings.AdaptivePerformance;
         if (key == _shownPlan) return;
         _shownPlan = key;
         PlanTitle.Text = $"{plan.Width} × {plan.Height}  ·  {plan.Fps} FPS";
@@ -378,6 +382,11 @@ public partial class MainWindow : Window
         bool vertical = _state.Settings.VerticalCanvas && plans.Vertical is not null;
         VerticalPlanText.Visibility = vertical ? Visibility.Visible : Visibility.Collapsed;
         if (vertical) VerticalPlanText.Text = $"Vertical: {plans.Vertical!.Width} × {plans.Vertical.Height} up to {plans.Vertical.CapKbps} kbps";
+        var rung = _engine.Performance;
+        string tier = _engine.EncodersProbed ? $"{_engine.Tier.ToString().ToLowerInvariant()}-end PC" : "this PC";
+        PerformanceText.Text = !_state.Settings.AdaptivePerformance ? "Adaptive performance is off (Settings → Connection)."
+            : rung.Index == 0 ? $"Adaptive performance: full quality ({tier})."
+            : $"Adaptive performance: {rung.Name.ToLowerInvariant()} ({tier}): {rung.Explanation}.";
         ReasonsList.ItemsSource = plan.Reasons.Concat(plans.Vertical is not null && vertical ? plans.Vertical.Reasons : Array.Empty<string>()).ToList();
         int enabled = _state.Settings.Outputs.Count(o => o.Enabled);
         UploadPlanText.Text = enabled == 0 ? ""

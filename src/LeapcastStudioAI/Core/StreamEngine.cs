@@ -89,17 +89,15 @@ public sealed class StreamEngine : IDisposable
     private CancellationTokenSource? _reconnectCts;
     private int _reconnectAttempt;
     private DateTime? _liveSince;
-    private DateTime _lastAdjust = DateTime.MinValue;
-    // performance guard: steps taken this session because the PC fell behind (0 = none, 1 = 30 FPS, 2 = smaller too)
-    private int _guardStep;
-    private DateTime? _behindSince;
-    private DateTime _lastGuard = DateTime.MinValue;
-    /// <summary>The automatic performance guard has lightened the settings this session.</summary>
-    public int PerformanceGuardStep => _guardStep;
-    /// <summary>Tests: pretend the guard has already stepped in this far.</summary>
-    public void SimulatePerformanceGuard(int step) => _guardStep = Math.Clamp(step, 0, 2);
-    private DateTime? _uploadTroubleSince;
-    private double _bitrateScale = 1.0;
+    private readonly PerformanceGovernor _governor = new();
+    private bool _governorPaused;
+    /// <summary>This PC's class (decided after the encoder probe).</summary>
+    public HardwareTier Tier { get; private set; } = HardwareTier.Mid;
+    /// <summary>Current rung of the performance ladder (0 = as configured, or adaptation switched off).</summary>
+    public PerfLevel Performance => PerfLevel.At(LevelFor(Settings));
+    private int LevelFor(StudioSettings s) => s.AdaptivePerformance ? _governor.Level : 0;
+    /// <summary>Tests / diagnostics: jump to a rung (applies on the next pipeline start).</summary>
+    public void SimulatePerformanceLevel(int level) => _governor.Force(level);
     private readonly HashSet<long> _countedSegments = new();
     private long _liveBytes;
     private string? _lastError;
@@ -137,24 +135,17 @@ public sealed class StreamEngine : IDisposable
     private string _runnerCommand = "";
 
     /// <summary>
-    /// If a pipeline using GPU capture died before producing a frame, GPU capture probably isn't available on this
-    /// PC (old driver, remote desktop, no Direct3D 11): switch this session to GDI capture instead of failing.
+    /// If a pipeline using GPU screen capture (desktop duplication) died before producing a frame, it probably isn't
+    /// available on this PC (old driver, remote desktop, no Direct3D 11): switch this session to GDI capture instead
+    /// of failing. (Game windows have their own reader with the same fallback.)
     /// </summary>
     private bool TryGpuCaptureFallback(TimeSpan ranFor, bool producedFrames)
     {
         if (ranFor > TimeSpan.FromSeconds(15) || producedFrames) return false;
-        bool changed = false;
-        if (_runnerCommand.Contains("gfxcapture=", StringComparison.Ordinal) && GpuWindowCaptureSupported)
-        {
-            GpuWindowCaptureSupported = false; changed = true;
-            Message?.Invoke(this, new EngineMessageEventArgs("GPU window capture isn't working on this PC, so Leapcast switched to compatibility capture (30 FPS).", true));
-        }
-        if (_runnerCommand.Contains("ddagrab=", StringComparison.Ordinal) && !_gpuDisplayFailed)
-        {
-            _gpuDisplayFailed = true; changed = true;
-            Message?.Invoke(this, new EngineMessageEventArgs("GPU screen capture isn't working on this PC, so Leapcast switched to compatibility capture (30 FPS).", true));
-        }
-        return changed;
+        if (!_runnerCommand.Contains("ddagrab=", StringComparison.Ordinal) || _gpuDisplayFailed) return false;
+        _gpuDisplayFailed = true;
+        Message?.Invoke(this, new EngineMessageEventArgs("GPU screen capture isn't working on this PC, so Leapcast switched to compatibility capture (30 FPS).", true));
+        return true;
     }
     /// <summary>The scene currently on air.</summary>
     public StudioScene? Scene { get; private set; }
@@ -254,6 +245,8 @@ public sealed class StreamEngine : IDisposable
             TimeSpan.FromSeconds(10), _life.Token);
         GpuWindowCaptureSupported = help.Contains("gfxcapture AVOptions", StringComparison.Ordinal);
         _windows.GpuCapture = GpuWindowCaptureSupported;
+        Tier = HardwareProfile.Classify(Environment.ProcessorCount, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes, Encoders);
+        _governor.Reset(HardwareProfile.StartLevel(Tier));
         // GPU crop + scale of game windows (Direct3D 11 video processor): the CPU only receives the finished picture
         var (_, d3dHelp) = await EncoderCatalog.RunQuietAsync(FfmpegPath, new[] { "-hide_banner", "-h", "filter=scale_d3d11" },
             TimeSpan.FromSeconds(10), _life.Token);
@@ -265,11 +258,14 @@ public sealed class StreamEngine : IDisposable
     public EncodePlan PlanFor(StudioSettings s) => PlansFor(s).Main;
 
     /// <summary>Every encode for these settings and the current outputs.</summary>
-    public PlanSet PlansFor(StudioSettings s)
+    public PlanSet PlansFor(StudioSettings s) => PlansFor(s, LevelFor(s));
+
+    /// <summary>Every encode for these settings at a rung of the performance ladder.</summary>
+    private PlanSet PlansFor(StudioSettings s, int level)
     {
         var pool = Pool(s);
         bool vertical = s.VerticalCanvas || _outputs.ActiveOutputs().Any(o => o.IsVertical);
-        var set = OutputBudget.Resolve(s, pool, vertical, Encoders, Environment.ProcessorCount, _bitrateScale);
+        var set = OutputBudget.Resolve(s, pool, vertical, Encoders, Environment.ProcessorCount, _governor.BitrateScale);
         var plan = set.Main;
         var reasons = plan.Reasons.ToList();
         var shown = _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)).ToList();
@@ -280,19 +276,7 @@ public sealed class StreamEngine : IDisposable
              && (!GpuWindowCaptureSupported || string.Equals(x.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase)))
             || (SourceTypes.KindOf(x.Type) == SourceKind.Display
                 && (_gpuDisplayFailed || string.Equals(x.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase))));
-        if (_guardStep >= 1 && plan.Fps > 30)
-        {
-            plan = plan with { Fps = 30 };
-            reasons.Add("Running at 30 FPS for now: this PC fell behind real time at the higher frame rate.");
-        }
-        if (_guardStep >= 2 && plan.Height > 540)
-        {
-            int w = Math.Max(960, SmartTuner.Even((int)(plan.Width * 0.8))), h = Math.Max(540, SmartTuner.Even((int)(plan.Height * 0.8)));
-            plan = plan with { Width = w, Height = h };
-            reasons.Add($"Running at {w}×{h} for now: this PC still fell behind real time at 30 FPS.");
-        }
-        bool capFps = gdi && plan.Fps > 30;
-        if (capFps)
+        if (gdi && plan.Fps > 30)
         {
             plan = plan with { Fps = 30 };
             reasons.Add("Capture is using the slower GDI method, so the stream runs at 30 FPS to stay smooth.");
@@ -300,12 +284,46 @@ public sealed class StreamEngine : IDisposable
         bool wizard = shown.Any(x => x.WindowTitle.Contains("Wizard101", StringComparison.OrdinalIgnoreCase) || x.Name.Contains("Wizard101", StringComparison.OrdinalIgnoreCase));
         if (wizard && s.ContentType == "HighMotion")
             reasons.Add("Tip: Wizard101 is turn-based. \"Low-motion\" (30 FPS) looks the same on stream, halves the data and leaves more power for smooth capture.");
-        plan = plan with { Reasons = reasons };
+
+        // the performance governor's rung: lighter encoder, lower frame rate, smaller picture
+        var rung = PerfLevel.At(level);
+        bool lightOk = Encoders.FirstOrDefault(e => e.Name == plan.Encoder)?.LightOk ?? true;
+        EncodePlan Rung(EncodePlan p)
+        {
+            var q = rung.Apply(p);
+            return lightOk ? q : q with { Light = false };
+        }
+        var adapted = Rung(plan);
+        if (level > 0)
+            reasons.Add($"Adapted to this PC: {rung.Explanation} ({adapted.Width}×{adapted.Height} · {adapted.Fps} FPS). " +
+                        "Leapcast steps back up when the PC has headroom.");
+        plan = adapted with { Reasons = reasons };
         // every canvas runs at the main frame rate (one shared compositor clock)
-        var vplan = set.Vertical is null ? null : set.Vertical with { Fps = plan.Fps };
-        var own = set.Own.ToDictionary(kv => kv.Key, kv => kv.Value with { Fps = plan.Fps });
+        var vplan = set.Vertical is null ? null : Rung(set.Vertical) with { Fps = plan.Fps };
+        var own = set.Own.ToDictionary(kv => kv.Key, kv => Rung(kv.Value) with { Fps = plan.Fps });
         return new PlanSet(plan, vplan, own) { UploadKbps = set.UploadKbps };
     }
+
+    /// <summary>What a rung changes for the current scenes and settings (rungs with the same effect are skipped).</summary>
+    private string RungEffect(int level)
+    {
+        var p = PlansFor(Settings, level).Main;
+        var r = PerfLevel.At(level);
+        bool hiddenWork = r.ActiveSceneOnly && HasHiddenSceneWork();
+        return $"{p.Width}x{p.Height}@{p.Fps}|{p.Light}|{r.PreviewFps}|{r.SmallPreview}|{hiddenWork}";
+    }
+
+    /// <summary>Scenes other than the one on air capture or draw something (what "active scene only" saves).</summary>
+    private bool HasHiddenSceneWork() =>
+        _scenes.Count > 1 && _scenes.Where((sc, i) => i != _activeIndex)
+            .Any(sc => PipelineBuilder.VisibleLayers(sc.Sources).Any(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))));
+
+    /// <summary>The performance governor has put the pipeline in "active scene only" mode.</summary>
+    private bool ActiveSceneOnly => Performance.ActiveSceneOnly && _scenes.Count > 1;
+
+    /// <summary>The scenes the pipeline composites: all of them (instant switching), or only the one on air.</summary>
+    private List<StudioScene> Composited() =>
+        ActiveSceneOnly ? new List<StudioScene> { _scenes[Math.Clamp(_activeIndex, 0, _scenes.Count - 1)] } : _scenes;
 
     // ------------------------------------------------------------------ public operations
 
@@ -326,9 +344,18 @@ public sealed class StreamEngine : IDisposable
         Settings = settings.Clone();
         _outputs.AutoReconnect = Settings.AutoReconnect;
 
+        // new settings from the user: give them a fair try from this PC's starting rung
+        if (restartIfRunning && !_governorPaused) _governor.Reset(HardwareProfile.StartLevel(Tier));
         if (_runner is null) { _activeIndex = index; return; }
-        bool structural = RunnerFingerprint(_scenes) != _runnerFingerprint;
-        if (restartIfRunning) _guardStep = 0; // new settings from the user: give them a fair try
+        if (ActiveSceneOnly && index != _activeIndex)
+        {
+            // only the scene on air is composited (performance governor): switching rebuilds with the new one
+            _activeIndex = index;
+            _audio.Configure(AudioSources());
+            await RestartAsync();
+            return;
+        }
+        bool structural = RunnerFingerprint(Composited()) != _runnerFingerprint;
         if (restartIfRunning || structural)
         {
             _activeIndex = index;
@@ -488,7 +515,7 @@ public sealed class StreamEngine : IDisposable
         {
             if (!wasActive)
             {
-                _bitrateScale = 1.0;
+                _governor.ResetBitrate();
                 _liveSince = DateTime.UtcNow;
                 _countedSegments.Clear();
                 _liveBytes = 0;
@@ -594,8 +621,10 @@ public sealed class StreamEngine : IDisposable
 
     public sealed record BenchmarkResult(double Fps, int TargetFps, double Speed, long Dropped, string Health)
     {
-        /// <summary>Kept up with real time at (nearly) the full frame rate.</summary>
-        public bool Smooth => Fps >= TargetFps * 0.93 && (Speed <= 0 || Speed >= 0.97);
+        /// <summary>Worst queue of frames waiting in front of the compositor during the test (seconds).</summary>
+        public double Backlog { get; init; }
+        /// <summary>Kept up with real time at (nearly) the full frame rate, with no frames piling up.</summary>
+        public bool Smooth => Fps >= TargetFps * 0.93 && (Speed <= 0 || Speed >= 0.97) && Backlog < 0.4;
     }
 
     /// <summary>
@@ -610,19 +639,31 @@ public sealed class StreamEngine : IDisposable
         bool oldReplay = ReplayBuffer;
         var scenes = _scenes.ToList();
         var scene = Scene;
+        int oldLevel = _governor.Level;
+        // test the candidate exactly as configured: the governor stays out of it
+        _governorPaused = true;
+        _governor.Force(0);
         try
         {
             await UpdateAsync(scenes, scene, candidate, restartIfRunning: true);
             await SetReplayBufferAsync(true); // encodes like a stream does
             await Task.Delay(2500, ct);        // devices settle, encoder look-ahead fills
             lock (_progressWindow) _progressWindow.Clear();
-            await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(seconds, 4, 30)), ct);
+            double worstBacklog = 0;
+            var until = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Clamp(seconds, 4, 30));
+            while (DateTime.UtcNow < until)
+            {
+                await Task.Delay(500, ct);
+                worstBacklog = Math.Max(worstBacklog, Math.Max(_cameras.MaxBacklogSeconds(), Math.Max(_windows.MaxBacklogSeconds(), _browsers.MaxBacklogSeconds())));
+            }
             var (fps, speed, _) = WindowedRates();
             var p = _lastProgress;
-            return new BenchmarkResult(fps, CurrentPlan?.Fps ?? candidate.FrameRate, speed, p?.DroppedFrames ?? 0, _health);
+            return new BenchmarkResult(fps, CurrentPlan?.Fps ?? candidate.FrameRate, speed, p?.DroppedFrames ?? 0, _health) { Backlog = worstBacklog };
         }
         finally
         {
+            _governorPaused = false;
+            _governor.Force(oldLevel);
             try { if (!oldReplay) await SetReplayBufferAsync(false); } catch { }
             try { await UpdateAsync(scenes, scene, oldSettings, restartIfRunning: true); } catch { }
         }
@@ -703,7 +744,7 @@ public sealed class StreamEngine : IDisposable
 
     // ------------------------------------------------------------------ pipeline management
 
-    private List<StudioSource> AudioSources() => PipelineBuilder.AudioRepresentatives(_scenes);
+    private List<StudioSource> AudioSources() => PipelineBuilder.AudioRepresentatives(Composited());
 
     /// <summary>Enabled outputs plus any running ones: every canvas encode they need is kept warm while live.</summary>
     private List<StreamOutput> Pool(StudioSettings s)
@@ -770,7 +811,8 @@ public sealed class StreamEngine : IDisposable
 
         // Pre-render text overlays.
         var rendered = new Dictionary<Guid, string>();
-        foreach (var s in _scenes.SelectMany(sc => sc.Sources).Where(s => s.Visible && SourceTypes.KindOf(s.Type) == SourceKind.Text))
+        var scenes = Composited();
+        foreach (var s in scenes.SelectMany(sc => sc.Sources).Where(s => s.Visible && SourceTypes.KindOf(s.Type) == SourceKind.Text))
         {
             try { if (_platform.RenderText(s, plan.Height) is { } png) rendered[s.Id] = png; } catch { }
         }
@@ -782,7 +824,7 @@ public sealed class StreamEngine : IDisposable
 
         // Webcams: one warm reader per device, fed to this run through counted pipes.
         var camUses = new Dictionary<string, (InputSpec device, List<StudioSource> uses)>();
-        var shownVideo = _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)
+        var shownVideo = scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)
             .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources) : Enumerable.Empty<StudioSource>()));
         foreach (var src in shownVideo.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera))
         {
@@ -794,7 +836,7 @@ public sealed class StreamEngine : IDisposable
         var camFeeds = _cameras.Open(ffmpeg, camUses, plan.Width, plan.Height, plan.Fps, origin);
         var winFeeds = _windows.Open(ffmpeg, WindowNeeds(plan, shape.Vertical ? vSize : null), plan.Fps, origin);
         var browserUses = new Dictionary<string, StudioSource>();
-        foreach (var src in _scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)
+        foreach (var src in scenes.SelectMany(sc => PipelineBuilder.VisibleLayers(sc.Sources)
                      .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources) : Enumerable.Empty<StudioSource>()))
                      .Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && x.Url.Trim().Length > 0))
             browserUses.TryAdd(PipelineBuilder.InputKey(src), src);
@@ -819,8 +861,8 @@ public sealed class StreamEngine : IDisposable
 
         var request = new PipelineRequest
         {
-            Scenes = _scenes,
-            ActiveSceneIndex = _activeIndex,
+            Scenes = scenes,
+            ActiveSceneIndex = ActiveSceneOnly ? 0 : _activeIndex,
             Plan = plan,
             MainBusPath = buses.TryGetValue("main", out var mb) ? mb.Path : null,
             VerticalCanvas = shape.Vertical ? vSize : null,
@@ -831,12 +873,12 @@ public sealed class StreamEngine : IDisposable
             SegmentPattern = segPattern,
             SegmentSeconds = _cache.SegmentSeconds,
             Preview = true,
-            PreviewWidth = PreviewWidthPx, PreviewHeight = PreviewHeightPx,
+            // lighter rungs: smaller, slower preview (every preview frame is scaled, converted and copied to the app)
+            PreviewWidth = Performance.SmallPreview ? 640 : PreviewWidthPx, PreviewHeight = Performance.SmallPreview ? 360 : PreviewHeightPx,
+            PreviewFps = Performance.PreviewFps,
             AudioInputs = pipes,
             RenderedImages = rendered,
             MonitorBounds = _platform.MonitorBounds,
-            FindWindow = _platform.FindWindow,
-            GpuWindowCapture = GpuWindowCaptureSupported,
             GpuDisplayCapture = !_gpuDisplayFailed,
             AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
             WallclockOrigin = origin,
@@ -852,7 +894,7 @@ public sealed class StreamEngine : IDisposable
         _runnerSpec = spec;
         _runnerRequest = request;
         _runnerOrigin = request.WallclockOrigin;
-        _runnerFingerprint = RunnerFingerprint(_scenes);
+        _runnerFingerprint = RunnerFingerprint(scenes);
         var (phw, pvw, ph) = spec.PreviewLayout;
         PreviewFrame = (phw + pvw, ph, phw, pvw);
         foreach (var w in spec.Warnings) Message?.Invoke(this, new EngineMessageEventArgs(w, false));
@@ -926,12 +968,12 @@ public sealed class StreamEngine : IDisposable
             string key = PipelineBuilder.InputKey(s);
             widths[key] = widths.TryGetValue(key, out var e) ? (e.src, Math.Max(e.w, w)) : (s, w);
         }
-        foreach (var sc in _scenes)
+        foreach (var sc in Composited())
         {
             var layers = PipelineBuilder.VisibleLayers(sc.Sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
             foreach (var s in layers.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.WindowTitle.Trim().Length > 0))
             {
-                if (Anchors.Resolve(s) == Anchors.Fill) fill.TryAdd(PipelineBuilder.InputKey(s), new WindowCaptureBridge.Need(s, W, H, s.FillMode));
+                if (Anchors.Resolve(s) == Anchors.Fill) fill.TryAdd(PipelineBuilder.InputKey(s), new WindowCaptureBridge.Need(s, W, H, s.FillMode, plan.Light));
                 else Want(s, LayoutMath.Horizontal(s, W, H, PipelineBuilder.AspectFor(s, _knownSizes)).W);
             }
             if (vertical is { } v)
@@ -944,7 +986,7 @@ public sealed class StreamEngine : IDisposable
             if (needs.ContainsKey(key)) continue;
             int ww = SmartTuner.Even((int)Math.Clamp(Math.Round(w), 64, 3840));
             int hh = SmartTuner.Even((int)Math.Clamp(Math.Round(ww / PipelineBuilder.AspectFor(src, _knownSizes)), 36, 2160));
-            needs[key] = new WindowCaptureBridge.Need(src, ww, hh, Anchors.FillFit);
+            needs[key] = new WindowCaptureBridge.Need(src, ww, hh, Anchors.FillFit, plan.Light);
         }
         return needs;
     }
@@ -1101,12 +1143,18 @@ public sealed class StreamEngine : IDisposable
         }
     }
 
+    /// <summary>Diagnostics: the governor's inputs right now (speed over 4 s, compositor backlog).</summary>
+    public (double Speed, double Backlog) PerformanceSignals() =>
+        (WindowedRates(4).speed, Math.Max(_cameras.MaxBacklogSeconds(), Math.Max(_windows.MaxBacklogSeconds(), _browsers.MaxBacklogSeconds())));
+
     /// <summary>Rolling (not since-start) output fps and speed over the last ~15 s of progress reports.</summary>
     /// <returns>fps, speed and the window length in seconds.</returns>
-    private (double fps, double speed, double span) WindowedRates()
+
+    private (double fps, double speed, double span) WindowedRates(double seconds = 15)
     {
         (DateTime t, ProgressInfo p)[] w;
-        lock (_progressWindow) w = _progressWindow.ToArray();
+        var since = DateTime.UtcNow - TimeSpan.FromSeconds(seconds);
+        lock (_progressWindow) w = _progressWindow.Where(x => x.t >= since).ToArray();
         if (w.Length < 2) return (0, 0, 0);
         double dt = (w[^1].t - w[0].t).TotalSeconds;
         if (dt < 0.5) return (0, 0, dt);
@@ -1115,77 +1163,80 @@ public sealed class StreamEngine : IDisposable
         return (fps, speed, dt);
     }
 
+    /// <summary>
+    /// Once a second: feed the governor the pipeline's speed (over the last ~4 s, so heavy lag is caught quickly),
+    /// how far frames are queuing up in front of the compositor, and the deepest upload queue; apply its decision.
+    /// </summary>
+    private static readonly TimeSpan StallAfter = TimeSpan.FromSeconds(10);
+    private DateTime _lastStallRestart = DateTime.MinValue;
+    /// <summary>How often the stall watchdog had to rebuild a pipeline that stopped producing frames.</summary>
+    public int StallRestarts { get; private set; }
+
     private void EvaluateHealth()
     {
         var r = _runner;
         if (r is null) { if (!Reconnecting) _health = "Idle"; return; }
-        var (fps, speed, span) = WindowedRates();
+        var (_, speed, span) = WindowedRates(4);
         var outs = _outputs.Snapshot();
-        bool live = outs.Any(o => o.State == OutputState.Live);
+        double backlog = Math.Max(_cameras.MaxBacklogSeconds(), Math.Max(_windows.MaxBacklogSeconds(), _browsers.MaxBacklogSeconds()));
+        double upload = outs.Where(o => o.State == OutputState.Live).Select(o => o.BufferedSeconds).DefaultIfEmpty(0).Max();
+        if (span < 2) speed = 0; // not enough progress reports yet
 
-        // Network: destinations are decoupled from the encoder, so a slow upload shows up as a growing backlog
-        // in that output's queue (not as the encoder slowing down).
-        var slow = outs.Where(o => o.State == OutputState.Live && o.BufferedSeconds > 2.5).ToList();
-        if (slow.Count > 0)
+        // ---- stall watchdog: a pipeline that stops producing frames (a capture that hangs, a driver hiccup)
+        // shows no lag numbers at all, so it is caught by silence: no progress for 10 s → rebuild it ----
+        var lastSign = _lastProgress is null ? r.StartedUtc : _lastProgressAt;
+        if (DateTime.UtcNow - lastSign > StallAfter && DateTime.UtcNow - _lastStallRestart > StallAfter)
         {
-            _uploadTroubleSince ??= DateTime.UtcNow;
-            _health = "Upload struggling: " + string.Join(", ", slow.Select(o => o.Name));
-            if (Settings.AutoAdjustBitrate
-                && DateTime.UtcNow - _uploadTroubleSince > TimeSpan.FromSeconds(10)
-                && DateTime.UtcNow - _lastAdjust > TimeSpan.FromSeconds(60)
-                && (CurrentPlan?.CapKbps ?? 0) > 1200)
+            _lastStallRestart = DateTime.UtcNow;
+            StallRestarts++;
+            _health = "Restarting a stalled pipeline";
+            _ = Locked(async () =>
             {
-                _lastAdjust = DateTime.UtcNow;
-                _uploadTroubleSince = null;
-                _bitrateScale *= 0.75;
-                _ = Locked(async () =>
-                {
-                    if (!_outputs.AnyActive || _runner is null) return;
-                    Message?.Invoke(this, new EngineMessageEventArgs(
-                        $"Your upload couldn't keep up ({string.Join(", ", slow.Select(o => o.Name))}), so the bitrate was lowered 25%. Outputs will reconnect for a second.", true));
-                    await RestartAsync();
-                });
-            }
+                if (!ReferenceEquals(_runner, r)) return;
+                try { File.Copy(Path.Combine(_logDir, "ffmpeg-last.log"), Path.Combine(_logDir, "ffmpeg-stalled.log"), true); } catch { } // for bug reports
+                Message?.Invoke(this, new EngineMessageEventArgs("The video pipeline stopped producing frames, so Leapcast restarted it.", true));
+                _audio.Configure(AudioSources());
+                await RestartAsync();
+            });
             return;
         }
-        _uploadTroubleSince = null;
-        if (outs.FirstOrDefault(o => o.State == OutputState.Reconnecting) is { } rc) { _health = $"Reconnecting {rc.Name}…"; return; }
-        if (span < 2) return;
-        // With wall-clock input timestamps the output only falls behind real time when this PC can't keep up.
-        bool behind = span >= 8 && speed > 0 && speed < 0.95;
-        double expected = CurrentPlan?.Fps ?? 30;
-        bool dipping = fps > 0 && fps < expected * 0.9;
-        if (behind)
+        if (_governorPaused) return;
+        bool adapt = Settings.AdaptivePerformance;
+
+        int before = _governor.Level;
+        var d = _governor.Evaluate(new PerformanceGovernor.Sample(speed, backlog, upload, DateTime.UtcNow - r.StartedUtc), DateTime.UtcNow,
+            useful: level => adapt && RungEffect(level) != RungEffect(before),
+            mayStepUp: !_outputs.AnyActive && !_cache.IsRecording, // stepping up rebuilds the pipeline: never mid-stream
+            adaptBitrate: Settings.AutoAdjustBitrate && _outputs.AnyActive);
+
+        // status text: the governor's view, plus which destination is in trouble
+        var slow = outs.Where(o => o.State == OutputState.Live && o.BufferedSeconds > 2.5).Select(o => o.Name).ToList();
+        _health = slow.Count > 0 ? "Upload struggling: " + string.Join(", ", slow)
+            : outs.FirstOrDefault(o => o.State == OutputState.Reconnecting) is { } rc ? $"Reconnecting {rc.Name}…"
+            : _governor.Condition;
+
+        if (d.Action == PerformanceGovernor.Action.None) return;
+        string text = d.Action switch
         {
-            _health = "Struggling: this PC can't keep up (try Auto-config)";
-            _behindSince ??= DateTime.UtcNow;
-            // Falling behind real time makes previews, recordings and streams stutter alike. After 10 s of it, take
-            // the cheapest step that helps (60 → 30 FPS first, then a smaller picture), once a minute at most.
-            if (DateTime.UtcNow - _behindSince > TimeSpan.FromSeconds(10) && DateTime.UtcNow - _lastGuard > TimeSpan.FromSeconds(60)
-                && Settings.AutoAdjustBitrate && _guardStep < 2 && DateTime.UtcNow - r.StartedUtc > TimeSpan.FromSeconds(15))
-            {
-                int fpsNow = CurrentPlan?.Fps ?? 30, hNow = CurrentPlan?.Height ?? 720;
-                int next = fpsNow > 30 ? 1 : hNow > 540 ? 2 : 0;
-                if (next > _guardStep)
-                {
-                    _guardStep = next;
-                    _lastGuard = DateTime.UtcNow;
-                    _behindSince = null;
-                    string what = next == 1 ? $"from {fpsNow} to 30 FPS" : "to a smaller picture";
-                    _ = Locked(async () =>
-                    {
-                        if (_runner is null) return;
-                        Message?.Invoke(this, new EngineMessageEventArgs(
-                            $"This PC couldn't keep up, so Leapcast switched {what} to stay smooth (until you change settings). Auto-config can find the best fit.", true));
-                        await RestartAsync();
-                    });
-                }
-            }
-            return;
-        }
-        _behindSince = null;
-        _health = live ? (dipping ? "OK (frame rate dipping)" : "Excellent") : (dipping ? "Running (frame rate dipping)" : "Running");
+            PerformanceGovernor.Action.LowerBitrate =>
+                $"Your upload couldn't keep up ({string.Join(", ", slow)}), so the bitrate was lowered 25%. Outputs will reconnect for a second.",
+            PerformanceGovernor.Action.StepDown =>
+                $"Adapting to this PC: {d.Reason}, so Leapcast switched to {PerfLevel.At(d.Level).Explanation}" +
+                (_outputs.AnyActive ? " (outputs reconnect for a second)." : "."),
+            _ => $"This PC has headroom again, so Leapcast stepped back up to {PerfLevel.At(d.Level).Name.ToLowerInvariant()}.",
+        };
+        _ = Locked(async () =>
+        {
+            if (_runner is null) return;
+            Message?.Invoke(this, new EngineMessageEventArgs(text, d.Action != PerformanceGovernor.Action.StepUp));
+            _audio.Configure(AudioSources());
+            await RestartAsync();
+            PerformanceChanged?.Invoke(PerfLevel.At(_governor.Level));
+        });
     }
+
+    /// <summary>Raised after the governor moved to another rung (the app can show it).</summary>
+    public event Action<PerfLevel>? PerformanceChanged;
 
     public EngineStatus Snapshot()
     {

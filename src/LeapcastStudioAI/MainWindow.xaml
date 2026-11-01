@@ -243,6 +243,8 @@
               <TextBlock x:Name="PlanTitle" Text="—" FontSize="14" FontWeight="SemiBold" Margin="2" TextWrapping="Wrap"/>
               <TextBlock x:Name="PlanSubtitle" Text="" Style="{StaticResource Hint}"/>
               <TextBlock x:Name="VerticalPlanText" Text="" Style="{StaticResource Hint}" Visibility="Collapsed"/>
+              <TextBlock x:Name="PerformanceText" Text="" Style="{StaticResource Hint}" Foreground="{StaticResource AccentBrush}"
+                         ToolTip="Leapcast steps to lighter settings when this PC falls behind, and back up when it has headroom (Settings → Connection)."/>
               <Grid Margin="2,6,2,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
@@ -284,7 +286,7 @@
     <!-- ===================== Status bar ===================== -->
     <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="14,5">
       <DockPanel>
-        <TextBlock DockPanel.Dock="Right" Text="v0.6.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
+        <TextBlock DockPanel.Dock="Right" Text="v0.7.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
         <TextBlock x:Name="HardwareLabel" DockPanel.Dock="Right" Text="Detecting hardware…" Foreground="{StaticResource MutedBrush}" FontSize="11"
                    VerticalAlignment="Center" Margin="0,0,16,0" TextTrimming="CharacterEllipsis" MaxWidth="560"/>
         <TextBlock x:Name="EngineStatus" Text="Starting…" Foreground="{StaticResource WarnBrush}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>

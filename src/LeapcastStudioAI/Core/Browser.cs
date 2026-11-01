@@ -62,6 +62,9 @@ public sealed class BrowserBridge : IDisposable
         return result;
     }
 
+    /// <summary>Deepest frame backlog of any browser pipe (seconds).</summary>
+    public double MaxBacklogSeconds() => _pipes.ToList().Select(p => p.BacklogSeconds).DefaultIfEmpty(0).Max();
+
     public void ClosePipes()
     {
         foreach (var p in _pipes) p.Dispose();

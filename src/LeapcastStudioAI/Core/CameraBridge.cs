@@ -22,6 +22,9 @@ public sealed class CountedFramePipe : IDisposable
 
     public long Sampled, Dropped, Written, FromLatest;
 
+    /// <summary>Seconds of frames waiting for ffmpeg to read them: grows as soon as the compositor falls behind.</summary>
+    public double BacklogSeconds => _queue.Count / _fps;
+
     /// <summary>ffmpeg input path (\\.\pipe\… on Windows, a FIFO elsewhere).</summary>
     public string Path { get; }
 
@@ -330,6 +333,9 @@ public sealed class CameraBridge : IDisposable
         }
         catch (Exception ex) { reader.Exited = true; Error?.Invoke($"\"{reader.Name}\": couldn't start the camera reader ({ex.Message})."); }
     }
+
+    /// <summary>Deepest frame backlog of any camera pipe (seconds).</summary>
+    public double MaxBacklogSeconds() => _pipes.ToList().Select(p => p.BacklogSeconds).DefaultIfEmpty(0).Max();
 
     /// <summary>Diagnostics: reader frames and pipe counters.</summary>
     public string Stats() =>

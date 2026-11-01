@@ -50,6 +50,7 @@ public partial class SettingsWindow : Window
         SelectTag(ReplayBox, current.ReplaySeconds.ToString(CultureInfo.InvariantCulture));
         ReconnectBox.IsChecked = current.AutoReconnect;
         AdjustBox.IsChecked = current.AutoAdjustBitrate;
+        AdaptBox.IsChecked = current.AdaptivePerformance;
         FfmpegBox.Text = current.FfmpegPath;
         VerticalBox.IsChecked = current.VerticalCanvas;
         SelectTag(VerticalResBox, current.VerticalResolution.Replace(" ", "").Replace("×", "x"));
@@ -98,6 +99,7 @@ public partial class SettingsWindow : Window
         s.ReplaySeconds = int.Parse(TagOf(ReplayBox, "60"), CultureInfo.InvariantCulture);
         s.AutoReconnect = ReconnectBox.IsChecked == true;
         s.AutoAdjustBitrate = AdjustBox.IsChecked == true;
+        s.AdaptivePerformance = AdaptBox.IsChecked == true;
         s.FfmpegPath = FfmpegBox.Text.Trim();
         s.VerticalCanvas = VerticalBox.IsChecked == true;
         s.VerticalResolution = TagOf(VerticalResBox, "720x1280");

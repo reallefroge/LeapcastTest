@@ -213,6 +213,8 @@ public sealed class StudioSettings
     // Reliability
     public bool AutoReconnect { get; set; } = true;
     public bool AutoAdjustBitrate { get; set; } = true;
+    /// <summary>Step to lighter settings when this PC falls behind real time (and back up when it has headroom).</summary>
+    public bool AdaptivePerformance { get; set; } = true;
     /// <summary>The auto-config wizard has been offered once (first launch).</summary>
     public bool AutoConfigOffered { get; set; }
     public string FfmpegPath { get; set; } = "";

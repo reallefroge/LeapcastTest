@@ -122,6 +122,7 @@
             <TextBlock Text="RELIABILITY" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
             <CheckBox x:Name="ReconnectBox" Content="Reconnect automatically if the stream drops"/>
             <CheckBox x:Name="AdjustBox" Content="Lower the bitrate automatically if my connection can't keep up"/>
+            <CheckBox x:Name="AdaptBox" Content="Adapt automatically when this PC can't keep up (lighter settings, back up when there's headroom)"/>
           
             </StackPanel>
           </Border>

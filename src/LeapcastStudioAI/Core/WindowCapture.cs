@@ -23,6 +23,7 @@ public sealed class WindowCaptureBridge : IDisposable
         public required string Key, Title, Signature, Name;
         public required int Width, Height, Fps;
         public required string Fill;
+        public bool Light;
         public required bool Cursor;
         public required (int L, int T, int R, int B) Crop;
         public Process? Proc;
@@ -109,7 +110,7 @@ public sealed class WindowCaptureBridge : IDisposable
     }
 
     /// <summary>What a window source needs from its reader for one pipeline run.</summary>
-    public sealed record Need(StudioSource Source, int Width, int Height, string Fill);
+    public sealed record Need(StudioSource Source, int Width, int Height, string Fill, bool Light = false);
 
     /// <summary>Keeps a reader per window (restarting only those whose needs changed) and returns fresh pipes.</summary>
     public Dictionary<string, WindowFeed> Open(string ffmpeg, IReadOnlyDictionary<string, Need> needs, int fps, double origin)
@@ -124,14 +125,14 @@ public sealed class WindowCaptureBridge : IDisposable
             {
                 var s = need.Source;
                 var crop = (Math.Max(0, s.CropLeft), Math.Max(0, s.CropTop), Math.Max(0, s.CropRight), Math.Max(0, s.CropBottom));
-                string sig = $"{s.WindowTitle.Trim()}|{need.Width}x{need.Height}|{need.Fill}|{fps}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}";
+                string sig = $"{s.WindowTitle.Trim()}|{need.Width}x{need.Height}|{need.Fill}|{fps}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}|{need.Light}";
                 if (!_readers.TryGetValue(key, out var reader) || reader.Signature != sig)
                 {
                     if (reader is not null) Stop(reader);
                     reader = new Reader
                     {
                         Key = key, Title = s.WindowTitle.Trim(), Name = s.Name, Signature = sig, Width = need.Width, Height = need.Height,
-                        Fill = need.Fill, Fps = fps, Cursor = s.CaptureCursor, Crop = crop,
+                        Fill = need.Fill, Fps = fps, Cursor = s.CaptureCursor, Crop = crop, Light = need.Light,
                     };
                     reader.UsedGpu = GpuCapture && !string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase);
                     _readers[key] = reader;
@@ -202,7 +203,7 @@ public sealed class WindowCaptureBridge : IDisposable
         string crop = r.Crop is (0, 0, 0, 0) ? "" : $"crop=iw-{r.Crop.L + r.Crop.R}:ih-{r.Crop.T + r.Crop.B}:{r.Crop.L}:{r.Crop.T},";
         string vf = gpuCut is { } g
             ? (g.Pad ? $"pad={r.Width}:{r.Height}:(ow-iw)/2:(oh-ih)/2:color=black," : "") + "format=yuv420p" // already cut and sized
-            : crop + PipelineBuilder.FillChain(fillSrc, r.Width, r.Height, r.Fps, pad: true) + "format=yuv420p";
+            : crop + PipelineBuilder.FillChain(fillSrc, r.Width, r.Height, r.Fps, pad: true, light: r.Light) + "format=yuv420p";
         foreach (var a in new[] { "-an", "-vf", vf, "-fps_mode", "passthrough", "-flush_packets", "1", "-f", "rawvideo", "pipe:1" })
             psi.ArgumentList.Add(a);
 
@@ -342,6 +343,9 @@ public sealed class WindowCaptureBridge : IDisposable
             return string.Join("; ", _readers.Values.Select(r =>
                 $"{r.Title}: {r.Width}x{r.Height} {(r.UsedGpu ? (r.UsedGpuScale ? "gpu+gpuscale" : "gpu") : "gdi")} starts={r.Starts} frames={Interlocked.Read(ref r.Frames)} {r.State}"));
     }
+
+    /// <summary>Deepest frame backlog of any window pipe (seconds).</summary>
+    public double MaxBacklogSeconds() { lock (_lock) return _pipes.Select(p => p.BacklogSeconds).DefaultIfEmpty(0).Max(); }
 
     /// <summary>Frames received from a window's reader so far (tests / health).</summary>
     public long FramesOf(string key) { lock (_lock) return _readers.TryGetValue(key, out var r) ? Interlocked.Read(ref r.Frames) : 0; }

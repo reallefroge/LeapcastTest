@@ -28,11 +28,22 @@ Every live input is opened with `-use_wallclock_as_timestamps 1` and shifted by 
 (`setpts=PTS-T0/TB`, `asetpts=…`) under `-copyts`. Devices that take a second to open no longer offset the
 picture from the sound, and `aresample=async` absorbs device clock drift and pipe jitter.
 
-## Health signal
-Because inputs are wall-clock stamped, the output can only fall behind real time when the encoder or the network
-can't keep up. The engine measures *output seconds per real second* over a rolling ~15 s window. A sustained value
-below 0.95 marks the connection as "Struggling", and if enabled, the cap drops 25% (at most once a minute).
-FFmpeg's own `speed=`/`fps=` include start-up time, so they aren't used for this.
+## Health signal and the performance governor
+`PerformanceGovernor` (Core/Performance.cs) is pure logic; the engine feeds it once a second and applies its decisions.
+
+Signals:
+- **speed**: output seconds per real second over the last 4 s of progress reports. FFmpeg's own `speed=` includes start-up time, so it isn't used.
+- **compositor backlog**: seconds of frames queued in the counted capture pipes (cameras, game windows, browser sources). It grows before stutter is visible, and it is also camera delay.
+- **upload backlog**: the deepest per-destination send queue.
+
+Decisions:
+- Severe lag (speed < 0.85 or backlog > 1 s) for 4 s, or mild lag (speed < 0.95 or backlog > 0.4 s) for 10 s, steps down one *useful* rung of `PerfLevel.Ladder`. A rung that changes nothing for the current plan, for example 30 FPS when already at 30, is skipped. After that it waits 20 s before acting again, so it never cascades.
+- The rungs are: light encoder presets (validated per encoder at probe time) with a 15 FPS / 640×360 preview → 30 FPS → only the on-air scene composited (a scene switch then rebuilds the pipeline) → 0.8× picture → 0.64× picture (never below 640×360).
+- It steps up only after 2 healthy minutes, only while nothing is live or recording, and never into a rung that failed in the last 10 minutes.
+- An upload backlog above 2.5 s for 10 s lowers the bitrate 25% (at most once a minute, down to 35%).
+- Stall watchdog: no progress at all for 10 s means the pipeline is rebuilt. The log is kept as `ffmpeg-stalled.log`.
+
+`HardwareProfile.Classify` sorts PCs into Low / Mid / High tiers. Low-end PCs start on the 30 FPS rung.
 
 ## Scene transitions
 All scenes are composited in the same filter graph from shared, de-duplicated inputs (`split` per device), then stacked

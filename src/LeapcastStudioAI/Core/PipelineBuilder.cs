@@ -41,9 +41,6 @@ public sealed class PipelineRequest
     public IReadOnlyDictionary<Guid, string> RenderedImages { get; init; } = new Dictionary<Guid, string>();
     /// <summary>Monitor index → virtual-desktop rectangle (only needed for GDI display capture).</summary>
     public Func<int, (int X, int Y, int W, int H)?>? MonitorBounds { get; init; }
-    /// <summary>Window title → HWND (for GPU window capture).</summary>
-    public Func<string, long?>? FindWindow { get; init; }
-    public bool GpuWindowCapture { get; init; }
     /// <summary>False after desktop duplication failed on this PC: display capture falls back to GDI.</summary>
     public bool GpuDisplayCapture { get; init; } = true;
     public int AudioBitrateKbps { get; init; } = 160;
@@ -130,7 +127,8 @@ public static class PipelineBuilder
     }
 
     /// <summary>Lanczos is the sharpest downscale (good for Wizard101's UI text) but costs ~3× bicubic per frame.</summary>
-    private static string ScaleFlags(int fps) => fps > 30 ? "bicubic" : "lanczos";
+    /// <remarks>On the governor's light rungs the cheapest good-looking scaler is used (several times faster).</remarks>
+    private static string ScaleFlags(int fps, bool light = false) => light ? "fast_bilinear" : fps > 30 ? "bicubic" : "lanczos";
 
     /// <summary>One representative source per distinct audio device across all scenes (first occurrence wins).</summary>
     public static List<StudioSource> AudioRepresentatives(IEnumerable<StudioScene> scenes)
@@ -275,7 +273,7 @@ public static class PipelineBuilder
             if (layers.Count > 0 && LayoutMath.IsBaseLayer(layers[0], layers))
             {
                 var b = layers[0];
-                string chain = $"{Crop(b)}{CameraPrep(b, SourceTypes.KindOf(b.Type), null)}{FillChain(b, W, H, F, pad: true)}format=yuv420p";
+                string chain = $"{Crop(b)}{CameraPrep(b, SourceTypes.KindOf(b.Type), null)}{FillChain(b, W, H, F, pad: true, light: plan.Light)}format=yuv420p";
                 sceneGraph.Add($"[{Prep(InputKey(b), chain)}]null[{p}base]");
                 start = 1;
             }
@@ -290,7 +288,7 @@ public static class PipelineBuilder
                 var src = layers[j];
                 var kind = SourceTypes.KindOf(src.Type);
                 bool alpha = SourceTypes.IsGraphic(kind);
-                string scale = HorizontalScale(src, W, H, F);
+                string scale = HorizontalScale(src, W, H, F, plan.Light);
                 var (px, py) = HorizontalPosition(src, W, H);
                 string pos = $"x={px}:y={py}";
                 string name = OverlayName(src.Id, CanvasKind.Horizontal);
@@ -613,7 +611,7 @@ public static class PipelineBuilder
         // Each sampled picture left the camera ~100 ms earlier (reader process + sampling, measured), so shift it back.
         double shift = -(CameraBridge.PathLatencySeconds + s.SyncOffsetMs / 1000.0);
         return new InputSpec(new[] { "-itsoffset", I(shift), "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", $"{feed.Width}x{feed.Height}",
-            "-framerate", I(r.Plan.Fps), "-thread_queue_size", "64", "-i", feed.Path }, false);
+            "-framerate", I(r.Plan.Fps), "-thread_queue_size", "8", "-i", feed.Path }, false);
     }
 
     private static InputSpec? WindowFeedInput(SourceKind kind, string key, PipelineRequest r)
@@ -621,7 +619,7 @@ public static class PipelineBuilder
         if (kind != SourceKind.Window || !r.WindowInputs.TryGetValue(key, out var feed)) return null;
         // same frame-counted path as the camera: shift back by the reader + sampling delay
         return new InputSpec(new[] { "-itsoffset", I(-CameraBridge.PathLatencySeconds), "-f", "rawvideo", "-pix_fmt", "yuv420p",
-            "-video_size", $"{feed.Width}x{feed.Height}", "-framerate", I(r.Plan.Fps), "-thread_queue_size", "64", "-i", feed.Path }, false);
+            "-video_size", $"{feed.Width}x{feed.Height}", "-framerate", I(r.Plan.Fps), "-thread_queue_size", "8", "-i", feed.Path }, false);
     }
 
     private static InputSpec? BrowserFeedInput(SourceKind kind, string key, PipelineRequest r)
@@ -674,32 +672,15 @@ public static class PipelineBuilder
                 return new InputSpec(new[] { "-thread_queue_size", "512", "-f", "lavfi", "-i",
                     $"ddagrab=output_idx={Math.Max(0, s.MonitorIndex)}:framerate={F}:draw_mouse={mouse},hwdownload,format=bgra" }, true);
 
+            // Windows and webcams are captured by their own reader processes (WindowCaptureBridge / CameraBridge)
+            // and arrive as counted pipes; reaching here means there was nothing to capture.
             case SourceKind.Window:
-                if (string.IsNullOrWhiteSpace(s.WindowTitle)) { warnings.Add($"\"{s.Name}\": no window chosen, skipped."); return null; }
-                if (r.GpuWindowCapture && !string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Windows.Graphics.Capture: the GPU copies the game's own frames (DirectX-friendly, works when the
-                    // window is covered, steady frame pacing). Targeted by handle, so no title escaping is needed.
-                    var hwnd = r.FindWindow?.Invoke(s.WindowTitle.Trim());
-                    if (hwnd is null or 0)
-                    {
-                        warnings.Add($"\"{s.Name}\": window \"{s.WindowTitle}\" isn't open. Start the game, then refresh the scene.");
-                        return null;
-                    }
-                    return new InputSpec(new[] { "-thread_queue_size", "512", "-f", "lavfi", "-i",
-                        $"gfxcapture=hwnd={hwnd}:max_framerate={F}:capture_cursor={mouse},hwdownload,format=bgra" }, true);
-                }
-                return new InputSpec(new[] { "-thread_queue_size", "512", "-f", "gdigrab", "-framerate", I(F),
-                    "-draw_mouse", mouse, "-i", "title=" + s.WindowTitle.Trim() }, true);
+                warnings.Add($"\"{s.Name}\": no window chosen, skipped.");
+                return null;
 
             case SourceKind.Camera:
-                if (string.IsNullOrWhiteSpace(s.DeviceName)) { warnings.Add($"\"{s.Name}\": no camera chosen, skipped."); return null; }
-                var c = new List<string> { "-thread_queue_size", "512", "-f", "dshow", "-rtbufsize", "256M" };
-                if (!string.IsNullOrWhiteSpace(s.CameraResolution) && s.CameraResolution != "Default")
-                    c.AddRange(new[] { "-video_size", s.CameraResolution.Replace("×", "x").Replace(" ", "") });
-                if (s.CameraFps > 0) c.AddRange(new[] { "-framerate", I(s.CameraFps) });
-                c.AddRange(new[] { "-i", "video=" + s.DeviceName });
-                return new InputSpec(c, true);
+                warnings.Add($"\"{s.Name}\": no camera chosen, skipped.");
+                return null;
 
             case SourceKind.Image:
                 if (string.IsNullOrWhiteSpace(s.FilePath) || !File.Exists(s.FilePath))
@@ -761,29 +742,29 @@ public static class PipelineBuilder
     }
 
     /// <summary>How an overlay is scaled on the horizontal canvas ("" = natural size, for text and logos).</summary>
-    public static string HorizontalScale(StudioSource src, int W, int H, int F)
+    public static string HorizontalScale(StudioSource src, int W, int H, int F, bool light = false)
     {
         var kind = SourceTypes.KindOf(src.Type);
         string anchor = Anchors.Resolve(src);
         bool natural = SourceTypes.IsGraphic(kind);
-        if (anchor == Anchors.Fill) return FillChain(src, W, H, F, pad: false);
+        if (anchor == Anchors.Fill) return FillChain(src, W, H, F, pad: false, light);
         if (anchor == Anchors.Free)
         {
             if (src.W <= 0 && natural) return "";
             double frac = src.W > 0 ? src.W : 0.25;
-            return $"scale={Math.Max(16, SmartTuner.Even((int)Math.Round(frac * W)))}:-2:flags=bicubic,";
+            return $"scale={Math.Max(16, SmartTuner.Even((int)Math.Round(frac * W)))}:-2:flags={(light ? "fast_bilinear" : "bicubic")},";
         }
         if (kind == SourceKind.Text || (kind is SourceKind.Image or SourceKind.Browser && src.SizePercent <= 0)) return "";
-        return $"scale={LayoutMath.OverlayWidth(src, W)}:-2:flags=bicubic,";
+        return $"scale={LayoutMath.OverlayWidth(src, W)}:-2:flags={(light ? "fast_bilinear" : "bicubic")},";
     }
 
     /// <summary>
     /// Scales a full-screen source to the canvas. "Crop" (default) fills the whole canvas without stretching by
     /// trimming the edges, so an 800×500 (16:10) game window fills a 16:9 stream with no bars and no distortion.
     /// </summary>
-    public static string FillChain(StudioSource s, int cw, int ch, int fps, bool pad)
+    public static string FillChain(StudioSource s, int cw, int ch, int fps, bool pad, bool light = false)
     {
-        string flags = ScaleFlags(fps);
+        string flags = ScaleFlags(fps, light);
         return s.FillMode switch
         {
             Anchors.FillStretch => $"scale={cw}:{ch}:flags={flags},setsar=1,",
