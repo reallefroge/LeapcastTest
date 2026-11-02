@@ -36,7 +36,7 @@ public partial class SettingsWindow : Window
                 if (string.Equals(item.Tag as string, tab, StringComparison.OrdinalIgnoreCase)) Tabs.SelectedItem = item;
         _twitch = current.Outputs.FirstOrDefault(o => o.Service == "Twitch" && SecretStore.Unprotect(o.StreamKeyProtected).Length > 0);
 
-        UploadBox.Text = current.UploadMbps > 0 ? current.UploadMbps.ToString("0.#", CultureInfo.CurrentCulture) : "";
+        UploadBox.Text = current.UploadKbps > 0 ? current.UploadKbps.ToString(CultureInfo.InvariantCulture) : "";
         if (current.UploadMeasuredUtc is { } when)
             TestResult.Text = $"Last measured {when.ToLocalTime():g}.";
 
@@ -70,9 +70,8 @@ public partial class SettingsWindow : Window
         VerticalBitrateBox.Text = current.VerticalBitrateKbps.ToString(CultureInfo.InvariantCulture);
         SelectTag(VerticalResBox, current.VerticalResolution.Replace(" ", "").Replace("×", "x"));
 
-        TestButton.IsEnabled = _twitch is not null;
         if (_twitch is null && current.UploadMeasuredUtc is null)
-            TestResult.Text = "Add a Twitch output with its key to measure your upload (Twitch's private test mode, nothing is shown to viewers).";
+            TestResult.Text = "Measures with an upload test over the internet (add a Twitch output with its key to use Twitch's own test mode).";
 
         _loaded = true;
         UpdatePlan();
@@ -98,7 +97,7 @@ public partial class SettingsWindow : Window
     private StudioSettings Collect()
     {
         var s = Result.Clone();
-        s.UploadMbps = double.TryParse(UploadBox.Text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var up) ? Math.Max(0, up) : 0;
+        s.UploadKbps = int.TryParse(UploadBox.Text.Replace(",", "").Replace(" ", ""), NumberStyles.Integer, CultureInfo.InvariantCulture, out var up) ? Math.Clamp(up, 0, 10_000_000) : 0;
         s.ContentType = TagOf(ContentBox, "LowMotion");
         s.QualityProfile = TagOf(ProfileBox, "Auto");
         s.Resolution = string.IsNullOrWhiteSpace(ResolutionBox.Text) ? "1920 × 1080" : ResolutionBox.Text.Trim();
@@ -140,18 +139,14 @@ public partial class SettingsWindow : Window
 
     private async void Test_Click(object sender, RoutedEventArgs e)
     {
-        if (_engine.FfmpegPath is null) { TestResult.Text = "FFmpeg not found."; return; }
-        if (_twitch is null) { TestResult.Text = "Add a Twitch output with its stream key first."; return; }
         if (_engine.Live) { TestResult.Text = "End your stream before testing (the test would compete for upload)."; return; }
         TestButton.IsEnabled = false;
         _testCts = new CancellationTokenSource();
         var progress = new Progress<string>(t => TestResult.Text = t);
         try
         {
-            TestResult.Text = "Connecting to Twitch (test mode: nothing is shown to viewers)…";
-            var r = await BandwidthTester.RunAsync(_engine.FfmpegPath, _twitch.ServerUrl, SecretStore.Unprotect(_twitch.StreamKeyProtected), 9000, 12, progress, _testCts.Token);
-            double mbps = r.MeasuredKbps / 1000.0;
-            UploadBox.Text = mbps.ToString("0.#", CultureInfo.CurrentCulture);
+            var r = await UploadScan.RunAsync(Result, _engine.FfmpegPath, progress, _testCts.Token);
+            UploadBox.Text = ((int)Math.Round(r.MeasuredKbps)).ToString(CultureInfo.InvariantCulture);
             Result.UploadMeasuredUtc = DateTime.UtcNow;
             TestResult.Text = r.Detail;
             UpdatePlan();

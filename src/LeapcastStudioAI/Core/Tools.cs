@@ -183,7 +183,7 @@ public static class BandwidthTester
                     if (firstBytes < 0) { firstBytes = bytes; firstT = sw.Elapsed.TotalSeconds; }
                     lastBytes = bytes; lastT = sw.Elapsed.TotalSeconds;
                     double kbpsNow = lastT - firstT > 0.5 ? (lastBytes - firstBytes) * 8 / 1000.0 / (lastT - firstT) : 0;
-                    progress?.Report(kbpsNow > 0 ? $"Measuring… {kbpsNow / 1000:0.0} Mbps" : "Connecting…");
+                    progress?.Report(kbpsNow > 0 ? $"Measuring… {kbpsNow:N0} kbps" : "Connecting…");
                 }
             }
             else if (!FfmpegRunner.IsProgressLine(line, line.IndexOf('='))) errors.Add(line);
@@ -198,8 +198,8 @@ public static class BandwidthTester
         double kbps = (lastBytes - firstBytes) * 8 / 1000.0 / span;
         bool reached = kbps >= testKbps * 0.95;
         string detail = reached
-            ? $"Your upload handled the full {testKbps / 1000.0:0.#} Mbps test, so it's at least that fast."
-            : $"Your upload sustained about {kbps / 1000:0.0} Mbps.";
+            ? $"Your upload handled the full {testKbps:N0} kbps test (Twitch), so it's at least that fast."
+            : $"Your upload sustained about {kbps:N0} kbps (Twitch test).";
         return new BandwidthResult(kbps, testKbps, reached, detail);
     }
 }

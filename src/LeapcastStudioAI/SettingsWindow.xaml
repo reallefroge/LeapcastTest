@@ -130,9 +130,9 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">
             <StackPanel>
-            <TextBlock Text="Upload speed (Mbps)" Style="{StaticResource FieldLabel}"/>
+            <TextBlock Text="Upload speed (kbps)" Style="{StaticResource FieldLabel}"/>
             <TextBox x:Name="UploadBox" TextChanged="AnyChanged"/>
-            <TextBlock Text="Type the upload from any speed test, or measure it with your Twitch output below. Auto quality plans the stream within 75% of it. Every destination gets the full bitrate (like Aitum Multistream), and Leapcast warns if they add up to more than your upload can take."
+            <TextBlock Text="Type it in kbps (12 Mbps = 12000), or measure it below (Twitch's invisible test mode if you have a Twitch output with its key, otherwise an upload test over the internet). Auto quality plans the stream within 75% of it. Every destination gets the full bitrate (like Aitum Multistream), and Leapcast warns if they add up to more than your upload can take."
                        Style="{StaticResource Hint}"/>
             <DockPanel Margin="0,8,0,0">
               <Button x:Name="TestButton" DockPanel.Dock="Left" Content="Test my connection" Click="Test_Click"/>

@@ -28,13 +28,13 @@ var enc = new List<ProbedEncoder> { new("h264_nvenc", EncoderTier.Rich), new("li
 var s = new StudioSettings();
 var plan = SmartTuner.Resolve(s, enc, 8);
 Check(plan is { Width: 1600, Height: 900, Fps: 30, CapKbps: 3500, Encoder: "h264_nvenc" }, $"default (no test yet) → {plan.Summary}");
-s.UploadMbps = 20; plan = SmartTuner.Resolve(s, enc, 8);
+s.UploadKbps = 20000; plan = SmartTuner.Resolve(s, enc, 8);
 Check(plan is { Width: 1920, Height: 1080, CapKbps: 5000 }, $"20 Mbps → {plan.Summary}");
-s.UploadMbps = 4; plan = SmartTuner.Resolve(s, enc, 8);
+s.UploadKbps = 4000; plan = SmartTuner.Resolve(s, enc, 8);
 Check(plan.Width == 1280 && plan.CapKbps == 2500, $"4 Mbps → {plan.Summary}");
-s.UploadMbps = 2; plan = SmartTuner.Resolve(s, enc, 8);
+s.UploadKbps = 2000; plan = SmartTuner.Resolve(s, enc, 8);
 Check(plan.Width == 960 && plan.CapKbps <= 1340 && plan.CapKbps >= 800, $"2 Mbps → {plan.Summary}");
-s.UploadMbps = 0; s.QualityProfile = "High"; s.Platform = "Twitch"; s.ContentType = "HighMotion"; plan = SmartTuner.Resolve(s, enc, 8);
+s.UploadKbps = 0; s.QualityProfile = "High"; s.Platform = "Twitch"; s.ContentType = "HighMotion"; plan = SmartTuner.Resolve(s, enc, 8);
 Check(plan is { Fps: 60, CapKbps: 6000 }, $"high-motion High on Twitch → {plan.Summary}");
 plan = SmartTuner.Resolve(new StudioSettings(), new List<ProbedEncoder> { new("h264_nvenc", EncoderTier.Basic), new("libx264", EncoderTier.Rich) }, 16);
 Check(plan.Encoder == "libx264", "old NVENC + 16 threads → x264");
@@ -46,7 +46,7 @@ Check(SmartTuner.ParseResolution("1664 × 936") == (1664, 936), "parse resolutio
 
 // ---------------------------------------------------------------- multistream budget + layout math
 Console.WriteLine("Multistream budget and layout");
-var mset = new StudioSettings { UploadMbps = 10 };
+var mset = new StudioSettings { UploadKbps = 10000 };
 var twitchO = new StreamOutput { Name = "Twitch", Service = "Twitch" };
 var ytO = new StreamOutput { Name = "YouTube", Service = "YouTube" };
 var ttO = new StreamOutput { Name = "TikTok", Service = "TikTok", Canvas = "Vertical" };
@@ -57,9 +57,9 @@ Check(ps.Main.CapKbps == solo.Main.CapKbps && ps.Main.CapKbps <= 6000 && ps.Vert
     $"Aitum-style: adding destinations doesn't divide the bitrate (3 destinations: {ps.Main.CapKbps} kbps each, alone: {solo.Main.CapKbps} kbps; vertical {ps.Vertical?.CapKbps} kbps)");
 Check(ps.Own.Count == 0, "Twitch + YouTube share one encode (no extra GPU/CPU per destination); only the vertical canvas has its own");
 Check(ps.UploadKbps >= 2 * ps.Main.CapKbps + (ps.Vertical?.CapKbps ?? 0), $"the upload needed is the sum of every destination ({ps.UploadKbps} kbps)");
-var tight = OutputBudget.Resolve(new StudioSettings { UploadMbps = 6 }, mset.Outputs, true, enc, 8);
+var tight = OutputBudget.Resolve(new StudioSettings { UploadKbps = 6000 }, mset.Outputs, true, enc, 8);
 Check(tight.Main.Reasons.Any(r => r.StartsWith("Heads-up")), "when they add up to more than is safe for the upload, it warns instead of cutting quality");
-var vbrSet = new StudioSettings { UploadMbps = 10, VerticalBitrateKbps = 3200 };
+var vbrSet = new StudioSettings { UploadKbps = 10000, VerticalBitrateKbps = 3200 };
 Check(OutputBudget.Resolve(vbrSet, mset.Outputs, true, enc, 8).Vertical?.CapKbps == 3200, "the vertical canvas bitrate can be set");
 var noTest = OutputBudget.Resolve(new StudioSettings(), new[] { twitchO, ytO }, false, enc, 8);
 Check(noTest.Main.CapKbps <= 6000, $"Twitch + YouTube share an encode capped by Twitch's limit ({noTest.Main.CapKbps} kbps)");
@@ -304,6 +304,62 @@ Console.WriteLine("Profiles: save, switch, export to a file and import on a fres
     var cs = new StudioSettings(); cs.Hotkeys[HotkeyActions.Record] = "ctrl+1";
     Check(HotkeyActions.Conflicts(cs, conflictsScenes).SequenceEqual(new[] { "Ctrl+1" }), "a key combination used twice is reported");
     Check(EncoderCatalog.SlowerX264("veryfast") == "faster", "Quality preset: one x264 step slower");
+}
+
+Console.WriteLine("Upload speed scan (kbps), against a local server limited to ~4,000 kbps");
+{
+    // a raw HTTP server with a small receive window that reads ~500 KB/s in total (≈ 4,000 kbps), like a slow line
+    var tcp = new TcpListener(IPAddress.Loopback, 0);
+    tcp.Server.ReceiveBufferSize = 64 * 1024;
+    tcp.Start();
+    int port = ((IPEndPoint)tcp.LocalEndpoint).Port;
+    using var serverCts = new CancellationTokenSource();
+    long budgetBytes = 0; var budgetClock = Stopwatch.StartNew();
+    async Task Serve(TcpClient c)
+    {
+        using var _c = c;
+        var ns = c.GetStream();
+        var buf = new byte[16 * 1024];
+        try
+        {
+            while (!serverCts.IsCancellationRequested)
+            {
+                // headers
+                var head = new System.Text.StringBuilder();
+                while (!head.ToString().Contains("\r\n\r\n"))
+                {
+                    int b = ns.ReadByte();
+                    if (b < 0) return;
+                    head.Append((char)b);
+                }
+                var m = System.Text.RegularExpressions.Regex.Match(head.ToString(), @"Content-Length:\s*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                long left = m.Success ? long.Parse(m.Groups[1].Value) : 0;
+                while (left > 0)
+                {
+                    int n = await ns.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, left)), serverCts.Token);
+                    if (n <= 0) return;
+                    left -= n;
+                    long allowed = (long)(budgetClock.Elapsed.TotalSeconds * 500_000);
+                    long over = Interlocked.Add(ref budgetBytes, n) - allowed;
+                    if (over > 0) await Task.Delay(TimeSpan.FromSeconds(over / 500_000.0), serverCts.Token);
+                }
+                var ok = System.Text.Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                await ns.WriteAsync(ok, serverCts.Token);
+            }
+        }
+        catch { }
+    }
+    _ = Task.Run(async () => { while (!serverCts.IsCancellationRequested) { try { var c = await tcp.AcceptTcpClientAsync(serverCts.Token); c.ReceiveBufferSize = 64 * 1024; _ = Task.Run(() => Serve(c)); } catch { return; } } });
+    var up = await UploadSpeedTest.RunAsync(null, default, $"http://127.0.0.1:{port}/up", seconds: 6, streams: 4);
+    Check(up.MeasuredKbps is > 2400 and < 6000, $"measures the sustained upload in kbps ({up.MeasuredKbps:N0} kbps for a ~4,000 kbps line): {up.Detail}");
+    serverCts.Cancel(); tcp.Stop();
+    try { await UploadSpeedTest.RunAsync(null, default, $"http://127.0.0.1:{RtmpServer.FreePort()}/up", seconds: 3); Check(false, "an unreachable test server is reported"); }
+    catch (InvalidOperationException ex) { Check(ex.Message.Contains("kbps"), $"an unreachable test server is reported, asking for kbps ({ex.Message})"); }
+    var two = new StudioSettings { UploadMbps = 2.5 };
+    Check(two.UploadKbps == 2500, "older settings in Mbps are read as kbps");
+    var cand = AutoConfig.Ladder(new AutoConfig.Input("LowMotion", false, 8000, null, enc, 8, 2, 160, VerticalKbps: 2000));
+    int perDest = cand[0].CapKbps;
+    Check(2 * (perDest + 160) + 2000 + 160 <= 8000 * 0.75 + 1, $"auto-config picks a bitrate where every destination fits the upload ({perDest:N0} kbps each for 2 destinations + vertical on 8,000 kbps)");
 }
 
 Console.WriteLine("Performance governor");

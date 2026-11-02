@@ -93,7 +93,7 @@ public sealed class OutputRow : INotifyPropertyChanged
         {
             case OutputState.Live:
                 DotBrush = Green;
-                Detail = $"LIVE {Fmt(st.LiveFor)} · {st.Kbps / 1000:0.0} Mbps" + (st.BufferedSeconds > 1.5 ? $" · {st.BufferedSeconds:0}s behind" : "");
+                Detail = $"LIVE {Fmt(st.LiveFor)} · {st.Kbps:N0} kbps" + (st.BufferedSeconds > 1.5 ? $" · {st.BufferedSeconds:0}s behind" : "");
                 break;
             case OutputState.Starting:
                 DotBrush = Amber; Detail = st.Message ?? "Connecting…"; break;
@@ -476,9 +476,9 @@ public partial class MainWindow : Window
         RecTag.Visibility = st.Recording ? Visibility.Visible : Visibility.Collapsed;
         RecTagText.Text = $"● REC  {Fmt(st.RecordingFor)}";
 
-        StatNow.Text = st.Live && st.UploadKbps > 0 ? $"↑ {st.UploadKbps / 1000:0.0} Mbps"
-            : encoding && st.RecentKbps > 0 ? $"● {st.RecentKbps / 1000:0.0} Mbps" : "↑ —";
-        StatAvg.Text = st.Live && st.AverageKbps > 0 ? $"{st.AverageKbps / 1000:0.00} Mbps" : "—";
+        StatNow.Text = st.Live && st.UploadKbps > 0 ? $"↑ {st.UploadKbps:N0} kbps"
+            : encoding && st.RecentKbps > 0 ? $"● {st.RecentKbps:N0} kbps" : "↑ —";
+        StatAvg.Text = st.Live && st.AverageKbps > 0 ? $"{st.AverageKbps:N0} kbps" : "—";
         bool cbr = _engine.CurrentPlan?.Cbr ?? false;
         StatSaved.Text = st.Live && st.AverageKbps > 0 && st.CapKbps > 0 && !cbr
             ? $"{Math.Max(0, (1 - st.AverageKbps / (st.CapKbps + _state.Settings.AudioBitrateKbps)) * 100):0}%"
@@ -533,12 +533,12 @@ public partial class MainWindow : Window
             : $"Adaptive performance: {rung.Name.ToLowerInvariant()} ({tier}): {rung.Explanation}.";
         ReasonsList.ItemsSource = plan.Reasons.Concat(plans.Vertical is not null && vertical ? plans.Vertical.Reasons : Array.Empty<string>()).ToList();
         int enabled = _state.Settings.Outputs.Count(o => o.Enabled);
-        double up = _state.Settings.UploadMbps;
-        bool tooMuch = up > 0 && plans.UploadKbps > up * 1000 * 0.75;
+        int up = _state.Settings.UploadKbps;
+        bool tooMuch = up > 0 && plans.UploadKbps > up * 0.75;
         UploadPlanText.Text = enabled == 0 ? ""
-            : $"Each destination gets the full bitrate, and extra destinations cost no extra encoding (one encode, copied to each). Going live on {enabled} destination{(enabled == 1 ? "" : "s")} uploads up to {plans.UploadKbps / 1000.0:0.0} Mbps in total"
-              + (up > 0 ? $" of your {up:0.#} Mbps{(tooMuch ? ": that's more than is safe, so lower the bitrate (Settings → Stream) or stream to fewer places." : ".")}"
-                        : ". Test your connection in Settings to check it fits.");
+            : $"Each destination gets the full bitrate, and extra destinations cost no extra encoding (one encode, copied to each). Going live on {enabled} destination{(enabled == 1 ? "" : "s")} uploads up to {plans.UploadKbps:N0} kbps in total"
+              + (up > 0 ? $" of your {up:N0} kbps{(tooMuch ? ": that's more than is safe, so lower the bitrate (Settings → Stream) or stream to fewer places." : ".")}"
+                        : ". Scan your upload (Tools → Auto-config or Settings → Connection) to check it fits.");
         UploadPlanText.Foreground = tooMuch ? (Brush)FindResource("WarnBrush") : (Brush)FindResource("MutedBrush");
     }
 

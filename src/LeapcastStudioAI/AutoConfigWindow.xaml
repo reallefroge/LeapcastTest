@@ -32,9 +32,15 @@
               <ComboBoxItem Content="Smooth stream and a smooth game: least PC load (recommended)" Tag="Performance"/>
               <ComboBoxItem Content="Sharpest picture my PC and connection can hold" Tag="Quality"/>
             </ComboBox>
-            <TextBlock Text="Upload speed (Mbps)" Style="{StaticResource FieldLabel}"/>
-            <TextBox x:Name="UploadBox"/>
-            <TextBlock x:Name="UploadHint" Text="From any speed test (e.g. your provider's), or measured in Settings → Connection." Style="{StaticResource Hint}"/>
+            <TextBlock Text="Upload speed (kbps)" Style="{StaticResource FieldLabel}"/>
+            <DockPanel>
+              <Button x:Name="ScanButton" DockPanel.Dock="Right" Content="Scan my upload" Click="Scan_Click" Margin="6,0,0,0"
+                      ToolTip="Measures your real upload speed in about 10 seconds"/>
+              <TextBox x:Name="UploadBox"/>
+            </DockPanel>
+            <CheckBox x:Name="ScanBox" Content="Scan my upload speed as part of auto-config (about 10 s), then fit the bitrate to it"/>
+            <TextBlock x:Name="UploadHint" Text="Type it in kbps (e.g. 12000 for 12 Mbps), or scan it: with a Twitch output that has its key, the scan streams to Twitch in its invisible test mode; otherwise it's an upload test over the internet."
+                       Style="{StaticResource Hint}"/>
             <CheckBox x:Name="FillGameBox" Content="Make the game fill the whole 16:9 stream (trim edges, no bars, no stretching)" IsChecked="True"/>
             <TextBlock Text="The test runs your real scene for about 15 seconds per try (a couple of tries at most). Keep the game open and playing; nothing goes live."
                        Style="{StaticResource Hint}" Margin="3,10,3,0"/>

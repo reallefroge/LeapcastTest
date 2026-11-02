@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace LeapcastStudioAI;
 
@@ -216,7 +217,11 @@ public sealed class StudioSettings
     public string Encoder { get; set; } = "Auto";
     /// <summary>"SmartVbr" (quality-targeted, capped) or "Cbr" (constant, legacy).</summary>
     public string RateControl { get; set; } = "SmartVbr";
-    public double UploadMbps { get; set; }
+    /// <summary>Measured or typed upload speed in kbps (0 = unknown).</summary>
+    public int UploadKbps { get; set; }
+    /// <summary>Older versions stored Mbps: read into <see cref="UploadKbps"/>, never written.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public double UploadMbps { get => 0; set => UploadKbps = (int)Math.Round(Math.Max(0, value) * 1000); }
     public DateTime? UploadMeasuredUtc { get; set; }
     public int AudioBitrateKbps { get; set; } = 160;
     /// <summary>Master fader for the stream/recording audio (dB).</summary>

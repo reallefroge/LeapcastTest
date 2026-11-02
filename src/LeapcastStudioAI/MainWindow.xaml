@@ -364,7 +364,7 @@
     <!-- ===================== Status bar ===================== -->
     <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="14,5">
       <DockPanel>
-        <TextBlock DockPanel.Dock="Right" Text="v0.9.1 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
+        <TextBlock DockPanel.Dock="Right" Text="v0.9.2 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
         <TextBlock x:Name="HardwareLabel" DockPanel.Dock="Right" Text="Detecting hardware…" Foreground="{StaticResource MutedBrush}" FontSize="11"
                    VerticalAlignment="Center" Margin="0,0,16,0" TextTrimming="CharacterEllipsis" MaxWidth="560"/>
         <TextBlock x:Name="EngineStatus" Text="Starting…" Foreground="{StaticResource WarnBrush}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>

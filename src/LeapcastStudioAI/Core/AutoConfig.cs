@@ -6,8 +6,11 @@ namespace LeapcastStudioAI;
 /// plus lighter fallbacks to try when the stress test shows the PC can't keep up.</summary>
 public static class AutoConfig
 {
-    public sealed record Input(string Content, bool PreferQuality, double UploadMbps, (int W, int H)? GameSize,
-        IReadOnlyList<ProbedEncoder> Encoders, int CpuThreads, int Destinations, int AudioKbps = 160);
+    /// <param name="UploadKbps">Upload speed in kbps (0 = unknown).</param>
+    /// <param name="Destinations">Horizontal destinations sharing the main encode (each gets its full bitrate).</param>
+    /// <param name="VerticalKbps">Upload the vertical canvas needs (0 = none).</param>
+    public sealed record Input(string Content, bool PreferQuality, int UploadKbps, (int W, int H)? GameSize,
+        IReadOnlyList<ProbedEncoder> Encoders, int CpuThreads, int Destinations, int AudioKbps = 160, int VerticalKbps = 0);
 
     public sealed record Candidate(int Width, int Height, int Fps, int CapKbps, string Encoder, IReadOnlyList<string> Reasons)
     {
@@ -50,8 +53,14 @@ public static class AutoConfig
 
         // per-destination upload share (75% of the upload is the safe ceiling)
         int dests = Math.Max(1, i.Destinations);
-        int budget = i.UploadMbps > 0 ? (int)(i.UploadMbps * 750 / dests) - i.AudioKbps : 6000;
-        if (i.UploadMbps > 0) reasons.Add($"{i.UploadMbps:0.#} Mbps upload over {dests} destination{(dests == 1 ? "" : "s")}: up to {Math.Max(800, budget)} kbps each.");
+        // Every destination receives the full bitrate, so the best bitrate is what fits all of them together in
+        // 75% of the upload (the rest is headroom for audio, overhead and the rest of the household).
+        int safe = (int)(i.UploadKbps * 0.75) - i.VerticalKbps - (i.VerticalKbps > 0 ? i.AudioKbps : 0);
+        int budget = i.UploadKbps > 0 ? safe / dests - i.AudioKbps : 6000;
+        if (i.UploadKbps > 0)
+            reasons.Add($"{i.UploadKbps:N0} kbps upload: {dests} destination{(dests == 1 ? "" : "s")}" +
+                        (i.VerticalKbps > 0 ? $" plus the vertical canvas ({i.VerticalKbps:N0} kbps)" : "") +
+                        $" fit at up to {Math.Max(800, budget):N0} kbps each, within 75% of it.");
 
         int fps = high && hw && budget >= 5000 ? 60 : 30;
         if (!high) reasons.Add("Low-motion game: 30 FPS looks the same and halves the data.");

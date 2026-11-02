@@ -30,9 +30,11 @@ public partial class AutoConfigWindow : Window
         StepsList.ItemsSource = _steps;
         SelectTag(ContentBox, state.Settings.ContentType);
         SelectTag(PriorityBox, "Performance");
-        UploadBox.Text = state.Settings.UploadMbps > 0 ? state.Settings.UploadMbps.ToString("0.#", CultureInfo.CurrentCulture) : "";
+        UploadBox.Text = state.Settings.UploadKbps > 0 ? state.Settings.UploadKbps.ToString(CultureInfo.InvariantCulture) : "";
+        // scan by default unless it was measured recently
+        ScanBox.IsChecked = state.Settings.UploadMeasuredUtc is not { } m || DateTime.UtcNow - m > TimeSpan.FromDays(7);
         if (state.Settings.UploadMeasuredUtc is { } when)
-            UploadHint.Text = $"Measured {when.ToLocalTime():g}. Change it if your connection changed.";
+            UploadHint.Text = $"Measured {when.ToLocalTime():g} ({state.Settings.UploadKbps:N0} kbps). Scan again if your connection changed.";
         Closed += (_, _) =>
         {
             _cts.Cancel();
@@ -55,6 +57,35 @@ public partial class AutoConfigWindow : Window
     private void Replace(string text)
     {
         if (_steps.Count > 0) _steps[^1] = text; else _steps.Add(text);
+    }
+
+    private DateTime? _scannedUtc;
+
+    private int ParseUpload() =>
+        int.TryParse(UploadBox.Text.Replace(",", "").Replace(" ", "").Replace("kbps", "", StringComparison.OrdinalIgnoreCase),
+            NumberStyles.Integer, CultureInfo.InvariantCulture, out var k) ? Math.Clamp(k, 0, 10_000_000) : 0;
+
+    /// <summary>Measures the upload; returns kbps (also written into the box).</summary>
+    private async Task<int> ScanAsync(Action<string> report, CancellationToken ct)
+    {
+        var r = await UploadScan.RunAsync(_state.Settings, _engine.FfmpegPath, new Progress<string>(report), ct);
+        int kbps = (int)Math.Round(r.MeasuredKbps);
+        UploadBox.Text = kbps.ToString(CultureInfo.InvariantCulture);
+        _scannedUtc = DateTime.UtcNow;
+        report(r.Detail);
+        return kbps;
+    }
+
+    private async void Scan_Click(object sender, RoutedEventArgs e)
+    {
+        if (_running) return;
+        if (_engine.Live) { UploadHint.Text = "End your stream before scanning: the scan would compete with it for upload."; return; }
+        _running = true;
+        ScanButton.IsEnabled = PrimaryButton.IsEnabled = false;
+        try { await ScanAsync(t => UploadHint.Text = t, _cts.Token); ScanBox.IsChecked = false; }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { UploadHint.Text = ex.Message; }
+        finally { _running = false; ScanButton.IsEnabled = PrimaryButton.IsEnabled = true; }
     }
 
     private StudioScene? CurrentScene => _state.Scenes.FirstOrDefault(s => s.Id == _state.SelectedSceneId) ?? _state.Scenes.FirstOrDefault();
@@ -91,8 +122,17 @@ public partial class AutoConfigWindow : Window
     {
         string content = TagOf(ContentBox, "LowMotion");
         bool quality = TagOf(PriorityBox, "Performance") == "Quality";
-        double upload = double.TryParse(UploadBox.Text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var up) ? Math.Max(0, up) : 0;
         var scene = CurrentScene ?? throw new InvalidOperationException("Add a scene first.");
+        // 0. upload speed (optional scan)
+        if (ScanBox.IsChecked == true)
+        {
+            Step("… scanning your upload speed");
+            try { int k = await ScanAsync(Replace, ct); Replace($"✓ Upload: {k:N0} kbps."); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { Replace("• Upload scan: " + ex.Message); }
+        }
+        int upload = ParseUpload();
+        if (upload == 0 && ScanBox.IsChecked != true) Step("• No upload speed given: the bitrate is set for a typical connection.");
         var sources = _state.Scenes.SelectMany(s => s.Sources).ToList();
 
         // 1. hardware
@@ -163,9 +203,13 @@ public partial class AutoConfigWindow : Window
         }
 
         // 4. candidates, best first
-        int destinations = Math.Max(1, _state.Settings.Outputs.Count(o => o.Enabled && !o.IsVertical));
+        int destinations = Math.Max(1, _state.Settings.Outputs.Count(o => o.Enabled && !o.IsVertical && o.OwnBitrateKbps <= 0));
+        // the vertical canvas (if a vertical destination is on) and outputs with their own bitrate use upload too
+        int vertical = _state.Settings.VerticalCanvas && _state.Settings.Outputs.Any(o => o.Enabled && o.IsVertical)
+            ? (_state.Settings.VerticalBitrateKbps > 0 ? _state.Settings.VerticalBitrateKbps : 2500) : 0;
+        vertical += _state.Settings.Outputs.Where(o => o.Enabled && o.OwnBitrateKbps > 0).Sum(o => o.OwnBitrateKbps + _state.Settings.AudioBitrateKbps);
         var ladder = AutoConfig.Ladder(new AutoConfig.Input(content, quality, upload, gameSize, _engine.Encoders,
-            Environment.ProcessorCount, destinations, _state.Settings.AudioBitrateKbps));
+            Environment.ProcessorCount, destinations, _state.Settings.AudioBitrateKbps, vertical));
         Step($"… stress test: your real scene, encoded like a stream, ~15 s per try (nothing goes live)");
 
         // 5. stress test, stepping down until it keeps up
@@ -176,7 +220,7 @@ public partial class AutoConfigWindow : Window
             ct.ThrowIfCancellationRequested();
             Step($"… trying {c.Label}");
             var settings = c.Apply(_state.Settings, content);
-            settings.UploadMbps = upload;
+            settings.UploadKbps = upload;
             settings.LowLatencyMode = false;
             await _engine.UpdateAsync(_state.Scenes.ToList(), scene, settings, false);
             var r = await _engine.BenchmarkAsync(settings, 10, ct);
@@ -189,8 +233,9 @@ public partial class AutoConfigWindow : Window
         if (chosen is null) throw new InvalidOperationException("Nothing could be tested.");
 
         var result = chosen.Apply(_state.Settings, content);
-        result.UploadMbps = upload;
-        if (upload > 0 && Math.Abs(upload - _state.Settings.UploadMbps) > 0.05) result.UploadMeasuredUtc = null;
+        result.UploadKbps = upload;
+        if (_scannedUtc is { } scanned && ParseUpload() == upload) result.UploadMeasuredUtc = scanned;
+        else if (upload != _state.Settings.UploadKbps) result.UploadMeasuredUtc = null;
         result.LowLatencyMode = false;
         Result = result;
 
