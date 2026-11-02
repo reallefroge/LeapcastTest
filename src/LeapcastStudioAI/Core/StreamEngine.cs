@@ -559,6 +559,7 @@ public sealed class StreamEngine : IDisposable
             _filterSource = spec.Visibility.GroupBy(v => v.Filter).ToDictionary(g => g.Key, g => g.First().SourceId);
             foreach (var st in spec.Visibility) _sentEnable[st.Filter] = WantEnabled(st, active);
             foreach (var g in spec.AudioGains) if (active < g.LinearGainPerScene.Count) _sentGain[g.FilterName] = g.LinearGainPerScene[active];
+            if (spec.HasMasterVolume) _sentGain[PipelineBuilder.MasterFilter] = MasterGain;
         }
     }
 
@@ -590,8 +591,29 @@ public sealed class StreamEngine : IDisposable
                 _sentGain[g.FilterName] = want;
                 lines.Add($"{g.FilterName} -1 volume {want.ToString("0.######", CultureInfo.InvariantCulture)}");
             }
+            if (spec.HasMasterVolume)
+            {
+                double want = MasterGain;
+                if (!(_sentGain.TryGetValue(PipelineBuilder.MasterFilter, out var cur) && Math.Abs(cur - want) < 1e-4))
+                {
+                    _sentGain[PipelineBuilder.MasterFilter] = want;
+                    lines.Add($"{PipelineBuilder.MasterFilter} -1 volume {want.ToString("0.######", CultureInfo.InvariantCulture)}");
+                }
+            }
         }
         if (lines.Count > 0) { LiveSwitches += lines.Count; r.SendCommands(lines); }
+    }
+
+    private double MasterGain => Math.Pow(10, Math.Clamp(Settings.MasterVolumeDb, -60, 20) / 20.0);
+
+    /// <summary>
+    /// The mixer moved: re-reads every source's level (VolumeDb, shown/hidden) and the master level and sets them in
+    /// the running pipeline. Live, cheap, safe to call while a fader is being dragged.
+    /// </summary>
+    public void SetAudioLevels(double masterDb)
+    {
+        Settings.MasterVolumeDb = masterDb;
+        ApplyLiveState();
     }
 
     /// <summary>Diagnostics/tests: show/hide/volume commands sent without a rebuild.</summary>
@@ -1018,6 +1040,7 @@ public sealed class StreamEngine : IDisposable
             MonitorBounds = _platform.MonitorBounds,
             GpuDisplayCapture = !_gpuDisplayFailed,
             AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
+            MasterVolumeDb = Settings.MasterVolumeDb,
             WallclockOrigin = origin,
             InputOverride = InputOverride,
             InputThreadQueueSupported = InputThreadQueueSupported,

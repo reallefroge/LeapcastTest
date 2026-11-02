@@ -219,6 +219,10 @@ public sealed class StudioSettings
     public double UploadMbps { get; set; }
     public DateTime? UploadMeasuredUtc { get; set; }
     public int AudioBitrateKbps { get; set; } = 160;
+    /// <summary>Master fader for the stream/recording audio (dB).</summary>
+    public double MasterVolumeDb { get; set; }
+    /// <summary>Vertical canvas bitrate (kbps); 0 = automatic from its resolution.</summary>
+    public int VerticalBitrateKbps { get; set; }
     /// <summary>Quality (slower encoder settings), Balanced (default) or Performance (fastest settings).</summary>
     public string EncoderPreset { get; set; } = "Balanced";
     /// <summary>Studio-wide hotkeys: action name (<see cref="HotkeyActions"/>) → key combination.</summary>

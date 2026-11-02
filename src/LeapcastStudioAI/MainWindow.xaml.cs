@@ -10,21 +10,58 @@ using System.Windows.Threading;
 
 namespace LeapcastStudioAI;
 
+/// <summary>
+/// One mixer row: an audio source of the current scene (or the master "Stream output"), with a dB fader, a mute
+/// button and a post-fader meter. Changes are reported through <see cref="Changed"/> and applied live.
+/// </summary>
 public sealed class MixerChannel : INotifyPropertyChanged
 {
-    private double _meter;
+    private double _meter, _db;
+    private bool _muted;
     private string _dbText = "-∞ dB";
+    /// <summary>The source (Guid.Empty for the master).</summary>
     public Guid SourceId { get; init; }
+    /// <summary>Which audio feed's meter to read (copies of a device share one capture).</summary>
+    public Guid MeterId { get; init; }
     public string Name { get; init; } = "";
+    public bool IsMaster => SourceId == Guid.Empty;
+    public FontWeight NameWeight => IsMaster ? FontWeights.SemiBold : FontWeights.Normal;
     public double Meter { get => _meter; private set { _meter = value; OnChanged(); } }
     public string DbText { get => _dbText; private set { _dbText = value; OnChanged(); } }
+    public Action<MixerChannel>? Changed;
 
-    public void Update(double db)
+    /// <summary>Fader level in dB (−60 … +20).</summary>
+    public double Db
     {
-        double target = Math.Clamp(db + 60, 0, 60);
+        get => _db;
+        set
+        {
+            value = Math.Clamp(Math.Round(value * 2) / 2, -60, 20);
+            if (Math.Abs(value - _db) < 1e-9) return;
+            _db = value; OnChanged(); OnChanged(nameof(GainText)); Changed?.Invoke(this);
+        }
+    }
+
+    public bool Muted
+    {
+        get => _muted;
+        set { if (_muted == value) return; _muted = value; OnChanged(); Changed?.Invoke(this); }
+    }
+
+    public string GainText => _db <= -59.9 ? "-∞ dB" : $"{(_db > 0 ? "+" : "")}{_db:0.0} dB";
+
+    /// <summary>Sets the fader without reporting a change (loading the scene's values).</summary>
+    public void Load(double db, bool muted) { _db = Math.Clamp(db, -60, 20); _muted = muted; OnChanged(nameof(Db)); OnChanged(nameof(Muted)); OnChanged(nameof(GainText)); }
+
+    /// <param name="db">Input level in dBFS (before the fader).</param>
+    /// <param name="after">Gain after this channel's fader (the master's), in dB.</param>
+    public void Update(double db, double after = 0)
+    {
+        double post = _muted || db <= -59.5 ? -60 : db + _db + after;
+        double target = Math.Clamp(post + 60, 0, 60);
         // fast attack, slow release, like a real meter
         Meter = target > _meter ? target : Math.Max(target, _meter - 2.5);
-        DbText = db <= -59.5 ? "-∞ dB" : $"{db:0} dB";
+        DbText = post <= -59.5 ? "-∞ dB" : $"{post:0} dBFS";
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -401,7 +438,17 @@ public partial class MainWindow : Window
             }
         }
         bool running = _engine.Running;
-        foreach (var ch in _mixer) ch.Update(running ? _audio.LevelDb(ch.SourceId) : -60);
+        // master meter: the loudest input after its fader
+        MixerChannel? masterCh = null;
+        double loudest = -60;
+        foreach (var ch in _mixer)
+        {
+            if (ch.IsMaster) { masterCh = ch; continue; }
+            double inDb = running ? _audio.LevelDb(ch.MeterId) : -60;
+            ch.Update(inDb);
+            if (!ch.Muted && inDb > -59.5) loudest = Math.Max(loudest, inDb + ch.Db);
+        }
+        masterCh?.Update(loudest);
     }
 
     private void ApplyStatus(EngineStatus st)
@@ -486,9 +533,13 @@ public partial class MainWindow : Window
             : $"Adaptive performance: {rung.Name.ToLowerInvariant()} ({tier}): {rung.Explanation}.";
         ReasonsList.ItemsSource = plan.Reasons.Concat(plans.Vertical is not null && vertical ? plans.Vertical.Reasons : Array.Empty<string>()).ToList();
         int enabled = _state.Settings.Outputs.Count(o => o.Enabled);
+        double up = _state.Settings.UploadMbps;
+        bool tooMuch = up > 0 && plans.UploadKbps > up * 1000 * 0.75;
         UploadPlanText.Text = enabled == 0 ? ""
-            : $"Going live on {enabled} destination{(enabled == 1 ? "" : "s")} uploads up to {plans.UploadKbps / 1000.0:0.0} Mbps"
-              + (_state.Settings.UploadMbps > 0 ? $" of your {_state.Settings.UploadMbps:0.#} Mbps." : ". Test your connection in Settings to fit it to your upload.");
+            : $"Each destination gets the full bitrate, and extra destinations cost no extra encoding (one encode, copied to each). Going live on {enabled} destination{(enabled == 1 ? "" : "s")} uploads up to {plans.UploadKbps / 1000.0:0.0} Mbps in total"
+              + (up > 0 ? $" of your {up:0.#} Mbps{(tooMuch ? ": that's more than is safe, so lower the bitrate (Settings → Stream) or stream to fewer places." : ".")}"
+                        : ". Test your connection in Settings to check it fits.");
+        UploadPlanText.Foreground = tooMuch ? (Brush)FindResource("WarnBrush") : (Brush)FindResource("MutedBrush");
     }
 
     /// <summary>Canvas sizes for the editors (the plan's size; the vertical canvas from settings).</summary>
@@ -1309,8 +1360,7 @@ public partial class MainWindow : Window
         }
         SourcesList.ItemsSource = SelectedScene.Sources;
         SelectedSceneLabel.Text = SelectedScene.Name;
-        foreach (var s in SelectedScene.Sources.Where(s => s.Visible && SourceTypes.IsAudio(SourceTypes.KindOf(s.Type))))
-            _mixer.Add(new MixerChannel { SourceId = s.Id, Name = s.Name });
+        RebuildMixer();
         _state.SelectedSceneId = SelectedScene.Id;
         foreach (var ed in Editors) ed.Select(null);
         RedrawEditors();
@@ -1353,12 +1403,72 @@ public partial class MainWindow : Window
         await ApplySceneSafelyAsync(restart: false, "Updating scene…", "Scene updated.");
     }
 
-    private void RefreshMixerOnly()
+    private void RefreshMixerOnly() => RebuildMixer();
+
+    // ------------------------------------------------------------------ audio mixer (dB faders, live)
+
+    private DispatcherTimer? _mixerSave;
+
+    /// <summary>
+    /// One row per audio source of the selected scene (muted ones too) plus the master "Stream output". Rebuilt only
+    /// when the set of sources changes, so a fader being dragged is never replaced under the mouse.
+    /// </summary>
+    private void RebuildMixer()
     {
+        var sources = SelectedScene?.Sources.Where(s => SourceTypes.IsAudio(SourceTypes.KindOf(s.Type))).ToList() ?? new();
+        var ids = sources.Select(s => s.Id).Append(Guid.Empty).ToList();
+        if (_mixer.Select(c => c.SourceId).SequenceEqual(ids))
+        {
+            foreach (var ch in _mixer)
+            {
+                if (ch.IsMaster) ch.Load(_state.Settings.MasterVolumeDb, false);
+                else if (sources.FirstOrDefault(s => s.Id == ch.SourceId) is { } src) ch.Load(src.VolumeDb, !src.Visible);
+            }
+            return;
+        }
         _mixer.Clear();
-        if (SelectedScene is null) return;
-        foreach (var s in SelectedScene.Sources.Where(s => s.Visible && SourceTypes.IsAudio(SourceTypes.KindOf(s.Type))))
-            _mixer.Add(new MixerChannel { SourceId = s.Id, Name = s.Name });
+        var reps = PipelineBuilder.AudioRepresentatives(_state.Scenes);
+        foreach (var s in sources)
+        {
+            string key = PipelineBuilder.InputKey(s);
+            var ch = new MixerChannel { SourceId = s.Id, Name = s.Name, MeterId = reps.FirstOrDefault(r => PipelineBuilder.InputKey(r) == key)?.Id ?? s.Id };
+            ch.Load(s.VolumeDb, !s.Visible);
+            ch.Changed = OnMixerChanged;
+            _mixer.Add(ch);
+        }
+        if (sources.Count > 0)
+        {
+            var master = new MixerChannel { SourceId = Guid.Empty, Name = "Stream output" };
+            master.Load(_state.Settings.MasterVolumeDb, false);
+            master.Changed = OnMixerChanged;
+            _mixer.Add(master);
+        }
+    }
+
+    /// <summary>A fader or mute button moved: apply it to the running stream right away, save a moment later.</summary>
+    private void OnMixerChanged(MixerChannel ch)
+    {
+        if (ch.IsMaster) _state.Settings.MasterVolumeDb = ch.Db;
+        else if (SelectedScene?.Sources.FirstOrDefault(s => s.Id == ch.SourceId) is { } src)
+        {
+            src.VolumeDb = ch.Db;
+            if (src.Visible == ch.Muted) { src.Visible = !ch.Muted; SourcesList.Items.Refresh(); }
+        }
+        _engine.SetAudioLevels(_state.Settings.MasterVolumeDb); // live: gain commands, no rebuild
+        if (_mixerSave is null)
+        {
+            _mixerSave = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _mixerSave.Tick += (_, _) => { _mixerSave.Stop(); Save(); };
+        }
+        _mixerSave.Stop();
+        _mixerSave.Start();
+    }
+
+    private void MixerMute_Click(object sender, RoutedEventArgs e) { /* the binding updates the channel; OnMixerChanged applies it */ }
+
+    private void MixerFader_DoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: MixerChannel ch }) ch.Db = 0;
     }
 
     private void ScenesList_SelectionChanged(object sender, SelectionChangedEventArgs e) => RefreshScene();

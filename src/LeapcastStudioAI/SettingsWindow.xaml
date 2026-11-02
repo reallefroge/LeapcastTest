@@ -101,6 +101,8 @@
               <ComboBoxItem Content="720 × 1280 (recommended, light on upload)" Tag="720x1280"/>
               <ComboBoxItem Content="1080 × 1920" Tag="1080x1920"/>
             </ComboBox>
+            <TextBlock Text="Vertical bitrate (kbps, 0 = automatic)" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="VerticalBitrateBox" TextChanged="AnyChanged"/>
             <TextBlock Text="The vertical canvas places your camera on top and the game below it automatically. Drag things on the vertical preview to change it."
                        Style="{StaticResource Hint}"/>
             <TextBlock Text="SCENE TRANSITIONS" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
@@ -130,7 +132,7 @@
             <StackPanel>
             <TextBlock Text="Upload speed (Mbps)" Style="{StaticResource FieldLabel}"/>
             <TextBox x:Name="UploadBox" TextChanged="AnyChanged"/>
-            <TextBlock Text="Type the upload from any speed test, or measure it with your Twitch output below. Leapcast never plans more than 75% of it, split across every destination you stream to at once."
+            <TextBlock Text="Type the upload from any speed test, or measure it with your Twitch output below. Auto quality plans the stream within 75% of it. Every destination gets the full bitrate (like Aitum Multistream), and Leapcast warns if they add up to more than your upload can take."
                        Style="{StaticResource Hint}"/>
             <DockPanel Margin="0,8,0,0">
               <Button x:Name="TestButton" DockPanel.Dock="Left" Content="Test my connection" Click="Test_Click"/>

@@ -47,6 +47,8 @@ public sealed class PipelineRequest
     /// <summary>False after desktop duplication failed on this PC: display capture falls back to GDI.</summary>
     public bool GpuDisplayCapture { get; init; } = true;
     public int AudioBitrateKbps { get; init; } = 160;
+    /// <summary>Master level of the mixed audio (dB; set live through "volume@master").</summary>
+    public double MasterVolumeDb { get; init; }
 
     /// <summary>Common time origin (Unix seconds). Every live input is wall-clock stamped and shifted by this,
     /// so game, camera, mic and desktop audio line up no matter how long each device took to open.</summary>
@@ -98,6 +100,8 @@ public sealed record PipelineSpec(
     public IReadOnlyList<IReadOnlyList<string>> SceneOverlays { get; init; } = Array.Empty<IReadOnlyList<string>>();
     /// <summary>Studio mode: width of the staged scene's picture at the left of the preview frame (0 = none).</summary>
     public int PreviewStageWidth { get; init; }
+    /// <summary>The mix has a master fader ("volume@master").</summary>
+    public bool HasMasterVolume { get; init; }
     /// <summary>Every source's live show/hide switch.</summary>
     public IReadOnlyList<VisibilityStage> Visibility { get; init; } = Array.Empty<VisibilityStage>();
 }
@@ -112,6 +116,9 @@ public static class PipelineBuilder
 
     /// <summary>Studio mode's scene picker for the Preview picture.</summary>
     public const string StageFilter = "streamselect@stage";
+
+    /// <summary>Master audio fader on the mix.</summary>
+    public const string MasterFilter = "volume@master";
 
     /// <summary>Two sources that capture the same thing share one ffmpeg input (a camera can only be opened once).</summary>
     public static string InputKey(StudioSource s)
@@ -490,6 +497,7 @@ public static class PipelineBuilder
 
         // ---------- audio: one input per device; per-scene level via a runtime-adjustable volume stage ----------
         var gains = new List<AudioGainStage>();
+        bool hasMaster = false;
         int audioOuts = (mainEncode ? 1 : 0) + (vertEncode ? 1 : 0) + r.ExtraEncodes.Count(x => !x.Vertical || vertical);
         if (encoded && audioOuts > 0)
         {
@@ -524,16 +532,19 @@ public static class PipelineBuilder
                 mixInputs.Add($"[a{idx}]");
             }
             string mixed;
+            // master fader on the mix (before the limiter, so a boost can't clip), set live like the per-device gains
+            string master = $"{MasterFilter}=volume={I(Math.Pow(10, Math.Clamp(r.MasterVolumeDb, -60, 20) / 20.0))}:eval=frame,";
+            hasMaster = mixInputs.Count > 0;
             if (mixInputs.Count == 0)
             {
                 args.AddRange(new[] { "-re", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo" });
                 mixed = $"[{inputCount++}:a]aformat=sample_fmts=fltp:channel_layouts=stereo";
             }
             else if (mixInputs.Count == 1)
-                mixed = $"{mixInputs[0]}alimiter=limit=0.95:level=0";
+                mixed = $"{mixInputs[0]}{master}alimiter=limit=0.95:level=0";
             else
                 mixed = $"{string.Concat(mixInputs)}amix=inputs={mixInputs.Count}:duration=longest:dropout_transition=0:normalize=0," +
-                        "alimiter=limit=0.95:level=0";
+                        $"{master}alimiter=limit=0.95:level=0";
             graph.Add(audioOuts == 1 ? $"{mixed}[aout0]"
                 : $"{mixed},asplit={audioOuts}{string.Concat(Enumerable.Range(0, audioOuts).Select(i => $"[aout{i}]"))}");
         }
@@ -586,7 +597,7 @@ public static class PipelineBuilder
         return new PipelineSpec(args, warnings, encoded, r.Preview, filterGraph, N, gains)
         {
             HasVertical = vertical, InputKeys = inputKeys, PreviewLayout = (PW, VPW, PH), PreviewStageWidth = SPW,
-            SceneOverlays = sceneOverlays, Visibility = visibility,
+            SceneOverlays = sceneOverlays, Visibility = visibility, HasMasterVolume = hasMaster,
         };
     }
 

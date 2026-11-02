@@ -67,6 +67,7 @@ public partial class SettingsWindow : Window
         AdaptBox.IsChecked = current.AdaptivePerformance;
         FfmpegBox.Text = current.FfmpegPath;
         VerticalBox.IsChecked = current.VerticalCanvas;
+        VerticalBitrateBox.Text = current.VerticalBitrateKbps.ToString(CultureInfo.InvariantCulture);
         SelectTag(VerticalResBox, current.VerticalResolution.Replace(" ", "").Replace("×", "x"));
 
         TestButton.IsEnabled = _twitch is not null;
@@ -119,6 +120,7 @@ public partial class SettingsWindow : Window
         s.AdaptivePerformance = AdaptBox.IsChecked == true;
         s.FfmpegPath = FfmpegBox.Text.Trim();
         s.VerticalCanvas = VerticalBox.IsChecked == true;
+        s.VerticalBitrateKbps = int.TryParse(VerticalBitrateBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vbr) && vbr > 0 ? Math.Clamp(vbr, 500, 20000) : 0;
         s.VerticalResolution = TagOf(VerticalResBox, "720x1280");
         return s;
     }

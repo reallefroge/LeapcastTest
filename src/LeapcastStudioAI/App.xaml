@@ -135,6 +135,28 @@
         </Setter.Value>
       </Setter>
     </Style>
+    <!-- Mute toggle in the audio mixer: speaker, red crossed speaker when muted -->
+    <Style x:Key="MuteToggle" TargetType="ToggleButton">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border Background="Transparent" Padding="3,2">
+              <TextBlock x:Name="Glyph" FontFamily="{StaticResource IconFont}" FontSize="14" Text="&#xE767;" Foreground="{StaticResource TextBrush}" Opacity="0.75"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Glyph" Property="Opacity" Value="1"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Glyph" Property="Text" Value="&#xE74F;"/>
+                <Setter TargetName="Glyph" Property="Foreground" Value="#FF7A7A"/>
+                <Setter TargetName="Glyph" Property="Opacity" Value="1"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <!-- Lock toggle in the sources list: faint open padlock, amber closed padlock when locked -->
     <Style x:Key="LockToggle" TargetType="ToggleButton">
       <Setter Property="Cursor" Value="Hand"/>

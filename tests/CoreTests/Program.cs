@@ -52,10 +52,15 @@ var ytO = new StreamOutput { Name = "YouTube", Service = "YouTube" };
 var ttO = new StreamOutput { Name = "TikTok", Service = "TikTok", Canvas = "Vertical" };
 mset.Outputs = new() { twitchO, ytO, ttO };
 var ps = OutputBudget.Resolve(mset, mset.Outputs, true, enc, 8);
-Check(ps.UploadKbps <= 10000 * 0.75 + 50 && ps.Main.CapKbps <= 6000 && ps.Vertical is { Width: 720, Height: 1280 },
-    $"3 destinations on 10 Mbps fit 75% of the upload: main {ps.Main.CapKbps} kbps, vertical {ps.Vertical?.CapKbps} kbps, total {ps.UploadKbps} kbps");
 var solo = OutputBudget.Resolve(mset, new[] { twitchO }, false, enc, 8);
-Check(solo.Main.CapKbps > ps.Main.CapKbps, $"a single destination gets more bitrate ({solo.Main.CapKbps} vs {ps.Main.CapKbps} kbps)");
+Check(ps.Main.CapKbps == solo.Main.CapKbps && ps.Main.CapKbps <= 6000 && ps.Vertical is { Width: 720, Height: 1280 },
+    $"Aitum-style: adding destinations doesn't divide the bitrate (3 destinations: {ps.Main.CapKbps} kbps each, alone: {solo.Main.CapKbps} kbps; vertical {ps.Vertical?.CapKbps} kbps)");
+Check(ps.Own.Count == 0, "Twitch + YouTube share one encode (no extra GPU/CPU per destination); only the vertical canvas has its own");
+Check(ps.UploadKbps >= 2 * ps.Main.CapKbps + (ps.Vertical?.CapKbps ?? 0), $"the upload needed is the sum of every destination ({ps.UploadKbps} kbps)");
+var tight = OutputBudget.Resolve(new StudioSettings { UploadMbps = 6 }, mset.Outputs, true, enc, 8);
+Check(tight.Main.Reasons.Any(r => r.StartsWith("Heads-up")), "when they add up to more than is safe for the upload, it warns instead of cutting quality");
+var vbrSet = new StudioSettings { UploadMbps = 10, VerticalBitrateKbps = 3200 };
+Check(OutputBudget.Resolve(vbrSet, mset.Outputs, true, enc, 8).Vertical?.CapKbps == 3200, "the vertical canvas bitrate can be set");
 var noTest = OutputBudget.Resolve(new StudioSettings(), new[] { twitchO, ytO }, false, enc, 8);
 Check(noTest.Main.CapKbps <= 6000, $"Twitch + YouTube share an encode capped by Twitch's limit ({noTest.Main.CapKbps} kbps)");
 var ownO = new StreamOutput { Name = "YouTube HQ", Service = "YouTube", OwnBitrateKbps = 9000 };
@@ -1080,6 +1085,12 @@ async Task LiveSwitchSection(StudioScene light)
     mic.Visible = true;
     await engine.UpdateAsync(new[] { hs }, hs, hset, false);
     await Task.Delay(500);
+    int sw = engine.LiveSwitches;
+    mic.VolumeDb = -9.5;                 // mixer fader
+    engine.SetAudioLevels(-4);           // master fader
+    await Task.Delay(800);
+    Check(engine.PipelineStarts == starts && engine.LiveSwitches >= sw + 2, $"mixer faders (a source and the master) apply live ({engine.LiveSwitches - sw} commands, no rebuild)");
+    engine.SetAudioLevels(0);
     Check(!ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")).Contains("ret:-"), "ffmpeg accepted every show/hide command");
 
     Console.WriteLine("Studio mode: the Preview stages a scene beside the Program; Transition puts it on air");

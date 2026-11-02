@@ -31,7 +31,7 @@
     <TextBlock Text="Encoding" Style="{StaticResource FieldLabel}"/>
     <ComboBox x:Name="EncodeBox" SelectionChanged="EncodeBox_SelectionChanged">
       <ComboBoxItem Content="Share the canvas encode (recommended: no extra GPU/CPU)" Tag="Shared"/>
-      <ComboBoxItem Content="Own encode with its own bitrate" Tag="Own"/>
+      <ComboBoxItem Content="Own encode with its own bitrate (adds a second encode: more GPU/CPU)" Tag="Own"/>
     </ComboBox>
     <StackPanel x:Name="OwnPanel" Margin="12,0,0,0">
       <TextBlock Text="Bitrate for this output (kbps)" Style="{StaticResource FieldLabel}"/>
