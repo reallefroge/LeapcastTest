@@ -332,14 +332,24 @@ public sealed class StreamEngine : IDisposable
             var q = rung.Apply(p);
             return lightOk ? q : q with { Light = false };
         }
+        // the user's encoder preset (Settings → Stream), before the governor's rung
+        EncodePlan Preset(EncodePlan p) => s.EncoderPreset switch
+        {
+            "Performance" => lightOk ? p with { Light = true } : p,
+            "Quality" => p with { HighQuality = true },
+            _ => p,
+        };
+        if (s.EncoderPreset == "Performance") reasons.Add("Encoder preset: Performance (the fastest encoder settings, a little more data for the same picture).");
+        else if (s.EncoderPreset == "Quality") reasons.Add("Encoder preset: Quality (slower encoder settings for a slightly sharper picture; uses more GPU/CPU).");
+        plan = Preset(plan);
         var adapted = Rung(plan);
         if (level > 0)
             reasons.Add($"Adapted to this PC: {rung.Explanation} ({adapted.Width}×{adapted.Height} · {adapted.Fps} FPS). " +
                         "Leapcast steps back up when the PC has headroom.");
         plan = adapted with { Reasons = reasons };
         // every canvas runs at the main frame rate (one shared compositor clock)
-        var vplan = set.Vertical is null ? null : Rung(set.Vertical) with { Fps = plan.Fps };
-        var own = set.Own.ToDictionary(kv => kv.Key, kv => Rung(kv.Value) with { Fps = plan.Fps });
+        var vplan = set.Vertical is null ? null : Rung(Preset(set.Vertical)) with { Fps = plan.Fps };
+        var own = set.Own.ToDictionary(kv => kv.Key, kv => Rung(Preset(kv.Value)) with { Fps = plan.Fps });
         return new PlanSet(plan, vplan, own) { UploadKbps = set.UploadKbps };
     }
 

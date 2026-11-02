@@ -162,6 +162,8 @@ public sealed class StudioScene
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "Scene";
+    /// <summary>Global hotkey that switches to this scene (stages it in studio mode).</summary>
+    public string Hotkey { get; set; } = "";
     public ObservableCollection<StudioSource> Sources { get; set; } = new();
 }
 
@@ -217,6 +219,12 @@ public sealed class StudioSettings
     public double UploadMbps { get; set; }
     public DateTime? UploadMeasuredUtc { get; set; }
     public int AudioBitrateKbps { get; set; } = 160;
+    /// <summary>Quality (slower encoder settings), Balanced (default) or Performance (fastest settings).</summary>
+    public string EncoderPreset { get; set; } = "Balanced";
+    /// <summary>Studio-wide hotkeys: action name (<see cref="HotkeyActions"/>) → key combination.</summary>
+    public Dictionary<string, string> Hotkeys { get; set; } = new();
+    /// <summary>Panels the user switched off in the Docks menu.</summary>
+    public List<string> HiddenDocks { get; set; } = new();
     public bool LowLatencyMode { get; set; }
 
     // Scene transitions
@@ -252,12 +260,14 @@ public static class StateStore
 {
     public static readonly string Folder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LeapcastStudioAI");
-    private static readonly string FilePath = Path.Combine(Folder, "studio-state.json");
+    /// <summary>The active profile's state file (profiles/&lt;name&gt;/studio-state.json).</summary>
+    private static string FilePath => ProfileStore.Default.StatePath(ProfileStore.Default.Active);
 
     public static StudioState Load()
     {
         try
         {
+            ProfileStore.Default.MigrateLegacy();
             if (File.Exists(FilePath))
             {
                 var state = JsonSerializer.Deserialize<StudioState>(File.ReadAllText(FilePath));
@@ -270,14 +280,7 @@ public static class StateStore
         }
         catch { /* Corrupt settings should never prevent launch. */ }
 
-        var initial = new StudioState();
-        var scene = new StudioScene { Name = "Wizard101" };
-        scene.Sources.Add(new StudioSource { Name = "Wizard101 (screen)", Type = SourceTypes.Display });
-        scene.Sources.Add(new StudioSource { Name = "Desktop audio", Type = SourceTypes.DesktopAudio, NoiseCleanup = false });
-        scene.Sources.Add(new StudioSource { Name = "Microphone", Type = SourceTypes.Microphone });
-        initial.Scenes.Add(scene);
-        initial.SelectedSceneId = scene.Id;
-        return initial;
+        return ProfileStore.NewDefaultState();
     }
 
     /// <summary>Older versions had one destination: turn it into the first output.</summary>
@@ -297,7 +300,7 @@ public static class StateStore
 
     public static void Save(StudioState state)
     {
-        Directory.CreateDirectory(Folder);
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
         var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
         var tmp = FilePath + ".tmp";
         File.WriteAllText(tmp, json);

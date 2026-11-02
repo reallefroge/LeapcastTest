@@ -64,6 +64,77 @@
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="BorderBrush" Value="Transparent"/>
     </Style>
+    <!-- Menus (menu bar drop-downs and right-click menus): dark, with a check mark and submenu arrow -->
+    <Style TargetType="Menu">
+      <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="FontSize" Value="13"/>
+    </Style>
+    <Style TargetType="ContextMenu">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ContextMenu">
+            <Border Background="#1B1D26" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="6" Padding="4">
+              <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Separator">
+            <Border Height="1" Background="{StaticResource LineBrush}" Margin="6,4"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="MenuItem">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="MenuItem">
+            <Border x:Name="Bd" Background="Transparent" CornerRadius="4" Padding="10,5" MinWidth="40">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="Check" Text="&#xE73E;" FontFamily="{StaticResource IconFont}" FontSize="11" Width="20"
+                           Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" Visibility="Hidden"/>
+                <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="2" Text="{TemplateBinding InputGestureText}" Foreground="{StaticResource MutedBrush}" Margin="24,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock x:Name="Arrow" Grid.Column="3" Text="&#xE76C;" FontFamily="{StaticResource IconFont}" FontSize="10" Margin="14,0,0,0"
+                           VerticalAlignment="Center" Visibility="Collapsed"/>
+                <Popup x:Name="PART_Popup" IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}" Placement="Right"
+                       AllowsTransparency="True" Focusable="False" PopupAnimation="Fade" HorizontalOffset="6">
+                  <Border Background="#1B1D26" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="6" Padding="4" MinWidth="200">
+                    <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                  </Border>
+                </Popup>
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Bd" Property="Background" Value="#2C2766"/></Trigger>
+              <Trigger Property="IsChecked" Value="True"><Setter TargetName="Check" Property="Visibility" Value="Visible"/></Trigger>
+              <Trigger Property="Role" Value="SubmenuHeader"><Setter TargetName="Arrow" Property="Visibility" Value="Visible"/></Trigger>
+              <Trigger Property="Role" Value="TopLevelHeader">
+                <Setter TargetName="PART_Popup" Property="Placement" Value="Bottom"/>
+                <Setter TargetName="PART_Popup" Property="HorizontalOffset" Value="0"/>
+                <Setter TargetName="Check" Property="Width" Value="0"/>
+                <Setter TargetName="Bd" Property="Padding" Value="10,6"/>
+              </Trigger>
+              <Trigger Property="IsSubmenuOpen" Value="True"><Setter TargetName="Bd" Property="Background" Value="#2C2766"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <!-- Lock toggle in the sources list: faint open padlock, amber closed padlock when locked -->
     <Style x:Key="LockToggle" TargetType="ToggleButton">
       <Setter Property="Cursor" Value="Hand"/>

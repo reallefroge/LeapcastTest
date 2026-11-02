@@ -40,6 +40,8 @@ public sealed record EncodePlan(
     public int GopFrames => Fps * 2; // 2 s keyframes: required by Twitch/YouTube, also our segment length
     /// <summary>Faster encoder settings (performance governor): less GPU/CPU per frame for slightly more bits.</summary>
     public bool Light { get; init; }
+    /// <summary>Slower, higher-quality encoder settings (the "Quality" encoder preset).</summary>
+    public bool HighQuality { get; init; }
     public string Summary =>
         $"{Width}×{Height} · {Fps} FPS · {EncoderCatalog.DisplayName(Encoder)} · " +
         (Cbr ? $"CBR {CapKbps} kbps" : $"Smart VBR ≤ {CapKbps} kbps");

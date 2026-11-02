@@ -115,6 +115,15 @@ jobs:
           if ($p.HasExited) { throw "App exited during startup (code $($p.ExitCode))" }
           Write-Host "App is running after 25 s."
           $p | Stop-Process -Force
+          # second launch: the seeded state has become the "Default" profile; open a menu for the screenshot
+          if (-not (Test-Path (Join-Path $stateDir "profiles\Default\studio-state.json"))) { throw "The existing state wasn't moved into the Default profile" }
+          $p2 = Start-Process -FilePath $exe -ArgumentList "--preview","--demo-menu" -PassThru
+          Start-Sleep -Seconds 20
+          $bmp2 = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g2 = [System.Drawing.Graphics]::FromImage($bmp2); $g2.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp2.Save("smoke/menu.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          if ($p2.HasExited) { throw "App exited on the second launch (code $($p2.ExitCode))" }
+          $p2 | Stop-Process -Force
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -131,7 +140,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "studio-ai-build-${{ github.run_number }}"
-          gh release create $tag (Get-ChildItem dist/* | ForEach-Object FullName) smoke/main-window.png smoke/engine-tests.txt `
+          gh release create $tag (Get-ChildItem dist/* | ForEach-Object FullName) smoke/main-window.png smoke/menu.png smoke/engine-tests.txt `
             --target ${{ github.sha }} --prerelease --title "Leapcast Studio AI build ${{ github.run_number }}" `
             --notes "Automated Windows build of branch leapcast-studio-ai (${{ github.sha }})."
 

@@ -38,7 +38,7 @@ public static class EncoderCatalog
         switch (plan.Encoder)
         {
             case "h264_nvenc":
-                a.AddRange(new[] { "-preset", light ? "p2" : rich ? "p5" : "p4", "-profile:v", "high" });
+                a.AddRange(new[] { "-preset", light ? "p2" : rich ? (plan.HighQuality ? "p6" : "p5") : "p4", "-profile:v", "high" });
                 if (rich) a.AddRange(new[] { "-tune", light ? "ll" : "hq" });
                 if (plan.Cbr) a.AddRange(new[] { "-rc", "cbr", "-b:v", K(cap), "-maxrate", K(cap), "-bufsize", K(cap) });
                 else a.AddRange(new[] { "-rc", "vbr", "-cq", hwq, "-b:v", "0", "-maxrate", K(cap), "-bufsize", K(cap) });
@@ -80,7 +80,7 @@ public static class EncoderCatalog
                 break;
 
             default: // libx264
-                string preset = light ? LighterX264(plan.X264Preset) : rich ? plan.X264Preset : "veryfast";
+                string preset = light ? LighterX264(plan.X264Preset) : rich ? (plan.HighQuality ? SlowerX264(plan.X264Preset) : plan.X264Preset) : "veryfast";
                 a.AddRange(new[] { "-preset", preset, "-profile:v", "high" });
                 string xp = $"aq-mode=3:rc-lookahead={(plan.LowLatency || light ? 10 : 40)}";
                 if (plan.Cbr)
@@ -95,6 +95,16 @@ public static class EncoderCatalog
         }
         return a;
     }
+
+    /// <summary>One x264 preset slower: a little sharper for the same bits (the "Quality" encoder preset).</summary>
+    public static string SlowerX264(string preset) => preset switch
+    {
+        "ultrafast" => "superfast",
+        "superfast" => "veryfast",
+        "veryfast" => "faster",
+        "faster" => "fast",
+        _ => "medium",
+    };
 
     /// <summary>Two x264 presets faster (each step roughly halves the CPU time per frame).</summary>
     public static string LighterX264(string preset) => preset switch

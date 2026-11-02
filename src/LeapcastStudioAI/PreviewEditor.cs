@@ -47,6 +47,8 @@ public sealed class PreviewEditor
     /// <summary>The mouse was released after a change: save + apply (resizes rebuild the pipeline).</summary>
     public event Action? Committed;
     public event Action<StudioSource, CanvasKind>? ContextMenuRequested;
+    /// <summary>Right-click on the preview where there's no source (e.g. for "Fullscreen preview").</summary>
+    public event Action<CanvasKind>? BackgroundMenuRequested;
 
     public PreviewEditor(Canvas layer, FrameworkElement viewbox, CanvasKind kind)
     {
@@ -304,7 +306,7 @@ public sealed class PreviewEditor
     {
         var p = e.GetPosition(_layer);
         var hit = HitTest(p, Layers());
-        if (hit is null) return;
+        if (hit is null) { BackgroundMenuRequested?.Invoke(_kind); e.Handled = true; return; }
         if (!ReferenceEquals(hit, Selected)) { Selected = hit; SelectionChanged?.Invoke(hit); Redraw(); }
         ContextMenuRequested?.Invoke(hit, _kind);
         e.Handled = true;

@@ -164,6 +164,7 @@ public partial class MainWindow : Window
             if (Width > area.Width || Height > area.Height) WindowState = WindowState.Maximized;
         }
         RebuildOutputRows();
+        ApplyDocks();
         UpdateCanvasLayout();
         UpdatePlanDisplay();
         SizeChanged += (_, _) => RedrawEditors();
@@ -190,6 +191,7 @@ public partial class MainWindow : Window
         ed.Moving += () => { _engine.RefreshLayout(); foreach (var other in Editors.Where(o => o != ed)) other.Redraw(); };
         ed.Committed += () => { SceneEdited(); RedrawEditors(); };
         ed.ContextMenuRequested += (s, k) => ShowSourceMenu(s, k, layer);
+        ed.BackgroundMenuRequested += k => ShowPreviewMenu(k, layer);
         return ed;
     }
 
@@ -200,11 +202,48 @@ public partial class MainWindow : Window
     private GlobalHotkeys? _hotkeys;
     private string _registeredHotkeys = "";
 
-    /// <summary>(Re)registers every source hotkey when the set changed. Called on every save.</summary>
+    /// <summary>Every hotkey in this profile: studio actions, scene switches, source show/hide.</summary>
+    private Dictionary<string, Action> HotkeyTargets()
+    {
+        var map = new Dictionary<string, Action>(StringComparer.OrdinalIgnoreCase);
+        void Add(string? hotkey, Action act)
+        {
+            var k = HotkeyText.Normalize(hotkey);
+            if (k.Length > 0) map.TryAdd(k, act); // the first one wins (Settings → Hotkeys warns about doubles)
+        }
+        var none = new RoutedEventArgs();
+        foreach (var (id, hk) in _state.Settings.Hotkeys)
+            Add(hk, id switch
+            {
+                HotkeyActions.GoLive => () => GoLive_Click(this, none),
+                HotkeyActions.Record => () => Record_Click(this, none),
+                HotkeyActions.SaveReplay => () => Replay_Click(this, none),
+                HotkeyActions.Preview => () => Preview_Click(this, none),
+                HotkeyActions.StudioMode => () => StudioMode_Click(this, none),
+                HotkeyActions.Transition => () => Transition_Click(this, none),
+                _ => () => { },
+            });
+        foreach (var sc in _state.Scenes)
+        {
+            var scene = sc;
+            Add(sc.Hotkey, () => { ScenesList.SelectedItem = scene; }); // switches (or stages, in studio mode)
+        }
+        foreach (var (hk, group) in HotkeyText.Map(_state.Scenes))
+            Add(hk, () =>
+            {
+                bool shown = HotkeyText.Toggle(group);
+                Status($"{group[0].Name} {(shown ? "shown" : "hidden")} ({hk}).");
+                RedrawEditors();
+                SceneEdited(); // live: no rebuild, the stream doesn't notice
+            });
+        return map;
+    }
+
+    /// <summary>(Re)registers every hotkey when the set changed. Called on every save.</summary>
     private void RegisterHotkeys()
     {
         if (_hotkeys is null) return;
-        var keys = HotkeyText.Map(_state.Scenes).Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+        var keys = HotkeyTargets().Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
         string joined = string.Join("|", keys);
         if (joined == _registeredHotkeys) return;
         _registeredHotkeys = joined;
@@ -214,11 +253,7 @@ public partial class MainWindow : Window
 
     private void OnHotkey(string hotkey)
     {
-        if (!HotkeyText.Map(_state.Scenes).TryGetValue(hotkey, out var group) || group.Count == 0) return;
-        bool shown = HotkeyText.Toggle(group);
-        Status($"{group[0].Name} {(shown ? "shown" : "hidden")} ({hotkey}).");
-        RedrawEditors();
-        SceneEdited(); // live: no rebuild, the stream doesn't notice
+        if (HotkeyTargets().TryGetValue(hotkey, out var act)) act();
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -268,6 +303,12 @@ public partial class MainWindow : Window
             if (MessageBox.Show(this, "Let Leapcast test this PC with your scene and pick the smoothest settings? It takes about a minute (keep your game open).",
                     "Auto-config", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
                 AutoConfig_Click(this, new RoutedEventArgs());
+        }
+        // demo/automation: --demo-menu opens a menu (CI screenshot of the menu styling)
+        if (Environment.GetCommandLineArgs().Contains("--demo-menu", StringComparer.OrdinalIgnoreCase) && MainMenu.Items.Count > 0)
+        {
+            await Task.Delay(1500);
+            if (MainMenu.Items[0] is MenuItem first) first.IsSubmenuOpen = true;
         }
         // demo/automation: --preview starts the preview right away
         if (Environment.GetCommandLineArgs().Contains("--preview", StringComparer.OrdinalIgnoreCase))
@@ -324,7 +365,7 @@ public partial class MainWindow : Window
     private void OnUiTick()
     {
         // minimized: don't spend CPU drawing a preview nobody sees
-        if (WindowState == WindowState.Minimized) { lock (_frameLock) _frameDirty = false; return; }
+        if (WindowState == WindowState.Minimized && _fullscreens == 0) { lock (_frameLock) _frameDirty = false; return; }
         lock (_frameLock)
         {
             var pf = _engine.PreviewFrame;
@@ -479,6 +520,293 @@ public partial class MainWindow : Window
         if (_state.Settings.VerticalCanvas) _vEditor.Redraw();
     }
 
+    // ------------------------------------------------------------------ fullscreen preview (right-click the preview)
+
+    /// <summary>Right-click on an empty part of a preview.</summary>
+    private int _fullscreens;
+
+    private void ShowPreviewMenu(CanvasKind kind, FrameworkElement target)
+    {
+        var menu = new ContextMenu { PlacementTarget = target };
+        menu.Items.Add(FullscreenMenu(kind, target));
+        menu.IsOpen = true;
+    }
+
+    /// <summary>"Fullscreen preview", with one entry per monitor when there are several.</summary>
+    private MenuItem FullscreenMenu(CanvasKind kind, FrameworkElement target)
+    {
+        bool staged = ReferenceEquals(target, SEditLayer);
+        string what = kind == CanvasKind.Vertical ? "vertical canvas" : staged ? "studio-mode Preview" : _studio ? "Program" : "preview";
+        var root = new MenuItem { Header = $"Fullscreen {what}" };
+        var monitors = WindowsPlatform.Monitors();
+        if (monitors.Count <= 1)
+        {
+            root.Click += (_, _) => OpenFullscreen(kind, staged, monitors.Count == 1 ? monitors[0] : null);
+            return root;
+        }
+        for (int i = 0; i < monitors.Count; i++)
+        {
+            var m = monitors[i];
+            var item = new MenuItem { Header = $"Monitor {i + 1}{(i == 0 ? " (primary)" : "")}: {m.W}×{m.H}" };
+            item.Click += (_, _) => OpenFullscreen(kind, staged, m);
+            root.Items.Add(item);
+        }
+        return root;
+    }
+
+    private void OpenFullscreen(CanvasKind kind, bool staged, (int X, int Y, int W, int H)? monitor)
+    {
+        Func<BitmapSource?> picture = kind == CanvasKind.Vertical ? () => _vBitmap : staged ? () => _sBitmap : () => _hBitmap;
+        // not owned: it must stay up when the studio window is minimized on the other monitor
+        var w = new FullscreenPreviewWindow(picture, monitor);
+        _fullscreens++;
+        w.Closed += (_, _) => _fullscreens--;
+        Closed += (_, _) => { try { w.Close(); } catch { } };
+        w.Show();
+        Status(_engine.Running ? "Fullscreen preview: press Esc (or double-click) to leave it." : "Start the preview to see the picture full screen. Press Esc to leave full screen.");
+    }
+
+    // ------------------------------------------------------------------ docks (show / hide panels)
+
+    private void DocksMenu_SubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        foreach (var item in DocksMenu.Items.OfType<MenuItem>())
+            if (item.Tag is string tag) item.IsChecked = !_state.Settings.HiddenDocks.Contains(tag);
+    }
+
+    private void DockToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: string tag } item) return;
+        _state.Settings.HiddenDocks.Remove(tag);
+        if (!item.IsChecked) _state.Settings.HiddenDocks.Add(tag);
+        ApplyDocks();
+        Save();
+    }
+
+    private void ResetDocks_Click(object sender, RoutedEventArgs e)
+    {
+        _state.Settings.HiddenDocks.Clear();
+        ApplyDocks();
+        Save();
+    }
+
+    /// <summary>Shows/hides every panel per the Docks menu; empty side columns collapse so the preview gets the room.</summary>
+    private void ApplyDocks()
+    {
+        var hidden = _state.Settings.HiddenDocks;
+        Visibility V(string name) => hidden.Contains(name) ? Visibility.Collapsed : Visibility.Visible;
+        ScenesDock.Visibility = V("Scenes");
+        SourcesDock.Visibility = V("Sources");
+        ControlsDock.Visibility = V("Controls");
+        MixerDock.Visibility = V("Mixer");
+        MultistreamDock.Visibility = V("Multistream");
+        SmartStreamDock.Visibility = V("SmartStream");
+        ActivityDock.Visibility = V("Activity");
+        GoLiveButton.Visibility = V("GoLive");
+        StudioModeButton.Visibility = V("StudioButton");
+        bool scenes = !hidden.Contains("Scenes"), sources = !hidden.Contains("Sources");
+        ScenesRow.Height = scenes ? new GridLength(2, GridUnitType.Star) : new GridLength(0);
+        SourcesRow.Height = sources ? new GridLength(3, GridUnitType.Star) : new GridLength(0);
+        ScenesDock.Margin = new Thickness(0, 0, 0, scenes && sources ? 10 : 0);
+        LeftColumn.Width = scenes || sources ? new GridLength(244) : new GridLength(0);
+        LeftPanel.Margin = new Thickness(0, 0, scenes || sources ? 10 : 0, 0);
+        bool right = new[] { "Multistream", "SmartStream", "Activity" }.Any(d => !hidden.Contains(d));
+        RightColumn.Width = right ? new GridLength(310) : new GridLength(0);
+        RightPanel.Visibility = right ? Visibility.Visible : Visibility.Collapsed;
+        RedrawEditors();
+    }
+
+    // ------------------------------------------------------------------ profiles
+
+    private void ProfileMenu_SubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        if (!ReferenceEquals(e.OriginalSource, ProfileMenu)) return;
+        ProfileMenu.Items.Clear();
+        var store = ProfileStore.Default;
+        string active = store.Active;
+        foreach (var name in store.List())
+        {
+            var item = new MenuItem { Header = name, IsCheckable = true, IsChecked = string.Equals(name, active, StringComparison.OrdinalIgnoreCase) };
+            string n = name;
+            item.Click += (_, _) => SwitchProfile(n);
+            ProfileMenu.Items.Add(item);
+        }
+        ProfileMenu.Items.Add(new Separator());
+        void Add(string header, Action act) { var mi = new MenuItem { Header = header }; mi.Click += (_, _) => act(); ProfileMenu.Items.Add(mi); }
+        Add("New profile (fresh setup)…", () => NewProfile(copy: false));
+        Add("Duplicate this profile…", () => NewProfile(copy: true));
+        Add("Rename this profile…", RenameProfile);
+        Add("Delete a profile…", DeleteProfile);
+        ProfileMenu.Items.Add(new Separator());
+        Add("Export this profile to a file…", ExportProfile);
+        Add("Import a profile file…", ImportProfile);
+        Add("Open profiles folder", () => OpenFolder(store.ProfilesFolder));
+    }
+
+    private bool BusyForProfiles()
+    {
+        if (!(_engine.Live || _engine.Recording)) return false;
+        MessageBox.Show(this, "End the stream and the recording first: switching profiles restarts Leapcast.", "Profiles", MessageBoxButton.OK, MessageBoxImage.Information);
+        return true;
+    }
+
+    /// <summary>Profiles swap every scene, output and setting at once: Leapcast restarts into the other one (a second).</summary>
+    private void SwitchProfile(string name)
+    {
+        var store = ProfileStore.Default;
+        if (string.Equals(name, store.Active, StringComparison.OrdinalIgnoreCase) || BusyForProfiles()) return;
+        Save();
+        store.SetActive(name);
+        RestartApp();
+    }
+
+    private void NewProfile(bool copy)
+    {
+        if (BusyForProfiles()) return;
+        var store = ProfileStore.Default;
+        var name = TextPrompt.Ask(this, copy ? "Duplicate profile" : "New profile", "Name the profile:",
+            copy ? store.Active + " copy" : $"Profile {store.List().Count + 1}");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            Save();
+            store.Create(name.Trim(), copy ? _state : null);
+            store.SetActive(name.Trim());
+            RestartApp();
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Profiles", MessageBoxButton.OK, MessageBoxImage.Information); }
+    }
+
+    private void RenameProfile()
+    {
+        var store = ProfileStore.Default;
+        string old = store.Active;
+        var name = TextPrompt.Ask(this, "Rename profile", "New name:", old);
+        if (string.IsNullOrWhiteSpace(name) || name.Trim() == old) return;
+        try
+        {
+            Save();
+            string oldAssets = store.AssetsFolder(old);
+            store.Rename(old, name.Trim());
+            // images imported with the profile live in its folder, which just moved
+            string newAssets = store.AssetsFolder(name.Trim());
+            foreach (var s in _state.Scenes.SelectMany(sc => sc.Sources))
+                if (s.FilePath.StartsWith(oldAssets, StringComparison.OrdinalIgnoreCase)) s.FilePath = newAssets + s.FilePath[oldAssets.Length..];
+            Save();
+            Status($"Profile renamed to \"{name.Trim()}\".");
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Profiles", MessageBoxButton.OK, MessageBoxImage.Information); }
+    }
+
+    private void DeleteProfile()
+    {
+        var store = ProfileStore.Default;
+        var others = store.List().Where(n => !string.Equals(n, store.Active, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (others.Count == 0) { MessageBox.Show(this, "This is your only profile.", "Profiles"); return; }
+        var name = TextPrompt.Ask(this, "Delete profile", "Type the name of the profile to delete (" + string.Join(", ", others) + "):", "");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        var match = others.FirstOrDefault(n => string.Equals(n, name.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (match is null) { MessageBox.Show(this, "No other profile has that name.", "Profiles"); return; }
+        if (MessageBox.Show(this, $"Delete the profile \"{match}\" with its scenes and settings? This can't be undone.", "Profiles",
+                MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        try { store.Delete(match); Status($"Profile \"{match}\" deleted."); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Profiles"); }
+    }
+
+    private void ExportProfile()
+    {
+        Save();
+        var store = ProfileStore.Default;
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Export profile", FileName = ProfileStore.Safe(store.Active) + ProfilePackage.Extension,
+            Filter = "Leapcast profile|*" + ProfilePackage.Extension, DefaultExt = ProfilePackage.Extension,
+        };
+        if (dlg.ShowDialog(this) != true) return;
+        string? password = null;
+        if (_state.Settings.Outputs.Any(o => SecretStore.Unprotect(o.StreamKeyProtected).Length > 0))
+        {
+            var pw = TextPrompt.Ask(this, "Stream keys",
+                "Include your stream keys? Type a password to protect them (you'll need it when importing). Leave it empty to export everything except the keys.", "", secret: true);
+            if (pw is null) return;
+            password = pw.Length > 0 ? pw : null;
+        }
+        try
+        {
+            ProfilePackage.Export(_state, store.Active, dlg.FileName, SecretStore.Unprotect, password, AppVersion);
+            Status($"Profile exported to {dlg.FileName}{(password is null ? " (without stream keys)" : " (stream keys password-protected)")}.");
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Couldn't export the profile: " + ex.Message, "Profiles", MessageBoxButton.OK, MessageBoxImage.Warning); }
+    }
+
+    private void ImportProfile()
+    {
+        if (BusyForProfiles()) return;
+        var dlg = new Microsoft.Win32.OpenFileDialog { Title = "Import profile", Filter = "Leapcast profile|*" + ProfilePackage.Extension };
+        if (dlg.ShowDialog(this) != true) return;
+        try
+        {
+            var info = ProfilePackage.Inspect(dlg.FileName);
+            var store = ProfileStore.Default;
+            string name = info.Name;
+            for (int i = 2; store.Exists(name); i++) name = $"{info.Name} ({i})";
+            string? password = null;
+            if (info.HasKeys)
+            {
+                password = TextPrompt.Ask(this, "Stream keys", "This profile includes stream keys. Type the password it was exported with (or leave it empty to import everything except the keys):", "", secret: true);
+                if (password is null) return;
+                if (password.Length == 0) password = null;
+            }
+            StudioState state;
+            while (true)
+            {
+                try { state = ProfilePackage.Import(dlg.FileName, store.AssetsFolder(name), SecretStore.Protect, password); break; }
+                catch (ProfilePasswordException ex)
+                {
+                    password = TextPrompt.Ask(this, "Stream keys", ex.Message + " Try again (or leave it empty to skip the keys):", "", secret: true);
+                    if (password is null) return;
+                    if (password.Length == 0) password = null;
+                }
+            }
+            store.Write(name, state);
+            if (MessageBox.Show(this, $"Imported \"{name}\" ({info.Scenes} scenes, {info.Sources} sources). Switch to it now?", "Profiles",
+                    MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+                SwitchProfile(name);
+            else Status($"Profile \"{name}\" imported: pick it in the Profile menu.");
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Couldn't import the profile: " + ex.Message, "Profiles", MessageBoxButton.OK, MessageBoxImage.Warning); }
+    }
+
+    private static string AppVersion => typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "";
+
+    private void RestartApp()
+    {
+        _closeConfirmed = true;
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (exe is not null) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = false });
+        }
+        catch { }
+        Application.Current.Shutdown();
+    }
+
+    // ------------------------------------------------------------------ tools
+
+    private void OpenRecordings_Click(object sender, RoutedEventArgs e) => OpenFolder(_state.Settings.RecordingFolder);
+
+    private void OpenLogs_Click(object sender, RoutedEventArgs e) => OpenFolder(Path.Combine(StateStore.Folder, "logs"));
+
+    private static void OpenFolder(string dir)
+    {
+        try
+        {
+            Directory.CreateDirectory(dir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + dir + "\"") { UseShellExecute = true });
+        }
+        catch { }
+    }
+
     // ------------------------------------------------------------------ studio mode
 
     private async void StudioMode_Click(object sender, RoutedEventArgs e)
@@ -503,6 +831,7 @@ public partial class MainWindow : Window
         StagePanel.Visibility = TransitionPanel.Visibility = _studio ? Visibility.Visible : Visibility.Collapsed;
         StageColumn.Width = _studio ? new GridLength(3.2, GridUnitType.Star) : new GridLength(0);
         StudioModeButton.Content = _studio ? "■  Studio mode" : "Studio mode";
+        StudioModeMenu.IsChecked = _studio;
         UpdateCanvasLayout();
         UpdateStudioLabels();
         foreach (var ed in Editors) ed.Select(null);
@@ -598,7 +927,7 @@ public partial class MainWindow : Window
 
     private void SetButtonsEnabled(bool on)
     {
-        GoLiveButton.IsEnabled = AutoConfigButton.IsEnabled = StartAllButton.IsEnabled = RecordButton.IsEnabled = PreviewButton.IsEnabled = PreviewButtonCenter.IsEnabled =
+        GoLiveButton.IsEnabled = AutoConfigMenu.IsEnabled = StartAllButton.IsEnabled = RecordButton.IsEnabled = PreviewButton.IsEnabled = PreviewButtonCenter.IsEnabled =
             ReplayBufferButton.IsEnabled = SaveReplayButton.IsEnabled = HorizontalOutputs.IsEnabled = VerticalOutputs.IsEnabled = on;
     }
 
@@ -848,12 +1177,18 @@ public partial class MainWindow : Window
         if (ok) { Status("Auto-config applied: " + (_engine.CurrentPlan ?? _engine.PlanFor(_state.Settings)).Summary); Log("Auto-config applied.", false); }
     }
 
-    private async void Settings_Click(object sender, RoutedEventArgs e)
+    private void Settings_Click(object sender, RoutedEventArgs e) => OpenSettings(null);
+
+    private void SettingsMenu_Click(object sender, RoutedEventArgs e) => OpenSettings((sender as FrameworkElement)?.Tag as string);
+
+    private async void OpenSettings(string? tab)
     {
-        var window = new SettingsWindow(_state.Settings, _engine) { Owner = this };
+        var window = new SettingsWindow(_state.Settings, _engine, _state.Scenes, tab) { Owner = this };
         if (window.ShowDialog() != true) return;
         bool ffmpegChanged = window.Result.FfmpegPath != _state.Settings.FfmpegPath;
+        window.ApplySceneHotkeys(); // scene and source hotkeys live on the scenes
         _state.Settings = window.Result;
+        ApplyDocks();
         Save();
         _shownPlan = null;
         UpdatePlanDisplay();
@@ -864,7 +1199,7 @@ public partial class MainWindow : Window
         {
             if (_engine.Live)
             {
-                var answer = MessageBox.Show(this, "Apply the new settings now? Your outputs will reconnect for a second.",
+                var answer = MessageBox.Show(this, "Apply the new settings now? Your destinations stay connected and viewers see a short pause (only a new resolution makes them reconnect for a second).",
                     "Settings", MessageBoxButton.YesNo, MessageBoxImage.Question);
                 if (answer != MessageBoxResult.Yes) { await ApplyToEngineAsync(false); Status("Settings saved: they apply next time you go live."); return; }
             }
@@ -913,6 +1248,7 @@ public partial class MainWindow : Window
             Item("Reset crop", () => s.CropLeft = s.CropTop = s.CropRight = s.CropBottom = 0);
         if (kind == CanvasKind.Horizontal ? s.H > 0 : s.VH > 0)
             Item("Reset shape (undo stretch)", () => { if (kind == CanvasKind.Horizontal) s.H = 0; else s.VH = 0; });
+        menu.Items.Add(FullscreenMenu(kind, target));
         var props = new MenuItem { Header = "Properties…" };
         props.Click += (_, _) => { SourcesList.SelectedItem = s; SourceProperties_Click(this, new RoutedEventArgs()); };
         menu.Items.Add(props);
@@ -1157,17 +1493,19 @@ public partial class MainWindow : Window
 /// <summary>Minimal themed text prompt (replaces the WinForms-only VB InputBox).</summary>
 public static class TextPrompt
 {
-    public static string? Ask(Window owner, string title, string label, string initial)
+    /// <param name="secret">A password: typed into a box that hides it.</param>
+    public static string? Ask(Window owner, string title, string label, string initial, bool secret = false)
     {
         var box = new TextBox { Text = initial, MinWidth = 300 };
+        var pw = new PasswordBox { MinWidth = 300, Password = initial };
         var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 80, Background = new SolidColorBrush(Color.FromRgb(0x57, 0x48, 0xC7)) };
         var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 80 };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
         buttons.Children.Add(cancel);
         buttons.Children.Add(ok);
         var panel = new StackPanel { Margin = new Thickness(18) };
-        panel.Children.Add(new TextBlock { Text = label, Margin = new Thickness(3, 0, 3, 6) });
-        panel.Children.Add(box);
+        panel.Children.Add(new TextBlock { Text = label, Margin = new Thickness(3, 0, 3, 6), TextWrapping = TextWrapping.Wrap, MaxWidth = 440 });
+        panel.Children.Add(secret ? pw : box);
         panel.Children.Add(buttons);
         var w = new Window
         {
@@ -1177,7 +1515,7 @@ public static class TextPrompt
             Foreground = (Brush)Application.Current.FindResource("TextBrush"),
         };
         ok.Click += (_, _) => w.DialogResult = true;
-        w.Loaded += (_, _) => { box.Focus(); box.SelectAll(); };
-        return w.ShowDialog() == true ? box.Text : null;
+        w.Loaded += (_, _) => { if (secret) pw.Focus(); else { box.Focus(); box.SelectAll(); } };
+        return w.ShowDialog() == true ? (secret ? pw.Password : box.Text) : null;
     }
 }

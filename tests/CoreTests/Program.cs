@@ -236,6 +236,71 @@ Check(HotkeyText.Normalize("shift+ctrl+f1") == "Ctrl+Shift+F1" && HotkeyText.Nor
     Check(PipelineBuilder.LayoutFingerprint(new[] { g1 }, 1280, 720, null) == lockBefore2, "showing a source doesn't change the graph (no rebuild)");
 }
 
+Console.WriteLine("Profiles: save, switch, export to a file and import on a fresh install");
+{
+    string proot = Path.Combine(work, "profiles-test");
+    if (Directory.Exists(proot)) Directory.Delete(proot, true);
+    Directory.CreateDirectory(proot);
+    // an older install: one state file at the top becomes the "Default" profile
+    var legacy = ProfileStore.NewDefaultState();
+    File.WriteAllText(Path.Combine(proot, "studio-state.json"), System.Text.Json.JsonSerializer.Serialize(legacy));
+    var store = new ProfileStore(proot);
+    store.MigrateLegacy();
+    Check(store.Active == "Default" && store.Read("Default")?.Scenes.Count == 1, "an existing setup becomes the Default profile");
+
+    string logoPath = Path.Combine(proot, "my-logo.png");
+    await RunAsync(new[] { "-y", "-f", "lavfi", "-i", "color=c=green:s=64x64", "-frames:v", "1", logoPath });
+    var mine = ProfileStore.NewDefaultState();
+    mine.Scenes[0].Hotkey = "Ctrl+1";
+    mine.Scenes[0].Sources.Add(new StudioSource { Name = "Logo", Type = SourceTypes.Image, FilePath = logoPath, Anchor = Anchors.Free, X = 0.8, Y = 0.05, W = 0.1, Hotkey = "Ctrl+Shift+L", Locked = true });
+    mine.Settings.Hotkeys[HotkeyActions.GoLive] = "Ctrl+F12";
+    mine.Settings.EncoderPreset = "Quality";
+    mine.Settings.Outputs.Add(new StreamOutput { Name = "Twitch", ServerUrl = "rtmp://live.twitch.tv/app", StreamKeyProtected = "PROTECTED(live_123_secret)" });
+    mine.Settings.FfmpegPath = @"C:\only\on\this\pc\ffmpeg.exe";
+    store.Create("Wizard nights", mine);
+    store.SetActive("Wizard nights");
+    Check(store.List().SequenceEqual(new[] { "Default", "Wizard nights" }) && store.Active == "Wizard nights", $"profiles are listed and switched ({string.Join(", ", store.List())})");
+
+    string Unprotect(string p) => p.StartsWith("PROTECTED(") ? p[10..^1] : "";
+    string Protect(string plain) => $"PROTECTED({plain})";
+    string pkg = Path.Combine(proot, "wizard" + ProfilePackage.Extension);
+    ProfilePackage.Export(store.Read("Wizard nights")!, "Wizard nights", pkg, Unprotect, password: "hunter2", appVersion: "test");
+    var info = ProfilePackage.Inspect(pkg);
+    Check(info.Name == "Wizard nights" && info.HasKeys && info.Scenes == 1 && info.Sources == 4, $"exported to one file ({info})");
+    using (var z = System.IO.Compression.ZipFile.OpenRead(pkg))
+    {
+        string all = string.Concat(z.Entries.Where(e => e.Name.EndsWith(".json")).Select(e => new StreamReader(e.Open()).ReadToEnd()));
+        Check(!all.Contains("live_123_secret") && !all.Contains("PROTECTED(") && z.Entries.Any(e => e.FullName.StartsWith("assets/")),
+            "the stream key is never in the file in plain text; images are bundled");
+    }
+    // a fresh install somewhere else
+    string fresh = Path.Combine(work, "fresh-install");
+    if (Directory.Exists(fresh)) Directory.Delete(fresh, true);
+    var store2 = new ProfileStore(fresh);
+    try { ProfilePackage.Import(pkg, store2.AssetsFolder("Wizard nights"), Protect, "wrong"); Check(false, "a wrong password is refused"); }
+    catch (ProfilePasswordException) { Check(true, "a wrong password is refused"); }
+    var imported = ProfilePackage.Import(pkg, store2.AssetsFolder("Wizard nights"), Protect, "hunter2");
+    store2.Write("Wizard nights", imported);
+    var logo2 = imported.Scenes[0].Sources.First(x => x.Name == "Logo");
+    Check(imported.Scenes[0].Hotkey == "Ctrl+1" && logo2.Hotkey == "Ctrl+Shift+L" && logo2.Locked && logo2.X == 0.8
+          && imported.Settings.Hotkeys[HotkeyActions.GoLive] == "Ctrl+F12" && imported.Settings.EncoderPreset == "Quality",
+        "scenes, sources, positions, locks, hotkeys and settings come across exactly");
+    Check(File.Exists(logo2.FilePath) && logo2.FilePath.StartsWith(store2.AssetsFolder("Wizard nights")), $"the image is restored next to the profile ({logo2.FilePath})");
+    Check(imported.Settings.Outputs[0].StreamKeyProtected == "PROTECTED(live_123_secret)", "the stream key is restored (re-protected for the new PC)");
+    Check(imported.Settings.FfmpegPath == "", "PC-specific paths are reset");
+    var noKeys = ProfilePackage.Import(pkg, Path.Combine(fresh, "x"), Protect, null);
+    Check(noKeys.Settings.Outputs[0].StreamKeyProtected == "" && noKeys.Settings.Outputs[0].ServerUrl.Length > 0, "without the password everything but the key is imported");
+    store.Rename("Wizard nights", "Wizard101 nights");
+    Check(store.Active == "Wizard101 nights" && store.Read("Wizard101 nights") is not null, "renaming the active profile keeps it active");
+    try { store.Delete("Wizard101 nights"); Check(false, "the active profile can't be deleted"); } catch (InvalidOperationException) { Check(true, "the active profile can't be deleted"); }
+    store.Delete("Default");
+    Check(!store.Exists("Default"), "another profile can be deleted");
+    var conflictsScenes = new[] { new StudioScene { Name = "a", Hotkey = "Ctrl+1" } };
+    var cs = new StudioSettings(); cs.Hotkeys[HotkeyActions.Record] = "ctrl+1";
+    Check(HotkeyActions.Conflicts(cs, conflictsScenes).SequenceEqual(new[] { "Ctrl+1" }), "a key combination used twice is reported");
+    Check(EncoderCatalog.SlowerX264("veryfast") == "faster", "Quality preset: one x264 step slower");
+}
+
 Console.WriteLine("Performance governor");
 Check(HardwareProfile.Classify(4, 8L << 30, new[] { new ProbedEncoder("libx264", EncoderTier.Rich) }) == HardwareTier.Low
       && HardwareProfile.Classify(8, 16L << 30, new[] { new ProbedEncoder("libx264", EncoderTier.Rich) }) == HardwareTier.Low

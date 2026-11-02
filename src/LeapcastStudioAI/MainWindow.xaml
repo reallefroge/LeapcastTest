@@ -29,8 +29,46 @@
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
-    <!-- ===================== Top bar ===================== -->
-    <Border Grid.Row="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1" Padding="14,8">
+    <!-- ===================== Menu bar + top bar ===================== -->
+    <StackPanel Grid.Row="0">
+    <Menu x:Name="MainMenu" Padding="8,2,8,0" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1">
+      <MenuItem Header="_Settings">
+        <MenuItem Header="Stream: resolution, bitrate, encoder…" Click="SettingsMenu_Click" Tag="Stream"/>
+        <MenuItem Header="Hotkeys…" Click="SettingsMenu_Click" Tag="Hotkeys"/>
+        <MenuItem Header="Recording…" Click="SettingsMenu_Click" Tag="Recording"/>
+        <MenuItem Header="Canvas &amp; scenes…" Click="SettingsMenu_Click" Tag="Canvas"/>
+        <MenuItem Header="Connection…" Click="SettingsMenu_Click" Tag="Connection"/>
+        <MenuItem Header="Advanced…" Click="SettingsMenu_Click" Tag="Advanced"/>
+      </MenuItem>
+      <MenuItem x:Name="DocksMenu" Header="_Docks" SubmenuOpened="DocksMenu_SubmenuOpened">
+        <MenuItem Header="Scenes" IsCheckable="True" Click="DockToggle_Click" Tag="Scenes"/>
+        <MenuItem Header="Sources" IsCheckable="True" Click="DockToggle_Click" Tag="Sources"/>
+        <MenuItem Header="Controls (preview, record, replay)" IsCheckable="True" Click="DockToggle_Click" Tag="Controls"/>
+        <MenuItem Header="Audio mixer" IsCheckable="True" Click="DockToggle_Click" Tag="Mixer"/>
+        <MenuItem Header="Multistream" IsCheckable="True" Click="DockToggle_Click" Tag="Multistream"/>
+        <MenuItem Header="Smart stream (stats)" IsCheckable="True" Click="DockToggle_Click" Tag="SmartStream"/>
+        <MenuItem Header="Activity" IsCheckable="True" Click="DockToggle_Click" Tag="Activity"/>
+        <MenuItem Header="Go live button" IsCheckable="True" Click="DockToggle_Click" Tag="GoLive"/>
+        <MenuItem Header="Studio mode button" IsCheckable="True" Click="DockToggle_Click" Tag="StudioButton"/>
+        <Separator/>
+        <MenuItem Header="Show all docks" Click="ResetDocks_Click"/>
+      </MenuItem>
+      <MenuItem x:Name="ProfileMenu" Header="_Profile" SubmenuOpened="ProfileMenu_SubmenuOpened">
+        <MenuItem Header="(profiles)"/>
+      </MenuItem>
+      <MenuItem Header="_Tools">
+        <MenuItem x:Name="AutoConfigMenu" Header="Auto-config: test this PC and pick the best settings…" Click="AutoConfig_Click"/>
+        <MenuItem Header="Configure the stream (quality, encoder, bitrate)…" Click="SettingsMenu_Click" Tag="Stream"/>
+        <MenuItem Header="Add a destination (Twitch, YouTube, TikTok…)…" Click="AddOutput_Click"/>
+        <MenuItem Header="Test my connection…" Click="SettingsMenu_Click" Tag="Connection"/>
+        <Separator/>
+        <MenuItem x:Name="StudioModeMenu" Header="Studio mode" IsCheckable="True" Click="StudioMode_Click"/>
+        <Separator/>
+        <MenuItem Header="Open recordings folder" Click="OpenRecordings_Click"/>
+        <MenuItem Header="Open log folder" Click="OpenLogs_Click"/>
+      </MenuItem>
+    </Menu>
+    <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1" Padding="14,8">
       <DockPanel LastChildFill="False">
         <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
           <Image Source="pack://application:,,,/Assets/leapcast-64.png" Width="28" Height="28" Margin="0,0,9,0" VerticalAlignment="Center"
@@ -50,27 +88,25 @@
           </Border>
           <Button x:Name="StudioModeButton" Content="Studio mode" Click="StudioMode_Click" Padding="12,8" Margin="0,0,6,0"
                   ToolTip="Preview the next scene (and edit it) beside what's on air, then click Transition"/>
-          <Button x:Name="AutoConfigButton" Content="Auto-config" Click="AutoConfig_Click" Padding="12,8" Margin="0,0,6,0"
-                  ToolTip="Test this PC with your real scene and pick the smoothest settings (about a minute)"/>
           <Button x:Name="GoLiveButton" Style="{StaticResource PrimaryButton}" Content="▶  Go live" Click="GoLive_Click" Padding="18,8" MinWidth="130"
                   ToolTip="Start every enabled output in the Multistream panel"/>
-          <Button Style="{StaticResource IconButton}" Content="&#xE713;" FontSize="16" Click="Settings_Click" ToolTip="Settings"/>
         </StackPanel>
       </DockPanel>
     </Border>
+    </StackPanel>
 
     <!-- ===================== Body ===================== -->
     <Grid Grid.Row="1" Margin="10">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="244"/>
+        <ColumnDefinition x:Name="LeftColumn" Width="244"/>
         <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="310"/>
+        <ColumnDefinition x:Name="RightColumn" Width="310"/>
       </Grid.ColumnDefinitions>
 
       <!-- Left: scenes + sources -->
-      <Grid Grid.Column="0" Margin="0,0,10,0">
-        <Grid.RowDefinitions><RowDefinition Height="2*"/><RowDefinition Height="3*"/></Grid.RowDefinitions>
-        <Border Grid.Row="0" Style="{StaticResource Card}" Margin="0,0,0,10">
+      <Grid x:Name="LeftPanel" Grid.Column="0" Margin="0,0,10,0">
+        <Grid.RowDefinitions><RowDefinition x:Name="ScenesRow" Height="2*"/><RowDefinition x:Name="SourcesRow" Height="3*"/></Grid.RowDefinitions>
+        <Border x:Name="ScenesDock" Grid.Row="0" Style="{StaticResource Card}" Margin="0,0,0,10">
           <DockPanel>
             <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
               <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
@@ -85,7 +121,7 @@
                      Foreground="{StaticResource TextBrush}" DisplayMemberPath="Name"/>
           </DockPanel>
         </Border>
-        <Border Grid.Row="1" Style="{StaticResource Card}">
+        <Border x:Name="SourcesDock" Grid.Row="1" Style="{StaticResource Card}">
           <DockPanel>
             <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
               <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
@@ -197,7 +233,7 @@
         </Border>
 
         <!-- control strip -->
-        <DockPanel Grid.Row="1" Margin="0,8,0,0">
+        <DockPanel x:Name="ControlsDock" Grid.Row="1" Margin="0,8,0,0">
           <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
             <Button x:Name="PreviewButton" Content="▶  Preview" Click="Preview_Click" MinWidth="104"/>
             <Button x:Name="RecordButton" Content="●  Record" Click="Record_Click" MinWidth="104"/>
@@ -219,7 +255,7 @@
         </DockPanel>
 
         <!-- mixer -->
-        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,8,0,0" Padding="10,6">
+        <Border x:Name="MixerDock" Grid.Row="2" Style="{StaticResource Card}" Margin="0,8,0,0" Padding="10,6">
           <DockPanel>
             <TextBlock DockPanel.Dock="Left" Text="AUDIO" Style="{StaticResource SectionHeader}" Margin="2,4,12,0" VerticalAlignment="Top"/>
             <TextBlock DockPanel.Dock="Bottom" x:Name="MixerHint" Text="Meters run while the preview or stream is on." Style="{StaticResource Hint}"/>
@@ -243,9 +279,9 @@
       </Grid>
 
       <!-- Right: multistream dock (Aitum-style) + smart stats -->
-      <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto">
+      <ScrollViewer x:Name="RightPanel" Grid.Column="2" VerticalScrollBarVisibility="Auto">
         <StackPanel>
-          <Border Style="{StaticResource Card}" Margin="0,0,0,10">
+          <Border x:Name="MultistreamDock" Style="{StaticResource Card}" Margin="0,0,0,10">
             <StackPanel>
               <DockPanel Margin="0,0,0,6">
                 <Button x:Name="StartAllButton" DockPanel.Dock="Right" Content="Start all" Click="StartAll_Click" Padding="10,5" FontSize="12"/>
@@ -270,7 +306,7 @@
             </StackPanel>
           </Border>
 
-          <Border Style="{StaticResource Card}" Margin="0,0,0,10">
+          <Border x:Name="SmartStreamDock" Style="{StaticResource Card}" Margin="0,0,0,10">
             <StackPanel>
               <TextBlock Text="SMART STREAM" Style="{StaticResource SectionHeader}" Margin="2,0,0,6"/>
               <TextBlock x:Name="PlanTitle" Text="—" FontSize="14" FontWeight="SemiBold" Margin="2" TextWrapping="Wrap"/>
@@ -300,7 +336,7 @@
             </StackPanel>
           </Border>
 
-          <Border Style="{StaticResource Card}">
+          <Border x:Name="ActivityDock" Style="{StaticResource Card}">
             <StackPanel>
               <TextBlock Text="ACTIVITY" Style="{StaticResource SectionHeader}" Margin="2,0,0,4"/>
               <ItemsControl x:Name="ActivityList">
@@ -319,7 +355,7 @@
     <!-- ===================== Status bar ===================== -->
     <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="14,5">
       <DockPanel>
-        <TextBlock DockPanel.Dock="Right" Text="v0.8.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
+        <TextBlock DockPanel.Dock="Right" Text="v0.9.0 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
         <TextBlock x:Name="HardwareLabel" DockPanel.Dock="Right" Text="Detecting hardware…" Foreground="{StaticResource MutedBrush}" FontSize="11"
                    VerticalAlignment="Center" Margin="0,0,16,0" TextTrimming="CharacterEllipsis" MaxWidth="560"/>
         <TextBlock x:Name="EngineStatus" Text="Starting…" Foreground="{StaticResource WarnBrush}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
