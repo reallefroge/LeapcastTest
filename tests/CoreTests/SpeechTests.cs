@@ -9,6 +9,13 @@ using LeapcastStudioAI;
 /// </summary>
 static class SpeechTests
 {
+    static double PeakOf(byte[] pcm)
+    {
+        int peak = 0;
+        for (int i = 0; i + 1 < pcm.Length; i += 2) peak = Math.Max(peak, Math.Abs((int)BitConverter.ToInt16(pcm, i)));
+        return peak / 32768.0;
+    }
+
     public static async Task RunAsync(Action<bool, string> check)
     {
         if (!VoiceCommandListener.Available(out var culture))
@@ -31,11 +38,13 @@ static class SpeechTests
             var feed = new BlockingAudioStream();
             using var listener = new VoiceCommandListener();
             listener.Heard += (t, c) => { lock (heard) heard.Add($"{t} ({c:0.00})"); };
+            listener.Debug += d => Console.WriteLine("      speech: " + d);
             listener.Start("clip", feed);
             var silence = new short[16000 / 2];
             foreach (var p in phrases)
             {
                 var pcm = Say(p);
+                Console.WriteLine($"      said \"{p}\": {pcm.Length / 32000.0:0.0}s of audio, peak {PeakOf(pcm):0.00}");
                 var samples = new short[pcm.Length / 2];
                 Buffer.BlockCopy(pcm, 0, samples, 0, samples.Length * 2);
                 // real-time pace, 100 ms at a time, like the microphone
@@ -51,6 +60,8 @@ static class SpeechTests
         }
         var said = await Listen("Clip");
         check(said.Count == 1, $"Windows' voice saying \"Clip\" is heard ({string.Join(", ", said)})");
+        var inSentence = await Listen("Okay, let's clip that.");
+        check(inSentence.Count == 1, $"…and inside a sentence ({string.Join(", ", inSentence)})");
         var chat = await Listen("The weather is really nice today, isn't it?");
         check(chat.Count == 0, $"an ordinary sentence doesn't trigger a clip ({(chat.Count == 0 ? "nothing" : string.Join(", ", chat))})");
     }

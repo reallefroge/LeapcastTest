@@ -27,6 +27,8 @@ public sealed class VoiceCommandListener : IDisposable
 
     /// <summary>The word was heard: (what was recognized, confidence).</summary>
     public event Action<string, float>? Heard;
+    /// <summary>Everything the recognizer reports (diagnostics: speech detected, recognized, rejected).</summary>
+    public event Action<string>? Debug;
 
     public bool Running => _engine is not null;
 
@@ -65,6 +67,10 @@ public sealed class VoiceCommandListener : IDisposable
             if (feed is not null) engine.SetInputToAudioStream(feed, new SpeechAudioFormatInfo(SpeechPcmConverter.OutRate, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
             else engine.SetInputToDefaultAudioDevice();
             engine.SpeechRecognized += OnRecognized;
+            engine.SpeechDetected += (_, e) => Debug?.Invoke($"speech detected at {e.AudioPosition}");
+            engine.SpeechRecognitionRejected += (_, e) =>
+                Debug?.Invoke("rejected: " + string.Join(" | ", e.Result?.Alternates.Take(3).Select(a => $"{a.Text} ({a.Confidence:0.00}, {a.Grammar?.Name})") ?? Array.Empty<string>()));
+            engine.RecognizeCompleted += (_, e) => Debug?.Invoke($"recognition ended{(e.Error is null ? "" : ": " + e.Error.Message)}");
             engine.RecognizeAsync(RecognizeMode.Multiple);
         }
         catch
@@ -79,6 +85,7 @@ public sealed class VoiceCommandListener : IDisposable
     private void OnRecognized(object? sender, SpeechRecognizedEventArgs e)
     {
         var r = e.Result;
+        if (r is not null) Debug?.Invoke($"recognized: {r.Text} ({r.Confidence:0.00}, {r.Grammar?.Name})");
         if (r is null || !VoiceClips.Matches(r.Text, _word)) return;
         bool alone = r.Grammar?.Name == "command";
         if (r.Confidence < (alone ? CommandConfidence : DictationConfidence)) return;
