@@ -95,6 +95,12 @@ public sealed class BlockingAudioStream : Stream
     private long _queued;
     private bool _done;
     private readonly long _maxBytes;
+    private long _readTotal;
+
+    /// <summary>What <see cref="Length"/> reports (the speech engine sizes the stream from it when it starts).</summary>
+    public long ReportedLength { get; init; } = long.MaxValue;
+    /// <summary>Diagnostics: every call the reader makes (Length, Seek, Read sizes).</summary>
+    public Action<string>? Trace { get; set; }
 
     public BlockingAudioStream(int maxSeconds = 5, int bytesPerSecond = SpeechPcmConverter.OutRate * 2) => _maxBytes = (long)maxSeconds * bytesPerSecond;
 
@@ -118,6 +124,7 @@ public sealed class BlockingAudioStream : Stream
     public override int Read(byte[] buffer, int offset, int count)
     {
         int copied = 0;
+        if (count <= 0) return 0;
         lock (_chunks)
         {
             while (copied == 0)
@@ -138,6 +145,8 @@ public sealed class BlockingAudioStream : Stream
                 if (_offset >= _current.Length && _chunks.Count == 0) break;
             }
         }
+        _readTotal += copied;
+        Trace?.Invoke($"Read({count}) → {copied}");
         return copied;
     }
 
@@ -146,11 +155,16 @@ public sealed class BlockingAudioStream : Stream
     public override bool CanRead => true;
     public override bool CanSeek => false;
     public override bool CanWrite => false;
-    /// <summary>Unknown/endless (the speech recognizer asks when it starts; -1 means "no end").</summary>
-    public override long Length => -1;
-    public override long Position { get => 0; set { } }
+    /// <summary>Endless: reported as <see cref="ReportedLength"/> (the speech recognizer asks when it starts).</summary>
+    public override long Length { get { Trace?.Invoke($"Length → {ReportedLength}"); return ReportedLength; } }
+    /// <summary>Bytes handed out so far (the speech engine tracks its position through it).</summary>
+    public override long Position { get => _readTotal; set => Trace?.Invoke($"Position = {value}"); }
     public override void Flush() { }
-    public override long Seek(long offset, SeekOrigin origin) => 0;
+    public override long Seek(long offset, SeekOrigin origin)
+    {
+        Trace?.Invoke($"Seek({offset}, {origin})");
+        return origin == SeekOrigin.Current && offset == 0 ? _readTotal : _readTotal;
+    }
     public override void SetLength(long value) => throw new NotSupportedException();
     public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }

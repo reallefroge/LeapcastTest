@@ -32,10 +32,11 @@ static class SpeechTests
             synth.Speak(text);
             return ms.ToArray();
         }
-        async Task<List<string>> Listen(params string[] phrases)
+        async Task<List<string>> Listen(string[] phrases, long length = long.MaxValue, bool trace = false)
         {
             var heard = new List<string>();
-            var feed = new BlockingAudioStream();
+            var calls = new List<string>();
+            var feed = new BlockingAudioStream { ReportedLength = length, Trace = trace ? c => { lock (calls) calls.Add(c); } : null };
             using var listener = new VoiceCommandListener();
             listener.Heard += (t, c) => { lock (heard) heard.Add($"{t} ({c:0.00})"); };
             listener.Debug += d => Console.WriteLine("      speech: " + d);
@@ -56,13 +57,20 @@ static class SpeechTests
                 for (int k = 0; k < 3; k++) { feed.Write(silence); await Task.Delay(500); }
             }
             await Task.Delay(1500);
+            if (trace) lock (calls) Console.WriteLine("      stream calls: " + string.Join("; ", calls.Take(12)) + (calls.Count > 12 ? $" … ({calls.Count} calls)" : ""));
             lock (heard) return heard.ToList();
         }
-        var said = await Listen("Clip");
+        // which stream length the speech engine accepts (diagnostics; the app uses the default)
+        foreach (var len in new[] { long.MaxValue, (long)int.MaxValue, -1L })
+        {
+            var r = await Listen(new[] { "Clip" }, len, trace: true);
+            Console.WriteLine($"      length {len}: heard {r.Count}");
+        }
+        var said = await Listen(new[] { "Clip" });
         check(said.Count == 1, $"Windows' voice saying \"Clip\" is heard ({string.Join(", ", said)})");
-        var inSentence = await Listen("Okay, let's clip that.");
+        var inSentence = await Listen(new[] { "Okay, let's clip that." });
         check(inSentence.Count == 1, $"…and inside a sentence ({string.Join(", ", inSentence)})");
-        var chat = await Listen("The weather is really nice today, isn't it?");
+        var chat = await Listen(new[] { "The weather is really nice today, isn't it?" });
         check(chat.Count == 0, $"an ordinary sentence doesn't trigger a clip ({(chat.Count == 0 ? "nothing" : string.Join(", ", chat))})");
     }
 }
