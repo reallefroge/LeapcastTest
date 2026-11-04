@@ -6,6 +6,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>LeapcastStudioAI.Tests</RootNamespace>
   </PropertyGroup>
+  <!-- Windows only: the voice-clip listener (Windows' speech recognizer) is tested too. -->
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <DefineConstants>$(DefineConstants);WINDOWS_SPEECH</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <PackageReference Include="System.Speech" Version="8.0.0" />
+    <Compile Include="../../src/LeapcastStudioAI/Windows/VoiceCommandListener.cs" />
+  </ItemGroup>
   <ItemGroup>
     <!-- The engine core is platform-neutral, so it is compiled and exercised against real FFmpeg here. -->
     <Compile Include="../../src/LeapcastStudioAI/Core/**/*.cs" />

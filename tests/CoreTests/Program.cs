@@ -362,7 +362,47 @@ Console.WriteLine("Upload speed scan (kbps), against a local server limited to ~
     Check(2 * (perDest + 160) + 2000 + 160 <= 8000 * 0.75 + 1, $"auto-config picks a bitrate where every destination fits the upload ({perDest:N0} kbps each for 2 destinations + vertical on 8,000 kbps)");
 }
 
-Console.WriteLine("Performance governor");
+Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by day and time");
+{
+    Check(VoiceClips.Matches("Clip", "clip") && VoiceClips.Matches("clip that!", "clip") && VoiceClips.Matches("ok let's CLIP it", "clip"),
+        "\"Clip\", \"clip that!\" and \"let's CLIP it\" trigger a clip");
+    Check(!VoiceClips.Matches("clipboard", "clip") && !VoiceClips.Matches("eclipse", "clip") && !VoiceClips.Matches("click", "clip") && !VoiceClips.Matches("", "clip"),
+        "\"clipboard\", \"eclipse\" and \"click\" don't");
+    string cf = Path.Combine(work, "clips-test");
+    if (Directory.Exists(cf)) Directory.Delete(cf, true);
+    Directory.CreateDirectory(cf);
+    var when = new DateTime(2026, 11, 4, 15, 57, 32);
+    string p1 = VoiceClips.PathFor(cf, when);
+    File.WriteAllText(p1, "x");
+    string p2 = VoiceClips.PathFor(cf, when);
+    Check(Path.GetFileName(p1) == "2026-11-04 15-57-32.mp4" && Path.GetFileName(p2) == "2026-11-04 15-57-32 (2).mp4",
+        $"named by the day, then the time ({Path.GetFileName(p1)}; same second → {Path.GetFileName(p2)})");
+    Check(new StudioSettings().VoiceClipFolder.EndsWith(Path.Combine("Videos", "Leapcast", "clips")) && new StudioSettings().VoiceClipSeconds == 50,
+        $"clips go to …\\Videos\\Leapcast\\clips, 50 seconds ({new StudioSettings().VoiceClipFolder})");
+    // the microphone → 16 kHz mono converter keeps the timing (and a tone's pitch) across packets
+    var conv = new SpeechPcmConverter();
+    var all = new List<short>();
+    for (int packet = 0; packet < 100; packet++) // 1 s of a 440 Hz tone at 48 kHz stereo, in 10 ms packets
+    {
+        var st = new float[480 * 2];
+        for (int f = 0; f < 480; f++) { float v = (float)(0.5 * Math.Sin(2 * Math.PI * 440 * (packet * 480 + f) / 48000.0)); st[2 * f] = st[2 * f + 1] = v; }
+        all.AddRange(conv.Convert(SpeechPcmConverter.Mono(st, 2), 48000));
+    }
+    int crossings = 0;
+    for (int k = 1; k < all.Count; k++) if (all[k - 1] < 0 && all[k] >= 0) crossings++;
+    Check(Math.Abs(all.Count - 16000) <= 2 && Math.Abs(crossings - 440) <= 2, $"48 kHz stereo → 16 kHz mono: {all.Count} samples per second, a 440 Hz tone stays 440 Hz ({crossings})");
+    var bs = new BlockingAudioStream();
+    var reader = Task.Run(() => { var b = new byte[4096]; long total = 0; int n; while ((n = bs.Read(b, 0, b.Length)) > 0) total += n; return total; });
+    bs.Write(new short[1600]); bs.Write(new short[1600]);
+    await Task.Delay(200);
+    bs.Complete();
+    Check(await reader == 6400, "the recognizer's audio stream hands over everything written, then ends cleanly");
+#if WINDOWS_SPEECH
+    await SpeechTests.RunAsync(Check);
+#endif
+}
+
+
 Check(HardwareProfile.Classify(4, 8L << 30, new[] { new ProbedEncoder("libx264", EncoderTier.Rich) }) == HardwareTier.Low
       && HardwareProfile.Classify(8, 16L << 30, new[] { new ProbedEncoder("libx264", EncoderTier.Rich) }) == HardwareTier.Low
       && HardwareProfile.Classify(8, 16L << 30, new[] { new ProbedEncoder("h264_amf", EncoderTier.Rich) }) == HardwareTier.Mid
@@ -1147,6 +1187,13 @@ async Task LiveSwitchSection(StudioScene light)
     await Task.Delay(800);
     Check(engine.PipelineStarts == starts && engine.LiveSwitches >= sw + 2, $"mixer faders (a source and the master) apply live ({engine.LiveSwitches - sw} commands, no rebuild)");
     engine.SetAudioLevels(0);
+    // a voice clip (as when "Clip" is heard): the last seconds, saved by day and time, nothing interrupted
+    string clipDir = Path.Combine(work, "voice-clips");
+    string clip = await engine.SaveClipAsync(6, clipDir);
+    var cp = await ProbeAsync(clip);
+    Check(File.Exists(clip) && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(clip), @"^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}( \(\d+\))?\.mp4$")
+          && cp.ok && cp.duration is > 5 and < 11 && engine.PipelineStarts == starts,
+        $"a clip of the last seconds is saved as {Path.GetFileName(clip)} ({cp.duration:0.0}s, no rebuild)");
     Check(!ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")).Contains("ret:-"), "ffmpeg accepted every show/hide command");
 
     Console.WriteLine("Studio mode: the Preview stages a scene beside the Program; Transition puts it on air");

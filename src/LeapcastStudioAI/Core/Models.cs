@@ -245,6 +245,12 @@ public sealed class StudioSettings
     public string RecordingFolder { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Leapcast");
     public int ReplaySeconds { get; set; } = 60;
+    /// <summary>Say the word (default "clip") while live, recording or with the replay buffer on: the last
+    /// <see cref="VoiceClipSeconds"/> seconds are saved to <see cref="VoiceClipFolder"/>.</summary>
+    public bool VoiceClipEnabled { get; set; } = true;
+    public string VoiceClipWord { get; set; } = "clip";
+    public int VoiceClipSeconds { get; set; } = 50;
+    public string VoiceClipFolder { get; set; } = VoiceClips.DefaultFolder;
 
     // Reliability
     public bool AutoReconnect { get; set; } = true;

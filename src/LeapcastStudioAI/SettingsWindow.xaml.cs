@@ -62,6 +62,10 @@ public partial class SettingsWindow : Window
         SelectTag(TransitionMsBox, current.TransitionMs.ToString(CultureInfo.InvariantCulture));
         FolderBox.Text = current.RecordingFolder;
         SelectTag(ReplayBox, current.ReplaySeconds.ToString(CultureInfo.InvariantCulture));
+        VoiceClipBox.IsChecked = current.VoiceClipEnabled;
+        VoiceWordBox.Text = current.VoiceClipWord;
+        SelectTag(VoiceSecondsBox, current.VoiceClipSeconds.ToString(CultureInfo.InvariantCulture));
+        VoiceFolderBox.Text = current.VoiceClipFolder;
         ReconnectBox.IsChecked = current.AutoReconnect;
         AdjustBox.IsChecked = current.AutoAdjustBitrate;
         AdaptBox.IsChecked = current.AdaptivePerformance;
@@ -114,6 +118,10 @@ public partial class SettingsWindow : Window
         s.TransitionMs = int.Parse(TagOf(TransitionMsBox, "500"), CultureInfo.InvariantCulture);
         s.RecordingFolder = string.IsNullOrWhiteSpace(FolderBox.Text) ? new StudioSettings().RecordingFolder : FolderBox.Text.Trim();
         s.ReplaySeconds = int.Parse(TagOf(ReplayBox, "60"), CultureInfo.InvariantCulture);
+        s.VoiceClipEnabled = VoiceClipBox.IsChecked == true;
+        s.VoiceClipWord = string.IsNullOrWhiteSpace(VoiceWordBox.Text) ? "clip" : VoiceWordBox.Text.Trim().Split(' ')[0];
+        s.VoiceClipSeconds = int.Parse(TagOf(VoiceSecondsBox, "50"), CultureInfo.InvariantCulture);
+        s.VoiceClipFolder = string.IsNullOrWhiteSpace(VoiceFolderBox.Text) ? VoiceClips.DefaultFolder : VoiceFolderBox.Text.Trim();
         s.AutoReconnect = ReconnectBox.IsChecked == true;
         s.AutoAdjustBitrate = AdjustBox.IsChecked == true;
         s.AdaptivePerformance = AdaptBox.IsChecked == true;
@@ -161,6 +169,13 @@ public partial class SettingsWindow : Window
         var dlg = new Microsoft.Win32.OpenFolderDialog { Title = "Choose where recordings and replays are saved" };
         if (Directory.Exists(FolderBox.Text)) dlg.InitialDirectory = FolderBox.Text;
         if (dlg.ShowDialog(this) == true) FolderBox.Text = dlg.FolderName;
+    }
+
+    private void BrowseClipFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFolderDialog { Title = "Choose where voice clips are saved" };
+        if (Directory.Exists(VoiceFolderBox.Text)) dlg.InitialDirectory = VoiceFolderBox.Text;
+        if (dlg.ShowDialog(this) == true) VoiceFolderBox.Text = dlg.FolderName;
     }
 
     private void BrowseFfmpeg_Click(object sender, RoutedEventArgs e)

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -357,7 +358,7 @@ public partial class MainWindow : Window
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
         Save();
-        if (_closeConfirmed) { _uiTimer.Stop(); _hotkeys?.Dispose(); _engine.Dispose(); return; }
+        if (_closeConfirmed) { _uiTimer.Stop(); _hotkeys?.Dispose(); StopVoice(); _engine.Dispose(); return; }
         if (_engine.Live)
         {
             var answer = MessageBox.Show(this, "You're live. End the stream on every platform and quit?", "Leapcast Studio AI",
@@ -451,9 +452,85 @@ public partial class MainWindow : Window
         masterCh?.Update(loudest);
     }
 
+    // ------------------------------------------------------------------ voice clips ("Clip")
+
+    private VoiceCommandListener? _voice;
+    private string _voiceKey = "";           // what the running listener was started with (word | mic)
+    private DateTime _voiceRetryAfter = DateTime.MinValue;
+    private bool _voiceSaving;
+
+    /// <summary>
+    /// Listens for the clip word only while there's something to clip (live, recording or replay buffer), on the
+    /// stream's own microphone (falls back to Windows' default mic when the scene has none).
+    /// </summary>
+    private void UpdateVoiceClips()
+    {
+        var s = _state.Settings;
+        bool want = s.VoiceClipEnabled && _engine.CanClip;
+        // the mic in the scene on air; its capture is shared by every copy of it, keyed by the first one
+        var scene = (_studio ? _programScene : SelectedScene) ?? SelectedScene;
+        var mic = scene?.Sources.FirstOrDefault(x => SourceTypes.KindOf(x.Type) == SourceKind.Microphone && x.Visible);
+        Guid? micId = null;
+        if (mic is not null)
+        {
+            string key = PipelineBuilder.InputKey(mic);
+            var rep = PipelineBuilder.AudioRepresentatives(_state.Scenes).FirstOrDefault(r => PipelineBuilder.InputKey(r) == key);
+            if (rep is not null && _audio.IsCapturing(rep.Id)) micId = rep.Id;
+        }
+        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}" : "";
+        if (wantKey == _voiceKey) { VoiceTag.Visibility = _voice?.Running == true ? Visibility.Visible : Visibility.Collapsed; return; }
+        StopVoice();
+        if (!want) return;
+        if (DateTime.UtcNow < _voiceRetryAfter) return;
+        try
+        {
+            var listener = new VoiceCommandListener();
+            BlockingAudioStream? feed = micId is null ? null : new BlockingAudioStream();
+            if (feed is not null) _audio.SetSpeechTap(micId, feed.Write);
+            listener.Heard += (text, conf) => Dispatcher.BeginInvoke(() => SaveVoiceClip(text));
+            listener.Start(s.VoiceClipWord, feed);
+            _voice = listener;
+            _voiceKey = wantKey;
+            VoiceTagText.Text = $"🎙 Say “{CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s.VoiceClipWord.Trim())}”";
+            VoiceTag.Visibility = Visibility.Visible;
+        }
+        catch (Exception ex)
+        {
+            StopVoice();
+            _voiceRetryAfter = DateTime.UtcNow + TimeSpan.FromMinutes(2);
+            Log("Voice clips: " + ex.Message, true);
+        }
+    }
+
+    private void StopVoice()
+    {
+        _audio.SetSpeechTap(null, null);
+        _voice?.Dispose();
+        _voice = null;
+        _voiceKey = "";
+        VoiceTag.Visibility = Visibility.Collapsed;
+    }
+
+    private async void SaveVoiceClip(string heard)
+    {
+        if (_voiceSaving) return;
+        _voiceSaving = true;
+        var s = _state.Settings;
+        try
+        {
+            Status($"Heard “{heard}”: saving the last {s.VoiceClipSeconds} seconds…");
+            string path = await _engine.SaveClipAsync(s.VoiceClipSeconds, string.IsNullOrWhiteSpace(s.VoiceClipFolder) ? VoiceClips.DefaultFolder : s.VoiceClipFolder);
+            Log($"Clip saved: {Path.GetFileName(path)}", false);
+            Status($"Clip saved: {path}");
+        }
+        catch (Exception ex) { Log("Clip: " + ex.Message, true); }
+        finally { _voiceSaving = false; }
+    }
+
     private void ApplyStatus(EngineStatus st)
     {
         _status = st;
+        UpdateVoiceClips();
         bool encoding = st.Live || st.Recording || st.ReplayBuffer;
         PreviewPlaceholder.Visibility = st.Running ? Visibility.Collapsed : Visibility.Visible;
         HPreviewImage.Visibility = st.Running ? Visibility.Visible : Visibility.Hidden;

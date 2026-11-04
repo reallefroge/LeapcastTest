@@ -48,6 +48,55 @@ public sealed class WasapiAudioBridge : IAudioBridge
 
     public event Action<string>? DeviceError;
 
+    // ------------------------------------------------------------------ speech tap (voice clips)
+
+    private volatile Action<short[]>? _speechSink;
+    private Guid? _speechSource;
+    private SpeechPcmConverter _speechConv = new();
+
+    /// <summary>
+    /// Sends one microphone's audio, as 16 kHz mono 16-bit, to <paramref name="sink"/> (the voice-command
+    /// recognizer), straight from the capture: the recognizer hears the same mic as the stream. Null stops it.
+    /// </summary>
+    public void SetSpeechTap(Guid? sourceId, Action<short[]>? sink)
+    {
+        lock (_lock) { _speechSource = sourceId; _speechConv = new SpeechPcmConverter(); _speechSink = sink; }
+    }
+
+    /// <summary>Is a capture running for this source (the mic the recognizer would listen to)?</summary>
+    public bool IsCapturing(Guid sourceId)
+    {
+        lock (_lock) return _feeds.TryGetValue(sourceId, out var f) && f.Capture is not null && f.Error is null;
+    }
+
+    private static float[] MonoOf(byte[] data, int count, WaveFormat f)
+    {
+        int ch = Math.Max(1, f.Channels);
+        float[] interleaved;
+        if (IsFloat(f) && f.BitsPerSample == 32)
+            interleaved = MemoryMarshal.Cast<byte, float>(data.AsSpan(0, count - count % 4)).ToArray();
+        else if (f.BitsPerSample == 16)
+        {
+            var s = MemoryMarshal.Cast<byte, short>(data.AsSpan(0, count - count % 2));
+            interleaved = new float[s.Length];
+            for (int i = 0; i < s.Length; i++) interleaved[i] = s[i] / 32768f;
+        }
+        else if (f.BitsPerSample == 24)
+        {
+            int n = count / 3;
+            interleaved = new float[n];
+            for (int i = 0; i < n; i++) interleaved[i] = ((data[3 * i] << 8 | data[3 * i + 1] << 16 | data[3 * i + 2] << 24) >> 8) / 8388608f;
+        }
+        else if (f.BitsPerSample == 32)
+        {
+            var s = MemoryMarshal.Cast<byte, int>(data.AsSpan(0, count - count % 4));
+            interleaved = new float[s.Length];
+            for (int i = 0; i < s.Length; i++) interleaved[i] = s[i] / 2147483648f;
+        }
+        else return Array.Empty<float>();
+        return SpeechPcmConverter.Mono(interleaved, ch);
+    }
+
     // ------------------------------------------------------------------ device lists (for the properties dialog)
 
     public sealed record AudioDevice(string Id, string Name);
@@ -133,6 +182,10 @@ public sealed class WasapiAudioBridge : IAudioBridge
         {
             if (e.BytesRecorded <= 0) return;
             buffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+            if (_speechSink is { } sink && _speechSource == feed.SourceId)
+            {
+                try { sink(_speechConv.Convert(MonoOf(e.Buffer, e.BytesRecorded, format), format.SampleRate)); } catch { }
+            }
             float peak = PeakOf(e.Buffer, e.BytesRecorded, format);
             if (peak > feed.Peak || Environment.TickCount64 - Interlocked.Read(ref feed.PeakTicks) > 120)
             {

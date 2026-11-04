@@ -773,6 +773,21 @@ public sealed class StreamEngine : IDisposable
         return await _cache.SaveReplayAsync(RequireFfmpeg(), Math.Clamp(Settings.ReplaySeconds, 5, 600), file);
     }
 
+    /// <summary>Something to clip: the encode that feeds the replay cache is running (live, recording or replay buffer).</summary>
+    public bool CanClip => _runnerShape?.Main == true && _runner is not null;
+
+    /// <summary>
+    /// Saves the last <paramref name="seconds"/> of the stream to <paramref name="folder"/>, named by the day and
+    /// time (voice clips: "Clip"). Cut from the already-encoded stream: no extra encoding, nothing interrupted.
+    /// </summary>
+    public async Task<string> SaveClipAsync(int seconds, string folder, CancellationToken ct = default)
+    {
+        if (!CanClip) throw new InvalidOperationException("Nothing to clip yet: clips come from the stream while you're live, recording or have the replay buffer on.");
+        Directory.CreateDirectory(folder);
+        string file = VoiceClips.PathFor(folder, DateTime.Now);
+        return await _cache.SaveReplayAsync(RequireFfmpeg(), Math.Clamp(seconds, 5, 600), file, ct);
+    }
+
     public sealed record BenchmarkResult(double Fps, int TargetFps, double Speed, long Dropped, string Health)
     {
         /// <summary>Worst queue of frames waiting in front of the compositor during the test (seconds).</summary>
@@ -1291,7 +1306,8 @@ public sealed class StreamEngine : IDisposable
             try { await Task.Delay(1000, _life.Token); } catch { return; }
             try
             {
-                _cache.Housekeep(Math.Clamp(Settings.ReplaySeconds, 5, 600));
+                // keep enough history for a voice clip too
+                _cache.Housekeep(Math.Clamp(Math.Max(Settings.ReplaySeconds, Settings.VoiceClipEnabled ? Settings.VoiceClipSeconds : 0), 5, 600));
                 if (_outputs.AnyActive && _runnerShape?.MainBus == true)
                 {
                     foreach (var s in _cache.Scan())

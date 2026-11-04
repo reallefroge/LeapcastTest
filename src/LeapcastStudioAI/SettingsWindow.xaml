@@ -168,6 +168,32 @@
             <TextBlock Text="Recordings and replays are saved here. They reuse the stream's encode, so recording while live costs no extra GPU/CPU."
                        Style="{StaticResource Hint}"/>
             <Button Content="Open the folder" HorizontalAlignment="Left" Click="OpenRecordings_Click" Margin="3,8,3,3"/>
+            <TextBlock Text="VOICE CLIPS" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
+            <CheckBox x:Name="VoiceClipBox" Content="Save a clip when I say the word (while live, recording or with the replay buffer on)"/>
+            <Grid Margin="0,2,0,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="Word" Style="{StaticResource FieldLabel}"/>
+                <TextBox x:Name="VoiceWordBox"/>
+              </StackPanel>
+              <StackPanel Grid.Column="2">
+                <TextBlock Text="Clip length" Style="{StaticResource FieldLabel}"/>
+                <ComboBox x:Name="VoiceSecondsBox">
+                  <ComboBoxItem Content="30 seconds" Tag="30"/>
+                  <ComboBoxItem Content="50 seconds" Tag="50"/>
+                  <ComboBoxItem Content="60 seconds" Tag="60"/>
+                  <ComboBoxItem Content="90 seconds" Tag="90"/>
+                  <ComboBoxItem Content="2 minutes" Tag="120"/>
+                </ComboBox>
+              </StackPanel>
+            </Grid>
+            <TextBlock Text="Save voice clips to" Style="{StaticResource FieldLabel}"/>
+            <DockPanel>
+              <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseClipFolder_Click"/>
+              <TextBox x:Name="VoiceFolderBox"/>
+            </DockPanel>
+            <TextBlock Text="Only clips made by saying the word go here, named by the day and then the time (e.g. 2026-11-04 15-57-32.mp4). Recognition uses Windows' built-in speech recognizer on your stream's microphone: nothing leaves your PC."
+                       Style="{StaticResource Hint}"/>
           
             </StackPanel>
           </Border>
