@@ -392,11 +392,14 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
     for (int k = 1; k < all.Count; k++) if (all[k - 1] < 0 && all[k] >= 0) crossings++;
     Check(Math.Abs(all.Count - 16000) <= 2 && Math.Abs(crossings - 440) <= 2, $"48 kHz stereo → 16 kHz mono: {all.Count} samples per second, a 440 Hz tone stays 440 Hz ({crossings})");
     var bs = new BlockingAudioStream();
-    var reader = Task.Run(() => { var b = new byte[4096]; long total = 0; int n; while ((n = bs.Read(b, 0, b.Length)) > 0) total += n; return total; });
-    bs.Write(new short[1600]); bs.Write(new short[1600]);
+    var reads = new List<int>();
+    var reader = Task.Run(() => { var b = new byte[1920]; long total = 0; int n; while ((n = bs.Read(b, 0, b.Length)) > 0) { total += n; lock (reads) reads.Add(n); } return total; });
+    bs.Write(new short[1600]); await Task.Delay(100); bs.Write(new short[1600]); await Task.Delay(100); bs.Write(new short[1600]);
     await Task.Delay(200);
     bs.Complete();
-    Check(await reader == 6400, "the recognizer's audio stream hands over everything written, then ends cleanly");
+    long got = await reader;
+    Check(got == 9600 && reads.Take(reads.Count - 1).All(n => n == 1920),
+        $"the recognizer's audio stream fills every read completely (a short read would end recognition), then ends cleanly ({string.Join(",", reads)})");
 #if WINDOWS_SPEECH
     await SpeechTests.RunAsync(Check);
 #endif

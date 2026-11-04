@@ -60,13 +60,7 @@ static class SpeechTests
             if (trace) lock (calls) Console.WriteLine("      stream calls: " + string.Join("; ", calls.Take(12)) + (calls.Count > 12 ? $" … ({calls.Count} calls)" : ""));
             lock (heard) return heard.ToList();
         }
-        // which stream length the speech engine accepts (diagnostics; the app uses the default)
-        foreach (var len in new[] { long.MaxValue, (long)int.MaxValue, -1L })
-        {
-            var r = await Listen(new[] { "Clip" }, len, trace: true);
-            Console.WriteLine($"      length {len}: heard {r.Count}");
-        }
-        var said = await Listen(new[] { "Clip" });
+        var said = await Listen(new[] { "Clip" }, trace: true);
         check(said.Count == 1, $"Windows' voice saying \"Clip\" is heard ({string.Join(", ", said)})");
         var inSentence = await Listen(new[] { "Okay, let's clip that." });
         check(inSentence.Count == 1, $"…and inside a sentence ({string.Join(", ", inSentence)})");

@@ -84,7 +84,8 @@ public sealed class SpeechPcmConverter
 
 /// <summary>
 /// A read-blocking stream fed with PCM from the microphone capture: what the speech recognizer listens to.
-/// Reads wait for audio (the recognizer runs on its own thread); after <see cref="Complete"/> they return 0, which
+/// Every read waits until it can return the full amount asked for (the recognizer runs on its own thread and treats
+/// a short read as the end of the stream); after <see cref="Complete"/> reads return what's left, then 0, which
 /// ends recognition. Holds at most a few seconds, dropping the oldest audio if the reader stalls.
 /// </summary>
 public sealed class BlockingAudioStream : Stream
@@ -127,12 +128,13 @@ public sealed class BlockingAudioStream : Stream
         if (count <= 0) return 0;
         lock (_chunks)
         {
-            while (copied == 0)
+            // fill the whole request: the speech engine takes a short read as the end of the stream
+            while (copied < count)
             {
                 if (_current is null || _offset >= _current.Length)
                 {
                     while (_chunks.Count == 0 && !_done) Monitor.Wait(_chunks);
-                    if (_chunks.Count == 0) return 0; // completed
+                    if (_chunks.Count == 0) break; // completed: hand back what's left, then 0
                     _current = _chunks.Dequeue();
                     _queued -= _current.Length;
                     _offset = 0;
@@ -141,8 +143,6 @@ public sealed class BlockingAudioStream : Stream
                 Buffer.BlockCopy(_current, _offset, buffer, offset + copied, n);
                 _offset += n;
                 copied += n;
-                // hand back what's there rather than waiting to fill the whole buffer: keeps recognition prompt
-                if (_offset >= _current.Length && _chunks.Count == 0) break;
             }
         }
         _readTotal += copied;
