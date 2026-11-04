@@ -233,6 +233,31 @@ public sealed class StreamEngine : IDisposable
     }
     private DateTime _lastProgressAt;
 
+    /// <summary>
+    /// How far the encoder's output lags the frames being composited (its look-ahead / B-frame buffer, ~0–1.5 s):
+    /// the smallest (wall − reported output time) seen in the progress window. Runtime commands act on the
+    /// compositor's clock, which is the reported output time plus this.
+    /// </summary>
+    private double EncoderLatency()
+    {
+        double origin = _runnerOrigin, best = double.MaxValue;
+        lock (_progressWindow)
+            foreach (var (t, p) in _progressWindow)
+            {
+                double wall = new DateTimeOffset(t).ToUnixTimeMilliseconds() / 1000.0 - origin;
+                best = Math.Min(best, wall - p.OutTime.TotalSeconds);
+            }
+        return best == double.MaxValue ? 0 : Math.Clamp(best, 0, 3);
+    }
+
+    /// <summary>The compositor's current time (what runtime filter commands are scheduled against).</summary>
+    public double CompositorClock()
+    {
+        var (wall, reported) = StreamClock();
+        bool fresh = _lastProgress is not null && (DateTime.UtcNow - _lastProgressAt) < TimeSpan.FromSeconds(1.5);
+        return fresh && !double.IsNaN(reported) ? Math.Min(wall, reported + EncoderLatency()) : wall;
+    }
+
     /// <summary>Raw BGRA preview frame (<see cref="PreviewFrame"/> sized). The array is reused.</summary>
     public event Action<byte[]>? FrameReady;
     public event EventHandler<EngineMessageEventArgs>? Message;
@@ -506,10 +531,10 @@ public sealed class StreamEngine : IDisposable
         // composited), not the wall clock: if the machine falls behind real time, a wall-clock start time would
         // lie seconds in the future and the switch would appear frozen. Start after every command line has landed
         // (ffmpeg reads one per ~100 ms).
-        var (wall, reported) = StreamClock();
-        bool fresh = _lastProgress is not null && (DateTime.UtcNow - _lastProgressAt) < TimeSpan.FromSeconds(1.5);
-        double now = fresh && !double.IsNaN(reported) ? reported : wall;
-        double startAt = now + 0.15 * lineCount + 0.2;
+        // the encoder's reported time lags the compositor by its look-ahead buffer: add that back, or the fade
+        // would be scheduled in the past and land as a cut
+        double now = CompositorClock();
+        double startAt = now + 0.15 * lineCount + 0.25;
         var lines = PipelineBuilder.TransitionCommands(spec, from, to, startAt, seconds, out _, IsHiddenFilter, CurrentGains);
         _pumpPausedUntil = DateTime.UtcNow + TimeSpan.FromSeconds(0.15 * lines.Count + 0.3); // keep stdin free for the fade
         r.SendCommands(lines);

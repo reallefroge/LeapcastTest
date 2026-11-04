@@ -146,7 +146,8 @@ public sealed class BlockingAudioStream : Stream
     public override bool CanRead => true;
     public override bool CanSeek => false;
     public override bool CanWrite => false;
-    public override long Length => throw new NotSupportedException();
+    /// <summary>Unknown/endless (the speech recognizer asks when it starts; -1 means "no end").</summary>
+    public override long Length => -1;
     public override long Position { get => 0; set { } }
     public override void Flush() { }
     public override long Seek(long offset, SeekOrigin origin) => 0;

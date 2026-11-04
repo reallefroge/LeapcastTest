@@ -840,7 +840,7 @@ await engine.SetReplayBufferAsync(true);
 await Task.Delay(5000);
 int starts = engine.PipelineStarts;
 var sc0 = engine.StreamClock();
-Console.WriteLine($"    transition-debug: stream clock wall {sc0.wall:0.00}s, ffmpeg reported {sc0.reported:0.00}s");
+Console.WriteLine($"    transition-debug: stream clock wall {sc0.wall:0.00}s, ffmpeg reported {sc0.reported:0.00}s, compositor {engine.CompositorClock():0.00}s");
 double switchAt = tclock.Elapsed.TotalSeconds;
 await engine.UpdateAsync(both, sceneB, tset, false);
 await Task.Delay(3500);
