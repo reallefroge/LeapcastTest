@@ -143,7 +143,7 @@ public static class PipelineBuilder
     /// </summary>
     public static IEnumerable<StudioSource> VisibleLayers(IEnumerable<StudioSource> sources)
     {
-        var list = sources.Where(s => s.Visible).ToList();
+        var list = sources.Where(s => s.Shown).ToList();
         int cover = list.FindLastIndex(s => SourceTypes.KindOf(s.Type) is SourceKind.Display or SourceKind.Window or SourceKind.Camera
                                             && Anchors.Resolve(s) == Anchors.Fill);
         for (int i = 0; i < list.Count; i++)
@@ -162,7 +162,7 @@ public static class PipelineBuilder
     public static IEnumerable<StudioSource> CompositedLayers(IEnumerable<StudioSource> sources)
     {
         var list = sources.ToList();
-        int cover = list.FindLastIndex(s => s.Visible && SourceTypes.KindOf(s.Type) is SourceKind.Display or SourceKind.Window or SourceKind.Camera
+        int cover = list.FindLastIndex(s => s.Shown && SourceTypes.KindOf(s.Type) is SourceKind.Display or SourceKind.Window or SourceKind.Camera
                                             && Anchors.Resolve(s) == Anchors.Fill);
         for (int i = 0; i < list.Count; i++)
         {
@@ -176,7 +176,7 @@ public static class PipelineBuilder
     public static List<double> SceneGains(IEnumerable<StudioScene> scenes, string key) =>
         scenes.Select(sc =>
         {
-            var s = sc.Sources.FirstOrDefault(x => x.Visible && InputKey(x) == key);
+            var s = sc.Sources.FirstOrDefault(x => x.Shown && InputKey(x) == key);
             return s is null ? 0.0 : Math.Pow(10, s.VolumeDb / 20.0);
         }).ToList();
 
@@ -234,6 +234,7 @@ public static class PipelineBuilder
         foreach (var s in scenes.SelectMany(sc => sc.Sources))
         {
             var kind = SourceTypes.KindOf(s.Type);
+            if (kind == SourceKind.Folder) continue;
             if (kind == SourceKind.Unsupported)
             {
                 if (warned.Add(s.Id)) warnings.Add($"\"{s.Name}\": source type \"{s.Type}\" isn't supported, skipped.");
@@ -335,7 +336,7 @@ public static class PipelineBuilder
                 string chain = $"{Crop(b)}{CameraPrep(b, SourceTypes.KindOf(b.Type), null)}{FillChain(b, W, H, F, pad: true, light: plan.Light)}format=yuv420p";
                 // hiding the full-screen bottom layer lays a blank cover over it (switched live, no rebuild)
                 string coverName = "overlay@x" + b.Id.ToString("N");
-                sceneGraph.Add($"[{Prep(InputKey(b), chain)}][{ColorUse(W, H)}]{coverName}=eof_action=repeat:format=yuv420:enable={(b.Visible ? 0 : 1)}[{p}base]");
+                sceneGraph.Add($"[{Prep(InputKey(b), chain)}][{ColorUse(W, H)}]{coverName}=eof_action=repeat:format=yuv420:enable={(b.Shown ? 0 : 1)}[{p}base]");
                 visibility.Add(new VisibilityStage(b.Id, k, coverName, Cover: true, OnlyWhileSceneShown: false));
                 start = 1;
             }
@@ -358,7 +359,7 @@ public static class PipelineBuilder
                 if (big) sceneOverlays[k].Add(name);
                 visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
                 string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, scale)}format={(alpha ? "rgba" : "yuv420p")}");
-                string on = !src.Visible ? ":enable=0" : big ? Enabled(k) : "";
+                string on = !src.Shown ? ":enable=0" : big ? Enabled(k) : "";
                 sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                 cur = $"{p}c{j}";
             }
@@ -373,7 +374,7 @@ public static class PipelineBuilder
             {
                 var layers = vLayers[k];
                 string p = $"v{k}";
-                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto && x.Visible);
+                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto && x.Shown);
                 var bgGame = layers.FirstOrDefault(x => LayoutMath.IsGame(SourceTypes.KindOf(x.Type)));
                 if (bgGame is not null)
                 {
@@ -381,7 +382,7 @@ public static class PipelineBuilder
                     string coverName = "overlay@y" + bgGame.Id.ToString("N");
                     sceneGraph.Add($"[{Prep(InputKey(bgGame), $"{Crop(bgGame)}scale={bw}:{bh}:force_original_aspect_ratio=increase:flags=fast_bilinear," +
                                    $"crop={bw}:{bh},boxblur=6:2,scale={VW}:{VH}:flags=bilinear,setsar=1,format=yuv420p,eq=brightness=-0.08")}]" +
-                                   $"[{ColorUse(VW, VH)}]{coverName}=eof_action=repeat:format=yuv420:enable={(bgGame.Visible ? 0 : 1)}[{p}base]");
+                                   $"[{ColorUse(VW, VH)}]{coverName}=eof_action=repeat:format=yuv420:enable={(bgGame.Shown ? 0 : 1)}[{p}base]");
                     visibility.Add(new VisibilityStage(bgGame.Id, k, coverName, Cover: true, OnlyWhileSceneShown: false));
                 }
                 else
@@ -400,7 +401,7 @@ public static class PipelineBuilder
                     if (big) sceneOverlays[k].Add(name);
                     visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
                     string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, VerticalScale(src, VW, VH))}format={(alpha ? "rgba" : "yuv420p")}");
-                    string on = !src.Visible ? ":enable=0" : big ? Enabled(k) : "";
+                    string on = !src.Shown ? ":enable=0" : big ? Enabled(k) : "";
                     sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                     cur = $"{p}c{j}";
                 }
@@ -885,7 +886,7 @@ public static class PipelineBuilder
             nameof(StudioSource.H), nameof(StudioSource.VH), // sizes: covered by the scale strings below
             nameof(StudioSource.Locked), // editor-only: locking never rebuilds the pipeline
             nameof(StudioSource.Visible), nameof(StudioSource.VolumeDb), // switched live (enable / volume commands)
-            nameof(StudioSource.Hotkey) };
+            nameof(StudioSource.Hotkey), nameof(StudioSource.FolderId), nameof(StudioSource.Collapsed) }; // folders: list-only
         var arr = new System.Text.Json.Nodes.JsonArray();
         foreach (var sc in scenes)
         {
@@ -893,7 +894,7 @@ public static class PipelineBuilder
             var layers = CompositedLayers(sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
             var vLayers = vertical is null ? new List<StudioSource>() : VerticalLayers(sources, includeHidden: true);
             var list = new System.Text.Json.Nodes.JsonArray();
-            foreach (var src in sources)
+            foreach (var src in sources.Where(x => !x.IsFolder))
             {
                 var o = System.Text.Json.JsonSerializer.SerializeToNode(src)!.AsObject();
                 foreach (var k in placement) o.Remove(k);

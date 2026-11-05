@@ -33,7 +33,7 @@
     <StackPanel Grid.Row="0">
     <Menu x:Name="MainMenu" Padding="8,2,8,0" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1">
       <MenuItem Header="_Settings">
-        <MenuItem Header="Stream: resolution, bitrate, encoder…" Click="SettingsMenu_Click" Tag="Stream"/>
+        <MenuItem Header="Stream…" Click="SettingsMenu_Click" Tag="Stream"/>
         <MenuItem Header="Hotkeys…" Click="SettingsMenu_Click" Tag="Hotkeys"/>
         <MenuItem Header="Recording…" Click="SettingsMenu_Click" Tag="Recording"/>
         <MenuItem Header="Canvas &amp; scenes…" Click="SettingsMenu_Click" Tag="Canvas"/>
@@ -43,10 +43,10 @@
       <MenuItem x:Name="DocksMenu" Header="_Docks" SubmenuOpened="DocksMenu_SubmenuOpened">
         <MenuItem Header="Scenes" IsCheckable="True" Click="DockToggle_Click" Tag="Scenes"/>
         <MenuItem Header="Sources" IsCheckable="True" Click="DockToggle_Click" Tag="Sources"/>
-        <MenuItem Header="Controls (preview, record, replay)" IsCheckable="True" Click="DockToggle_Click" Tag="Controls"/>
+        <MenuItem Header="Controls" IsCheckable="True" Click="DockToggle_Click" Tag="Controls"/>
         <MenuItem Header="Audio mixer" IsCheckable="True" Click="DockToggle_Click" Tag="Mixer"/>
         <MenuItem Header="Multistream" IsCheckable="True" Click="DockToggle_Click" Tag="Multistream"/>
-        <MenuItem Header="Smart stream (stats)" IsCheckable="True" Click="DockToggle_Click" Tag="SmartStream"/>
+        <MenuItem Header="Stats" IsCheckable="True" Click="DockToggle_Click" Tag="SmartStream"/>
         <MenuItem Header="Activity" IsCheckable="True" Click="DockToggle_Click" Tag="Activity"/>
         <MenuItem Header="Go live button" IsCheckable="True" Click="DockToggle_Click" Tag="GoLive"/>
         <MenuItem Header="Studio mode button" IsCheckable="True" Click="DockToggle_Click" Tag="StudioButton"/>
@@ -57,10 +57,10 @@
         <MenuItem Header="(profiles)"/>
       </MenuItem>
       <MenuItem Header="_Tools">
-        <MenuItem x:Name="AutoConfigMenu" Header="Auto-config: test this PC and pick the best settings…" Click="AutoConfig_Click"/>
-        <MenuItem Header="Configure the stream (quality, encoder, bitrate)…" Click="SettingsMenu_Click" Tag="Stream"/>
-        <MenuItem Header="Add a destination (Twitch, YouTube, TikTok…)…" Click="AddOutput_Click"/>
-        <MenuItem Header="Test my connection…" Click="SettingsMenu_Click" Tag="Connection"/>
+        <MenuItem x:Name="AutoConfigMenu" Header="Auto-configuration wizard…" Click="AutoConfig_Click"/>
+        <MenuItem Header="Stream settings…" Click="SettingsMenu_Click" Tag="Stream"/>
+        <MenuItem Header="Add destination…" Click="AddOutput_Click"/>
+        <MenuItem Header="Connection test…" Click="SettingsMenu_Click" Tag="Connection"/>
         <Separator/>
         <MenuItem x:Name="StudioModeMenu" Header="Studio mode" IsCheckable="True" Click="StudioMode_Click"/>
         <Separator/>
@@ -84,16 +84,16 @@
             <TextBlock x:Name="LiveTagText" Text="LIVE" FontWeight="Bold" FontSize="12"/>
           </Border>
           <Border x:Name="VoiceTag" Background="#24304A" CornerRadius="6" Padding="9,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center"
-                  ToolTip="Voice clips are on: say the word to save the last seconds (Settings → Recording)">
+                  ToolTip="Voice clips on (Settings → Recording)">
             <TextBlock x:Name="VoiceTagText" Text="🎙 Say “Clip”" FontWeight="SemiBold" FontSize="12" Foreground="#9FC2FF"/>
           </Border>
           <Border x:Name="RecTag" Background="#7A2E31" CornerRadius="6" Padding="9,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center">
             <TextBlock x:Name="RecTagText" Text="● REC" FontWeight="Bold" FontSize="12"/>
           </Border>
           <Button x:Name="StudioModeButton" Content="Studio mode" Click="StudioMode_Click" Padding="12,8" Margin="0,0,6,0"
-                  ToolTip="Preview the next scene (and edit it) beside what's on air, then click Transition"/>
+                  ToolTip="Edit the next scene beside the live one"/>
           <Button x:Name="GoLiveButton" Style="{StaticResource PrimaryButton}" Content="▶  Go live" Click="GoLive_Click" Padding="18,8" MinWidth="130"
-                  ToolTip="Start every enabled output in the Multistream panel"/>
+                  ToolTip="Start all enabled destinations"/>
         </StackPanel>
       </DockPanel>
     </Border>
@@ -120,7 +120,7 @@
               </StackPanel>
               <TextBlock Text="SCENES" Style="{StaticResource SectionHeader}" Margin="2,0" VerticalAlignment="Center"/>
             </DockPanel>
-            <TextBlock DockPanel.Dock="Bottom" Text="Click a scene to switch with a smooth transition." Style="{StaticResource Hint}"/>
+            <TextBlock DockPanel.Dock="Bottom" Text="Click a scene to switch." Style="{StaticResource Hint}"/>
             <ListBox x:Name="ScenesList" SelectionChanged="ScenesList_SelectionChanged" Background="Transparent" BorderThickness="0"
                      Foreground="{StaticResource TextBrush}" DisplayMemberPath="Name"/>
           </DockPanel>
@@ -131,26 +131,42 @@
               <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                 <Button Style="{StaticResource IconButton}" Content="&#xE710;" Click="AddSource_Click" ToolTip="Add source"/>
                 <Button Style="{StaticResource IconButton}" Content="&#xE713;" Click="SourceProperties_Click" ToolTip="Properties"/>
-                <Button Style="{StaticResource IconButton}" Content="&#xE70E;" Click="MoveSourceUp_Click" ToolTip="Send backward"/>
-                <Button Style="{StaticResource IconButton}" Content="&#xE70D;" Click="MoveSourceDown_Click" ToolTip="Bring forward"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE8B7;" Click="AddFolder_Click" ToolTip="New folder"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE70E;" Click="MoveSourceUp_Click" ToolTip="Move up"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE70D;" Click="MoveSourceDown_Click" ToolTip="Move down"/>
                 <Button Style="{StaticResource IconButton}" Content="&#xE74D;" Click="RemoveSource_Click" ToolTip="Remove source"/>
               </StackPanel>
               <TextBlock Text="SOURCES" Style="{StaticResource SectionHeader}" Margin="2,0" VerticalAlignment="Center"/>
             </DockPanel>
-            <TextBlock DockPanel.Dock="Bottom" Text="Lower in the list = in front. Drag sources on the preview to move them; drag a corner or edge to resize (Shift: stretch, Ctrl+Shift: crop); 🔒 locks one in place; right-click for more."
-                       Style="{StaticResource Hint}"/>
-            <ListBox x:Name="SourcesList" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}"
-                     MouseDoubleClick="SourcesList_MouseDoubleClick" SelectionChanged="SourcesList_SelectionChanged">
+            <TextBlock DockPanel.Dock="Bottom" Text="Top of the list is in front. Drag to reorder." Style="{StaticResource Hint}"/>
+            <ListBox x:Name="SourcesList" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}" AllowDrop="True"
+                     MouseDoubleClick="SourcesList_MouseDoubleClick" SelectionChanged="SourcesList_SelectionChanged"
+                     PreviewMouseLeftButtonDown="SourcesList_PreviewMouseLeftButtonDown" PreviewMouseMove="SourcesList_PreviewMouseMove"
+                     DragOver="SourcesList_DragOver" Drop="SourcesList_Drop" MouseRightButtonUp="SourcesList_MouseRightButtonUp">
               <ListBox.ItemTemplate>
                 <DataTemplate>
                   <DockPanel>
-                    <CheckBox DockPanel.Dock="Left" IsChecked="{Binding Visible}" Click="SourceVisible_Click"
-                              VerticalAlignment="Center" Margin="0,0,8,0" ToolTip="Show / hide"/>
+                    <Border DockPanel.Dock="Left" Width="{Binding ListIndent}"/>
+                    <ToggleButton DockPanel.Dock="Left" IsChecked="{Binding Visible}" Click="SourceVisible_Click" Style="{StaticResource EyeToggle}"
+                                  VerticalAlignment="Center" Margin="0,0,4,0" ToolTip="Show / hide"/>
                     <ToggleButton DockPanel.Dock="Right" IsChecked="{Binding Locked}" Click="SourceLock_Click" Style="{StaticResource LockToggle}"
-                                  VerticalAlignment="Center" Margin="6,0,0,0" ToolTip="Lock: prevent moving and resizing on the preview"/>
+                                  VerticalAlignment="Center" Margin="6,0,0,0" ToolTip="Lock position and size"/>
+                    <ToggleButton DockPanel.Dock="Left" IsChecked="{Binding Collapsed}" Click="FolderCollapse_Click" VerticalAlignment="Center"
+                                  ToolTip="Show / hide contents">
+                      <ToggleButton.Style>
+                        <Style TargetType="ToggleButton" BasedOn="{StaticResource ChevronToggle}">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsFolder}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </ToggleButton.Style>
+                    </ToggleButton>
+                    <TextBlock DockPanel.Dock="Left" Text="&#xE8B7;" FontFamily="{StaticResource IconFont}" FontSize="15" VerticalAlignment="Center"
+                               Foreground="{StaticResource TextBrush}" Margin="2,0,7,0" Style="{StaticResource FolderOnly}"/>
                     <StackPanel>
                       <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                      <TextBlock Text="{Binding Type}" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+                      <TextBlock Text="{Binding ListDetail}" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
                     </StackPanel>
                   </DockPanel>
                 </DataTemplate>
@@ -179,7 +195,7 @@
             <DockPanel x:Name="StagePanel" Grid.Column="0" Visibility="Collapsed">
               <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
                 <TextBlock x:Name="StageSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#BEB6FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
-                <TextBlock Text="PREVIEW" Style="{StaticResource SectionHeader}" Margin="0" ToolTip="Arrange the next scene here; nothing changes on air until you click Transition"/>
+                <TextBlock Text="PREVIEW" Style="{StaticResource SectionHeader}" Margin="0" ToolTip="Changes here go live when you click Transition"/>
               </DockPanel>
               <Viewbox x:Name="SViewbox" Stretch="Uniform">
                 <Grid x:Name="SCanvasHost" Width="1600" Height="900" Background="#0E1016">
@@ -190,7 +206,7 @@
             </DockPanel>
             <StackPanel x:Name="TransitionPanel" Grid.Column="1" VerticalAlignment="Center" Margin="10,0" Visibility="Collapsed" Width="118">
               <Button x:Name="TransitionButton" Content="Transition ➜" Style="{StaticResource PrimaryButton}" Click="Transition_Click"
-                      ToolTip="Put the Preview scene on air (Program)" Padding="8,9"/>
+                      ToolTip="Send Preview to Program" Padding="8,9"/>
               <ComboBox x:Name="TransitionKindBox" Margin="0,8,0,0" SelectionChanged="TransitionKind_SelectionChanged" ToolTip="How the scene switch looks">
                 <ComboBoxItem Content="Fade · 0.3 s" Tag="Fade|300"/>
                 <ComboBoxItem Content="Fade · 0.6 s" Tag="Fade|600"/>
@@ -213,7 +229,7 @@
                   </Grid>
                 </Viewbox>
                 <StackPanel x:Name="PreviewPlaceholder" VerticalAlignment="Bottom" HorizontalAlignment="Center" MaxWidth="460" Margin="0,0,0,18">
-                  <TextBlock x:Name="PreviewHint" Text="Start the preview to see your scene exactly as viewers will. You can arrange sources even while it's off."
+                  <TextBlock x:Name="PreviewHint" Text="Start the preview to see the output. Sources can be arranged while it's off."
                              TextWrapping="Wrap" TextAlignment="Center" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,8"/>
                   <Button x:Name="PreviewButtonCenter" Content="▶  Start preview" HorizontalAlignment="Center" Style="{StaticResource PrimaryButton}" Click="Preview_Click"/>
                 </StackPanel>
@@ -223,7 +239,7 @@
             <DockPanel x:Name="VerticalPanel" Grid.Column="3" Margin="12,0,0,0" Visibility="Collapsed">
               <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
                 <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" FontSize="11" Padding="4,2"
-                        Click="ResetVertical_Click" ToolTip="Reset the vertical layout to automatic (camera on top, game below)"/>
+                        Click="ResetVertical_Click" ToolTip="Reset to automatic layout"/>
                 <TextBlock x:Name="VerticalCaption" Text="VERTICAL · 9:16" Style="{StaticResource SectionHeader}" Margin="0" VerticalAlignment="Center"/>
               </DockPanel>
               <Viewbox x:Name="VViewbox" Stretch="Uniform">
@@ -242,14 +258,14 @@
             <Button x:Name="PreviewButton" Content="▶  Preview" Click="Preview_Click" MinWidth="104"/>
             <Button x:Name="RecordButton" Content="●  Record" Click="Record_Click" MinWidth="104"/>
             <Button x:Name="ReplayBufferButton" Content="Replay buffer" Click="ReplayBuffer_Click"
-                    ToolTip="Keep the last seconds ready to save, even when you're not live"/>
+                    ToolTip="Keep recent footage ready to save"/>
             <Button x:Name="SaveReplayButton" Content="Save replay" Click="Replay_Click" ToolTip="Save the last seconds as a clip"/>
           </StackPanel>
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <Border Style="{StaticResource Chip}" ToolTip="Frames per second (actual / planned)">
+            <Border Style="{StaticResource Chip}" ToolTip="Frames per second (actual / target)">
               <TextBlock x:Name="StatFps" Text="— FPS" FontSize="12"/>
             </Border>
-            <Border Style="{StaticResource Chip}" ToolTip="Total upload right now, across every live destination">
+            <Border Style="{StaticResource Chip}" ToolTip="Total upload across live destinations">
               <TextBlock x:Name="StatNow" Text="↑ —" FontSize="12"/>
             </Border>
             <Border Style="{StaticResource Chip}">
@@ -262,7 +278,7 @@
         <Border x:Name="MixerDock" Grid.Row="2" Style="{StaticResource Card}" Margin="0,8,0,0" Padding="10,6">
           <DockPanel>
             <TextBlock DockPanel.Dock="Left" Text="AUDIO" Style="{StaticResource SectionHeader}" Margin="2,4,12,0" VerticalAlignment="Top"/>
-            <TextBlock DockPanel.Dock="Bottom" x:Name="MixerHint" Text="Drag a fader to set each input's level (live). Double-click a fader for 0 dB. Meters show the level after the fader and run while the preview or stream is on." Style="{StaticResource Hint}"/>
+            <TextBlock DockPanel.Dock="Bottom" x:Name="MixerHint" Text="Double-click a fader to reset it to 0 dB." Style="{StaticResource Hint}"/>
             <ItemsControl x:Name="MixerList">
               <ItemsControl.ItemsPanel>
                 <ItemsPanelTemplate><UniformGrid Columns="2"/></ItemsPanelTemplate>
@@ -307,11 +323,11 @@
 
               <DockPanel Margin="2,12,2,2">
                 <CheckBox x:Name="VerticalToggle" DockPanel.Dock="Right" Content="Canvas on" Click="VerticalToggle_Click" Margin="0" FontSize="11"
-                          ToolTip="A second 9:16 canvas for TikTok, YouTube Shorts and Instagram"/>
+                          ToolTip="9:16 canvas for TikTok, Shorts and Reels"/>
                 <TextBlock Text="VERTICAL · 9:16" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
               </DockPanel>
               <ItemsControl x:Name="VerticalOutputs" ItemTemplate="{StaticResource OutputRowTemplate}"/>
-              <TextBlock x:Name="NoVerticalHint" Text="Add a TikTok output to stream the vertical canvas." Style="{StaticResource Hint}"/>
+              <TextBlock x:Name="NoVerticalHint" Text="Add a vertical destination to stream this canvas." Style="{StaticResource Hint}"/>
 
               <Button Content="+  Add output" Click="AddOutput_Click" Margin="0,10,0,2" HorizontalAlignment="Stretch"
                       ToolTip="Twitch, YouTube, TikTok, Kick or any RTMP server"/>
@@ -326,7 +342,7 @@
               <TextBlock x:Name="PlanSubtitle" Text="" Style="{StaticResource Hint}"/>
               <TextBlock x:Name="VerticalPlanText" Text="" Style="{StaticResource Hint}" Visibility="Collapsed"/>
               <TextBlock x:Name="PerformanceText" Text="" Style="{StaticResource Hint}" Foreground="{StaticResource AccentBrush}"
-                         ToolTip="Leapcast steps to lighter settings when this PC falls behind, and back up when it has headroom (Settings → Connection)."/>
+                         ToolTip="Lighter settings when the PC falls behind (Settings → Connection)"/>
               <Grid Margin="2,6,2,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
@@ -368,9 +384,33 @@
     <!-- ===================== Status bar ===================== -->
     <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="14,5">
       <DockPanel>
-        <TextBlock DockPanel.Dock="Right" Text="v0.9.3 · Windows x64" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
-        <TextBlock x:Name="HardwareLabel" DockPanel.Dock="Right" Text="Detecting hardware…" Foreground="{StaticResource MutedBrush}" FontSize="11"
-                   VerticalAlignment="Center" Margin="0,0,16,0" TextTrimming="CharacterEllipsis" MaxWidth="560"/>
+        <TextBlock x:Name="VersionLabel" DockPanel.Dock="Right" Text="v" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center" Margin="18,0,0,0"/>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <StackPanel x:Name="SbHealth" Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center" Background="Transparent">
+            <Ellipse x:Name="SbHealthDot" Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource MutedBrush}"/>
+            <TextBlock x:Name="SbHealthText" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+          </StackPanel>
+          <StackPanel x:Name="SbBitrate" Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center" Background="Transparent">
+            <Ellipse x:Name="SbBitrateDot" Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource MutedBrush}"/>
+            <TextBlock x:Name="SbBitrateText" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+          </StackPanel>
+          <StackPanel x:Name="SbEncoder" Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center" Background="Transparent">
+            <Ellipse x:Name="SbEncoderDot" Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource MutedBrush}"/>
+            <TextBlock x:Name="SbEncoderText" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+          </StackPanel>
+          <StackPanel x:Name="SbFps" Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center" Background="Transparent">
+            <Ellipse x:Name="SbFpsDot" Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource MutedBrush}"/>
+            <TextBlock x:Name="SbFpsText" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+          </StackPanel>
+          <StackPanel x:Name="SbLive" Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center" Background="Transparent">
+            <Ellipse x:Name="SbLiveDot" Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource MutedBrush}"/>
+            <TextBlock x:Name="SbLiveText" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+          </StackPanel>
+          <StackPanel x:Name="SbRec" Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center" Background="Transparent">
+            <Ellipse x:Name="SbRecDot" Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource MutedBrush}"/>
+            <TextBlock x:Name="SbRecText" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+          </StackPanel>
+        </StackPanel>
         <TextBlock x:Name="EngineStatus" Text="Starting…" Foreground="{StaticResource WarnBrush}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
       </DockPanel>
     </Border>

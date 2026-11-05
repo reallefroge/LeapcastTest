@@ -22,6 +22,7 @@ public sealed class SegmentCache
     private readonly HashSet<int> _endedSessions = new();
     private long? _recordingFrom;
     private readonly List<(long from, long to)> _pinned = new();
+    private readonly Dictionary<int, double> _origins = new();
 
     public int SegmentSeconds { get; }
     public bool IsRecording { get { lock (_lock) return _recordingFrom is not null; } }
@@ -37,10 +38,13 @@ public sealed class SegmentCache
     }
 
     /// <summary>Starts a new segment session and returns the ffmpeg output pattern for it.</summary>
-    public string BeginSession()
+    /// <param name="originUnixSeconds">The pipeline's time zero (its timestamps are wall-clock seconds since then):
+    /// lets a clip be cut at a moment in real time (<see cref="SaveEndingAtAsync"/>).</param>
+    public string BeginSession(double? originUnixSeconds = null)
     {
         lock (_lock)
         {
+            if (originUnixSeconds is double o) _origins[_sessionCounter + 1] = o;
             _activeSession = ++_sessionCounter;
             _activeDir = System.IO.Path.Combine(_root, "s" + _activeSession.ToString("0000", CultureInfo.InvariantCulture));
             Directory.CreateDirectory(_activeDir);
@@ -246,6 +250,81 @@ public sealed class SegmentCache
         finally { lock (_lock) _pinned.Remove((long.MinValue, to)); }
     }
 
+    /// <summary>
+    /// Saves the <paramref name="seconds"/> before <paramref name="endUtc"/> (a voice clip ends just before the word
+    /// was said, so the word isn't in it). Starts on the segment boundary (a keyframe) at or before the start, so the
+    /// first frame is clean; the end is cut exactly. Waits until the video past <paramref name="endUtc"/> is written.
+    /// </summary>
+    public async Task<string> SaveEndingAtAsync(string ffmpeg, int seconds, DateTime endUtc, string outputPath, CancellationToken ct = default)
+    {
+        int session; double origin = 0;
+        lock (_lock)
+        {
+            session = _activeSession;
+            if (session <= 0 || !_origins.TryGetValue(session, out origin))
+                session = -1;
+        }
+        if (session < 0) return await SaveReplayAsync(ffmpeg, seconds, outputPath, ct); // no timeline: the last seconds
+        double endPts = (endUtc - DateTime.UnixEpoch).TotalSeconds - origin;
+        double startPts = endPts - seconds;
+        // wait until a newer segment has begun after the end point (so the one containing it is complete)
+        var until = DateTime.UtcNow + TimeSpan.FromSeconds(SegmentSeconds * 3 + 4);
+        List<Segment> mine;
+        while (true)
+        {
+            InvalidateScan();
+            mine = Scan().Where(x => x.Session == session && x.Size > 0).ToList();
+            var last = mine.LastOrDefault();
+            if (last is not null && last.Closed && StartOf(last) > endPts) break;
+            if (mine.Count >= 2 && StartOf(mine[^1]) is double ls && ls > endPts) break;
+            if (DateTime.UtcNow > until) break;
+            await Task.Delay(250, ct);
+        }
+        lock (_lock) _pinned.Add((long.MinValue, long.MaxValue));
+        try
+        {
+            InvalidateScan();
+            mine = Scan().Where(x => x.Session == session && x.Size > 0).ToList();
+            var starts = mine.Select(StartOf).ToList();
+            // the last segment starting at or before the window's start, through the one holding its end
+            int first = starts.FindLastIndex(t => t is double v && v <= startPts + 0.05);
+            int lastIdx = starts.FindLastIndex(t => t is double v && v < endPts);
+            if (lastIdx < 0 || starts[lastIdx] is null)
+                throw new InvalidOperationException("The replay buffer is empty. It fills while you are live, recording, or have the replay buffer on.");
+            var segs = new List<Segment>();
+            double before = 0;
+            if (first < 0)
+            {
+                // the encoder restarted inside the window: what's left comes from the previous run, end to end
+                first = starts.FindIndex(t => t is not null);
+                double have = endPts - (starts[first] ?? endPts);
+                var older = Scan().Where(x => x.Session < session && x.Closed && x.Size > 0).ToList();
+                int needOlder = Math.Max(0, (int)Math.Ceiling((seconds - have) / SegmentSeconds));
+                var prev = older.Skip(Math.Max(0, older.Count - needOlder)).ToList();
+                segs.AddRange(prev);
+                before = prev.Count * (double)SegmentSeconds; // approximate: only sets where the cut falls
+            }
+            segs.AddRange(mine.Skip(first).Take(lastIdx - first + 1));
+            double startOfMine = starts[first] ?? 0;
+            // position of the end point in the joined file (it starts at the first segment's start)
+            double end = Math.Max(0.5, before + endPts - startOfMine);
+            await ConcatAsync(ffmpeg, segs, outputPath, ct, endAt: end);
+            return outputPath;
+        }
+        finally { lock (_lock) _pinned.Remove((long.MinValue, long.MaxValue)); }
+    }
+
+    private readonly Dictionary<string, double?> _startCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A segment's first video timestamp (seconds), read from its first packets.</summary>
+    private double? StartOf(Segment s)
+    {
+        lock (_lock) if (_startCache.TryGetValue(s.Path, out var c)) return c;
+        var t = TsTimestamps.FirstPts(s.Path);
+        if (t is not null) lock (_lock) { if (_startCache.Count > 2000) _startCache.Clear(); _startCache[s.Path] = t; }
+        return t;
+    }
+
     /// <summary>The segment being written has been open far longer than a segment should be: the encoder isn't making keyframes.</summary>
     public bool SegmentsStuck(TimeSpan? limit = null)
     {
@@ -337,7 +416,9 @@ public sealed class SegmentCache
 
     /// <param name="lastSeconds">Keep only the last this many seconds (cut at the keyframe just before, no re-encode).</param>
     /// <param name="reencode">Re-encode the video (with <paramref name="lastSeconds"/>: when the video has no keyframe to cut at).</param>
-    public static async Task ConcatAsync(string ffmpeg, IReadOnlyList<Segment> segs, string outputPath, CancellationToken ct, int? lastSeconds = null, bool reencode = false)
+    /// <param name="endAt">Stop at this position in the joined segments (seconds from their start).</param>
+    public static async Task ConcatAsync(string ffmpeg, IReadOnlyList<Segment> segs, string outputPath, CancellationToken ct, int? lastSeconds = null, bool reencode = false,
+        double? endAt = null)
     {
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(outputPath))!);
         string work = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"leapcast-export-{Guid.NewGuid():N}");
@@ -367,7 +448,7 @@ public sealed class SegmentCache
                 concatList = System.IO.Path.Combine(work, "sessions.txt");
                 await File.WriteAllLinesAsync(concatList, sessionFiles.Select(f => "file '" + f.Replace('\\', '/').Replace("'", "'\\''") + "'"), ct);
             }
-            if (lastSeconds is int keep && concatList is not null)
+            if ((lastSeconds is not null || endAt is not null) && concatList is not null)
             {
                 // trimming needs one file with a known end: join the sessions into one stream first
                 string joinedAll = System.IO.Path.Combine(work, "joined.ts");
@@ -379,6 +460,7 @@ public sealed class SegmentCache
             }
             args = new() { "-hide_banner", "-loglevel", "error", "-y" };
             if (lastSeconds is int last && !reencode) args.AddRange(new[] { "-sseof", "-" + last.ToString(CultureInfo.InvariantCulture) });
+            if (endAt is double stop) args.AddRange(new[] { "-to", stop.ToString("0.###", CultureInfo.InvariantCulture) });
             if (concatList is null) args.AddRange(new[] { "-i", sessionFiles[0] });
             else args.AddRange(new[] { "-f", "concat", "-safe", "0", "-i", concatList });
             if (lastSeconds is int tail && reencode && concatList is null)

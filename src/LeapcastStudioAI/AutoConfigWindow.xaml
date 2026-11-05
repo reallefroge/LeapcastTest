@@ -7,7 +7,7 @@
   <DockPanel Margin="20,16,20,14">
     <StackPanel DockPanel.Dock="Top">
       <TextBlock Text="Auto-config" FontSize="22" FontWeight="Bold" Margin="3,0,0,2"/>
-      <TextBlock x:Name="Subtitle" Text="Finds the smoothest settings this PC can hold while you play, with as little quality loss as possible."
+      <TextBlock x:Name="Subtitle" Text="Tests this PC and picks the highest settings it can sustain."
                  Style="{StaticResource Hint}" Margin="3,0,3,8"/>
     </StackPanel>
     <DockPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
@@ -24,25 +24,25 @@
           <StackPanel>
             <TextBlock Text="What do you stream?" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="ContentBox">
-              <ComboBoxItem Content="Low-motion game: Wizard101, card or turn-based games" Tag="LowMotion"/>
-              <ComboBoxItem Content="High-motion game: shooters, racing, fast action" Tag="HighMotion"/>
+              <ComboBoxItem Content="Low motion (Wizard101, card and turn-based games)" Tag="LowMotion"/>
+              <ComboBoxItem Content="High motion (shooters, racing, action)" Tag="HighMotion"/>
             </ComboBox>
             <TextBlock Text="What matters most?" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="PriorityBox">
-              <ComboBoxItem Content="Smooth stream and a smooth game: least PC load (recommended)" Tag="Performance"/>
-              <ComboBoxItem Content="Sharpest picture my PC and connection can hold" Tag="Quality"/>
+              <ComboBoxItem Content="Performance: lowest PC load (recommended)" Tag="Performance"/>
+              <ComboBoxItem Content="Quality: sharpest picture this PC can sustain" Tag="Quality"/>
             </ComboBox>
             <TextBlock Text="Upload speed (kbps)" Style="{StaticResource FieldLabel}"/>
             <DockPanel>
               <Button x:Name="ScanButton" DockPanel.Dock="Right" Content="Scan my upload" Click="Scan_Click" Margin="6,0,0,0"
-                      ToolTip="Measures your real upload speed in about 10 seconds"/>
+                      ToolTip="Measures upload speed (about 10 s)"/>
               <TextBox x:Name="UploadBox"/>
             </DockPanel>
-            <CheckBox x:Name="ScanBox" Content="Scan my upload speed as part of auto-config (about 10 s), then fit the bitrate to it"/>
-            <TextBlock x:Name="UploadHint" Text="Type it in kbps (e.g. 12000 for 12 Mbps), or scan it: with a Twitch output that has its key, the scan streams to Twitch in its invisible test mode; otherwise it's an upload test over the internet."
+            <CheckBox x:Name="ScanBox" Content="Measure upload speed first (about 10 s)"/>
+            <TextBlock x:Name="UploadHint" Text="In kbps (12 Mbps = 12000). Scan uses Twitch's bandwidth test when a Twitch key is set."
                        Style="{StaticResource Hint}"/>
-            <CheckBox x:Name="FillGameBox" Content="Make the game fill the whole 16:9 stream (trim edges, no bars, no stretching)" IsChecked="True"/>
-            <TextBlock Text="The test runs your real scene for about 15 seconds per try (a couple of tries at most). Keep the game open and playing; nothing goes live."
+            <CheckBox x:Name="FillGameBox" Content="Fill the 16:9 canvas with the game (crop edges, no black bars)" IsChecked="True"/>
+            <TextBlock Text="Each test runs your scene for about 15 seconds. Keep the game running. Nothing is streamed."
                        Style="{StaticResource Hint}" Margin="3,10,3,0"/>
           </StackPanel>
         </Border>

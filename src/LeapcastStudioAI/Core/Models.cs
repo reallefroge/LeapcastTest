@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 namespace LeapcastStudioAI;
 
 /// <summary>What the engine actually does with a source. The persisted <see cref="StudioSource.Type"/> string maps onto this.</summary>
-public enum SourceKind { Display, Window, Camera, Image, Text, Browser, Microphone, DesktopAudio, Unsupported }
+public enum SourceKind { Display, Window, Camera, Image, Text, Browser, Microphone, DesktopAudio, Folder, Unsupported }
 
 public static class SourceTypes
 {
@@ -17,9 +17,11 @@ public static class SourceTypes
     public const string Microphone = "Audio Input";
     public const string DesktopAudio = "Audio Output";
     public const string Browser = "Browser";
+    /// <summary>Groups sources in the list: one eye and lock for all of them, moved together on the preview.</summary>
+    public const string Folder = "Folder";
 
     /// <summary>Types offered in the "Add source" picker.</summary>
-    public static readonly string[] Pickable = { Window, Display, Camera, Browser, Image, Text, Microphone, DesktopAudio };
+    public static readonly string[] Pickable = { Window, Display, Camera, Browser, Image, Text, Microphone, DesktopAudio, Folder };
 
     public static SourceKind KindOf(string? type) => type switch
     {
@@ -32,6 +34,7 @@ public static class SourceTypes
         Browser => SourceKind.Browser,
         Microphone => SourceKind.Microphone,
         DesktopAudio => SourceKind.DesktopAudio,
+        Folder => SourceKind.Folder,
         _ => SourceKind.Unsupported
     };
 
@@ -88,6 +91,19 @@ public sealed class StudioSource
     /// <summary>Global hotkey that shows/hides this source (e.g. "Ctrl+Shift+F1"); works while the game has focus.
     /// Every source with the same hotkey (copies in other scenes) toggles together.</summary>
     public string Hotkey { get; set; } = "";
+
+    /// <summary>The folder this source is in (a <see cref="SourceTypes.Folder"/> source in the same scene), if any.</summary>
+    public Guid? FolderId { get; set; }
+    /// <summary>A folder whose contents are folded away in the sources list.</summary>
+    public bool Collapsed { get; set; }
+    [JsonIgnore] public bool IsFolder => Type == SourceTypes.Folder;
+    /// <summary>Its folder is hidden (set by <see cref="StudioScene.ApplyFolders"/>).</summary>
+    [JsonIgnore] public bool HiddenByFolder { get; set; }
+    /// <summary>On the picture / heard: its own eye and its folder's eye are both on. What the pipeline uses.</summary>
+    [JsonIgnore] public bool Shown => Visible && !HiddenByFolder;
+    /// <summary>Sources list row: indent (inside a folder) and the second line.</summary>
+    [JsonIgnore] public double ListIndent { get; set; }
+    [JsonIgnore] public string ListDetail { get; set; } = "";
 
     // Placement (video sources). Sources later in the scene list are drawn on top.
     public string Anchor { get; set; } = Anchors.Auto;
@@ -166,6 +182,203 @@ public sealed class StudioScene
     /// <summary>Global hotkey that switches to this scene (stages it in studio mode).</summary>
     public string Hotkey { get; set; } = "";
     public ObservableCollection<StudioSource> Sources { get; set; } = new();
+
+    // ---------------- folders ----------------
+    // A folder is a source of type Folder; the sources in it carry its id and sit directly behind it in Sources
+    // (Sources runs back → front, so in the list, which shows front first, they appear right under the folder).
+
+    public StudioSource? FolderOf(StudioSource s) =>
+        s.FolderId is Guid id ? Sources.FirstOrDefault(x => x.Id == id && x.IsFolder) : null;
+
+    public List<StudioSource> ChildrenOf(StudioSource folder) => Sources.Where(x => x.FolderId == folder.Id && !x.IsFolder).ToList();
+
+    /// <summary>Locked itself, or inside a locked folder.</summary>
+    public bool IsLocked(StudioSource s) => s.Locked || FolderOf(s)?.Locked == true;
+
+    /// <summary>Updates what each folder's eye means for its sources, and fixes up the order (call after edits).</summary>
+    public void ApplyFolders()
+    {
+        Normalize();
+        ApplyFolderVisibility();
+    }
+
+    /// <summary>Only what each folder's eye means for its sources (no reordering).</summary>
+    public void ApplyFolderVisibility()
+    {
+        foreach (var s in Sources) s.HiddenByFolder = FolderOf(s) is { } f && !f.Visible;
+    }
+
+    /// <summary>The list split into blocks, back → front: a folder with its sources (folder last), or one source.</summary>
+    public List<List<StudioSource>> Blocks()
+    {
+        var blocks = new List<List<StudioSource>>();
+        var placed = new HashSet<StudioSource>();
+        foreach (var s in Sources)
+        {
+            if (placed.Contains(s)) continue;
+            if (s.IsFolder)
+            {
+                var block = ChildrenOf(s).Where(c => !placed.Contains(c)).ToList();
+                block.Add(s);
+                foreach (var b in block) placed.Add(b);
+                blocks.Add(block);
+            }
+            else if (FolderOf(s) is { } f)
+            {
+                // a folder's source comes before the folder itself: placed with the folder's block
+                if (!Sources.Contains(f)) { blocks.Add(new() { s }); placed.Add(s); }
+            }
+            else { blocks.Add(new() { s }); placed.Add(s); }
+        }
+        // anything a folder block didn't pick up (shouldn't happen)
+        foreach (var s in Sources.Where(x => !placed.Contains(x))) blocks.Add(new() { s });
+        return blocks;
+    }
+
+    /// <summary>Keeps every folder's sources together, directly behind the folder; drops links to missing folders.</summary>
+    public void Normalize()
+    {
+        foreach (var s in Sources)
+            if (s.FolderId is not null && (s.IsFolder || FolderOf(s) is null)) s.FolderId = null;
+        SetOrder(Blocks().SelectMany(b => b).ToList());
+    }
+
+    /// <summary>Reorders Sources to exactly this order (moves only what changed: the list stays bound).</summary>
+    public void SetOrder(IReadOnlyList<StudioSource> order)
+    {
+        for (int i = 0; i < order.Count; i++)
+        {
+            int at = Sources.IndexOf(order[i]);
+            if (at >= 0 && at != i) Sources.Move(at, i);
+        }
+    }
+
+    /// <summary>The block a source belongs to (its folder's block when it's in one).</summary>
+    private int BlockIndex(List<List<StudioSource>> blocks, StudioSource s) => blocks.FindIndex(b => b.Contains(s));
+
+    /// <summary>
+    /// One step up (toward the front) or down in the sources list. A folder moves with everything in it; a source in
+    /// a folder moves within it, and stepping past the folder's first or last place takes it out of the folder.
+    /// </summary>
+    public void MoveInList(StudioSource s, bool up)
+    {
+        Normalize();
+        var blocks = Blocks();
+        int bi = BlockIndex(blocks, s);
+        if (bi < 0) return;
+        if (FolderOf(s) is { } folder)
+        {
+            var block = blocks[bi];
+            var kids = block.Take(block.Count - 1).ToList(); // back → front
+            int i = kids.IndexOf(s);
+            if (up && i < kids.Count - 1) (kids[i], kids[i + 1]) = (kids[i + 1], kids[i]);
+            else if (!up && i > 0) (kids[i], kids[i - 1]) = (kids[i - 1], kids[i]);
+            else
+            {
+                // out of the folder: just above it (in front) or just below it (behind)
+                kids.Remove(s);
+                s.FolderId = null;
+                blocks[bi] = kids.Append(folder).ToList();
+                blocks.Insert(up ? bi + 1 : bi, new List<StudioSource> { s });
+                SetOrder(blocks.SelectMany(b => b).ToList());
+                return;
+            }
+            blocks[bi] = kids.Append(folder).ToList();
+        }
+        else
+        {
+            int j = up ? bi + 1 : bi - 1;
+            if (j < 0 || j >= blocks.Count) return;
+            (blocks[bi], blocks[j]) = (blocks[j], blocks[bi]);
+        }
+        SetOrder(blocks.SelectMany(b => b).ToList());
+    }
+
+    /// <summary>Puts a source into a folder as its top item, or (folder null) out of its folder, just above it.</summary>
+    public void MoveToFolder(StudioSource s, StudioSource? folder)
+    {
+        if (s.IsFolder || ReferenceEquals(s, folder)) return;
+        Normalize();
+        var current = FolderOf(s);
+        if (folder is null)
+        {
+            if (current is null) return;
+            s.FolderId = null;
+            Sources.Remove(s);
+            Sources.Insert(Sources.IndexOf(current) + 1, s);
+        }
+        else
+        {
+            s.FolderId = folder.Id;
+            Sources.Remove(s);
+            Sources.Insert(Sources.IndexOf(folder), s); // directly behind the folder entry = top of its contents
+        }
+        Normalize();
+    }
+
+    /// <summary>
+    /// Drag and drop in the list: <paramref name="s"/> goes directly above <paramref name="target"/> (in front of it),
+    /// joining the target's folder when the target is inside one. A folder moves with everything in it, and never
+    /// into another folder.
+    /// </summary>
+    public void PlaceAbove(StudioSource s, StudioSource target)
+    {
+        if (ReferenceEquals(s, target) || s.IsFolder && ReferenceEquals(FolderOf(target), s)) return;
+        Normalize();
+        if (s.IsFolder)
+        {
+            var blocks = Blocks();
+            int from = BlockIndex(blocks, s), to = BlockIndex(blocks, target);
+            if (from < 0 || to < 0 || from == to) return;
+            var moving = blocks[from];
+            blocks.RemoveAt(from);
+            to = BlockIndex(blocks, target);
+            blocks.Insert(to + 1, moving);
+            SetOrder(blocks.SelectMany(b => b).ToList());
+            return;
+        }
+        s.FolderId = target.IsFolder ? null : FolderOf(target)?.Id;
+        Sources.Remove(s);
+        Sources.Insert(Sources.IndexOf(target) + 1, s);
+        Normalize();
+    }
+
+    /// <summary>Drag and drop below the last row: to the very bottom of the list (behind everything).</summary>
+    public void PlaceAtBottom(StudioSource s)
+    {
+        Normalize();
+        var blocks = Blocks();
+        int from = BlockIndex(blocks, s);
+        if (from < 0) return;
+        List<StudioSource> moving;
+        if (s.IsFolder || FolderOf(s) is null) { moving = blocks[from]; blocks.RemoveAt(from); }
+        else { s.FolderId = null; blocks[from].Remove(s); moving = new() { s }; }
+        blocks.Insert(0, moving);
+        SetOrder(blocks.SelectMany(b => b).ToList());
+    }
+
+    /// <summary>Deletes a folder; its sources are deleted too, or (<paramref name="keepContents"/>) stay in the list.</summary>
+    public void RemoveFolder(StudioSource folder, bool keepContents)
+    {
+        foreach (var c in ChildrenOf(folder))
+        {
+            if (keepContents) c.FolderId = null;
+            else Sources.Remove(c);
+        }
+        Sources.Remove(folder);
+        Normalize();
+    }
+
+    /// <summary>Copies of these sources with new ids; folder links are kept within the copies.</summary>
+    public static List<StudioSource> CopyAll(IEnumerable<StudioSource> sources)
+    {
+        var list = sources.ToList();
+        var map = new Dictionary<Guid, Guid>();
+        var copies = list.Select(s => { var c = s.Copy(); map[s.Id] = c.Id; return c; }).ToList();
+        foreach (var c in copies)
+            if (c.FolderId is Guid f) c.FolderId = map.TryGetValue(f, out var nf) ? nf : null;
+        return copies;
+    }
 }
 
 /// <summary>One multistream destination (Aitum-style output row).</summary>

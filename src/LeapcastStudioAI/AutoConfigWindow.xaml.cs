@@ -144,11 +144,11 @@ public partial class AutoConfigWindow : Window
         // 2. the game picture (make it fill the stream if asked)
         var game = PipelineBuilder.VisibleLayers(scene.Sources)
             .FirstOrDefault(s => SourceTypes.KindOf(s.Type) is SourceKind.Window or SourceKind.Display)
-            ?? scene.Sources.FirstOrDefault(s => s.Visible && SourceTypes.KindOf(s.Type) is SourceKind.Window or SourceKind.Display);
+            ?? scene.Sources.FirstOrDefault(s => s.Shown && SourceTypes.KindOf(s.Type) is SourceKind.Window or SourceKind.Display);
         if (game is not null && FillGameBox.IsChecked == true)
         {
             string key = PipelineBuilder.InputKey(game);
-            foreach (var s in sources.Where(x => PipelineBuilder.InputKey(x) == key && x.Visible))
+            foreach (var s in sources.Where(x => PipelineBuilder.InputKey(x) == key && x.Shown))
             {
                 var (anchor, fill) = (s.Anchor, s.FillMode);
                 _undo.Add(() => { s.Anchor = anchor; s.FillMode = fill; });
@@ -249,7 +249,7 @@ public partial class AutoConfigWindow : Window
         _done = true;
         PrimaryButton.Content = "Apply";
         CancelButton.Content = "Discard";
-        if (_camera is not null && scene.Sources.Any(s => s.Visible && SourceTypes.KindOf(s.Type) == SourceKind.Microphone))
+        if (_camera is not null && scene.Sources.Any(s => s.Shown && SourceTypes.KindOf(s.Type) == SourceKind.Microphone))
             ClapButton.Visibility = Visibility.Visible;
     }
 
@@ -259,7 +259,7 @@ public partial class AutoConfigWindow : Window
         if (_camera is null || _running) return;
         var scene = CurrentScene;
         if (scene is null) return;
-        if (MessageBox.Show(this, "When you click OK, clap 4–5 times, about once a second, where the camera can see your hands.",
+        if (MessageBox.Show(this, "Click OK, then clap 4–5 times, once a second, in view of the camera.",
                 "Camera sync", MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK) return;
         _running = true;
         ClapButton.IsEnabled = PrimaryButton.IsEnabled = false;

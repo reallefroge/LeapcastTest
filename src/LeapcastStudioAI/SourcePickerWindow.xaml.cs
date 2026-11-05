@@ -15,14 +15,15 @@ public partial class SourcePickerWindow : Window
 
     private static readonly Choice[] Choices =
     {
-        new(SourceTypes.Window, "One game window (e.g. Wizard101), captured by the GPU. Fills the stream at any window size and survives the game recreating its window."),
-        new(SourceTypes.Display, "Your whole screen via GPU capture (fullscreen games, several windows at once)."),
-        new(SourceTypes.Camera, "Webcam overlay, denoised before encoding to save bandwidth."),
-        new(SourceTypes.Browser, "A web page: your chat, alerts or any widget URL, with a transparent background."),
-        new(SourceTypes.Image, "A PNG/JPG overlay: frame, logo, \"starting soon\" screen."),
-        new(SourceTypes.Text, "A text label rendered in Segoe UI with a drop shadow."),
-        new(SourceTypes.Microphone, "Your mic, with adaptive background-noise removal."),
-        new(SourceTypes.DesktopAudio, "Everything you hear: game sound, music, alerts."),
+        new(SourceTypes.Window, "A single window, such as Wizard101."),
+        new(SourceTypes.Display, "An entire monitor. Use for exclusive fullscreen games."),
+        new(SourceTypes.Camera, "Webcam or capture card."),
+        new(SourceTypes.Browser, "A web page: chat, alerts or widgets."),
+        new(SourceTypes.Image, "A PNG or JPG image."),
+        new(SourceTypes.Text, "A text label."),
+        new(SourceTypes.Microphone, "Microphone or line in."),
+        new(SourceTypes.DesktopAudio, "Desktop audio."),
+        new(SourceTypes.Folder, "Groups sources to show, hide, lock and move together."),
     };
 
     public string? SelectedType { get; private set; }

@@ -17,12 +17,12 @@
             <StackPanel>
             <TextBlock Text="What are you streaming?" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="ContentBox" SelectionChanged="AnyChanged">
-              <ComboBoxItem Content="Low-motion game: Wizard101, card or turn-based games" Tag="LowMotion"/>
-              <ComboBoxItem Content="High-motion game: shooters, racing, fast action" Tag="HighMotion"/>
+              <ComboBoxItem Content="Low motion (Wizard101, card and turn-based games)" Tag="LowMotion"/>
+              <ComboBoxItem Content="High motion (shooters, racing, action)" Tag="HighMotion"/>
             </ComboBox>
             <TextBlock Text="Quality profile" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="ProfileBox" SelectionChanged="AnyChanged">
-              <ComboBoxItem Content="Auto: fit my connection (recommended)" Tag="Auto"/>
+              <ComboBoxItem Content="Auto (recommended)" Tag="Auto"/>
               <ComboBoxItem Content="Data saver: 720p, very low upload" Tag="DataSaver"/>
               <ComboBoxItem Content="Balanced: 900p" Tag="Balanced"/>
               <ComboBoxItem Content="High quality: 1080p" Tag="High"/>
@@ -50,14 +50,14 @@
             <ComboBox x:Name="EncoderBox" SelectionChanged="AnyChanged"/>
             <TextBlock Text="Encoder preset" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="PresetBox" SelectionChanged="AnyChanged">
-              <ComboBoxItem Content="Quality: slower settings, a slightly sharper picture (more GPU/CPU)" Tag="Quality"/>
+              <ComboBoxItem Content="Quality" Tag="Quality"/>
               <ComboBoxItem Content="Balanced (recommended)" Tag="Balanced"/>
-              <ComboBoxItem Content="Performance: fastest settings, for busy or older PCs" Tag="Performance"/>
+              <ComboBoxItem Content="Performance" Tag="Performance"/>
             </ComboBox>
             <TextBlock Text="Bitrate mode" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="RateBox" SelectionChanged="AnyChanged">
-              <ComboBoxItem Content="Smart VBR: spend bits only when the picture changes (saves data)" Tag="SmartVbr"/>
-              <ComboBoxItem Content="Constant bitrate: always send the full amount" Tag="Cbr"/>
+              <ComboBoxItem Content="Smart VBR (recommended)" Tag="SmartVbr"/>
+              <ComboBoxItem Content="CBR" Tag="Cbr"/>
             </ComboBox>
             <TextBlock Text="Audio quality" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="AudioBox" SelectionChanged="AnyChanged">
@@ -66,7 +66,7 @@
               <ComboBoxItem Content="160 kbps (recommended)" Tag="160"/>
               <ComboBoxItem Content="192 kbps" Tag="192"/>
             </ComboBox>
-            <CheckBox x:Name="LowLatencyBox" Content="Lowest latency (slightly more data for the same quality)" Click="AnyChanged"/>
+            <CheckBox x:Name="LowLatencyBox" Content="Low latency" Click="AnyChanged"/>
             <Border Background="{StaticResource PanelAltBrush}" CornerRadius="8" Padding="10" Margin="0,8,0,0">
               <StackPanel>
                 <TextBlock Text="You'll stream" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
@@ -83,7 +83,7 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">
             <StackPanel>
-              <TextBlock Text="Click a box and press the keys (e.g. Ctrl+Shift+1); Backspace clears it. Hotkeys work everywhere, even while the game has focus."
+              <TextBlock Text="Click a box, then press the keys. Backspace clears it. Hotkeys work while the game has focus."
                          Style="{StaticResource Hint}" Margin="3,0,3,8"/>
               <StackPanel x:Name="HotkeysPanel"/>
             </StackPanel>
@@ -94,16 +94,16 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">
             <StackPanel>
-            <TextBlock Text="VERTICAL CANVAS (TIKTOK, SHORTS, REELS)" Style="{StaticResource SectionHeader}"/>
-            <CheckBox x:Name="VerticalBox" Content="Second 9:16 canvas with its own layout" Click="AnyChanged"/>
+            <TextBlock Text="VERTICAL CANVAS" Style="{StaticResource SectionHeader}"/>
+            <CheckBox x:Name="VerticalBox" Content="Enable 9:16 canvas" Click="AnyChanged"/>
             <TextBlock Text="Vertical resolution" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="VerticalResBox" SelectionChanged="AnyChanged">
-              <ComboBoxItem Content="720 × 1280 (recommended, light on upload)" Tag="720x1280"/>
+              <ComboBoxItem Content="720 × 1280 (recommended)" Tag="720x1280"/>
               <ComboBoxItem Content="1080 × 1920" Tag="1080x1920"/>
             </ComboBox>
             <TextBlock Text="Vertical bitrate (kbps, 0 = automatic)" Style="{StaticResource FieldLabel}"/>
             <TextBox x:Name="VerticalBitrateBox" TextChanged="AnyChanged"/>
-            <TextBlock Text="The vertical canvas places your camera on top and the game below it automatically. Drag things on the vertical preview to change it."
+            <TextBlock Text="Camera on top, game below by default. Drag on the vertical preview to adjust."
                        Style="{StaticResource Hint}"/>
             <TextBlock Text="SCENE TRANSITIONS" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
             <TextBlock Text="Transition" Style="{StaticResource FieldLabel}"/>
@@ -119,7 +119,7 @@
               <ComboBoxItem Content="1 s" Tag="1000"/>
               <ComboBoxItem Content="1.5 s" Tag="1500"/>
             </ComboBox>
-            <TextBlock Text="Every scene stays live inside the encoder, so switching never interrupts the stream. Each extra scene adds a little CPU work."
+            <TextBlock Text="All scenes stay loaded, so switching is instant. Each scene adds some CPU load."
                        Style="{StaticResource Hint}"/>
           
             </StackPanel>
@@ -132,7 +132,7 @@
             <StackPanel>
             <TextBlock Text="Upload speed (kbps)" Style="{StaticResource FieldLabel}"/>
             <TextBox x:Name="UploadBox" TextChanged="AnyChanged"/>
-            <TextBlock Text="Type it in kbps (12 Mbps = 12000), or measure it below (Twitch's invisible test mode if you have a Twitch output with its key, otherwise an upload test over the internet). Auto quality plans the stream within 75% of it. Every destination gets the full bitrate (like Aitum Multistream), and Leapcast warns if they add up to more than your upload can take."
+            <TextBlock Text="In kbps (12 Mbps = 12000). Auto quality stays within 75% of it. Each destination uploads the full bitrate."
                        Style="{StaticResource Hint}"/>
             <DockPanel Margin="0,8,0,0">
               <Button x:Name="TestButton" DockPanel.Dock="Left" Content="Test my connection" Click="Test_Click"/>
@@ -140,9 +140,9 @@
                          Foreground="{StaticResource MutedBrush}" FontSize="11"/>
             </DockPanel>
             <TextBlock Text="RELIABILITY" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
-            <CheckBox x:Name="ReconnectBox" Content="Reconnect automatically if the stream drops"/>
-            <CheckBox x:Name="AdjustBox" Content="Lower the bitrate automatically if my connection can't keep up"/>
-            <CheckBox x:Name="AdaptBox" Content="Adapt automatically when this PC can't keep up (lighter settings, back up when there's headroom)"/>
+            <CheckBox x:Name="ReconnectBox" Content="Reconnect automatically"/>
+            <CheckBox x:Name="AdjustBox" Content="Lower bitrate when the connection struggles"/>
+            <CheckBox x:Name="AdaptBox" Content="Use lighter settings when the PC is overloaded"/>
           
             </StackPanel>
           </Border>
@@ -165,13 +165,13 @@
               <ComboBoxItem Content="2 minutes" Tag="120"/>
               <ComboBoxItem Content="5 minutes" Tag="300"/>
             </ComboBox>
-            <TextBlock Text="Recordings and replays are saved here. They reuse the stream's encode, so recording while live costs no extra GPU/CPU."
+            <TextBlock Text="Recording uses the stream's encode, so it adds no GPU/CPU load."
                        Style="{StaticResource Hint}"/>
             <Button Content="Open the folder" HorizontalAlignment="Left" Click="OpenRecordings_Click" Margin="3,8,3,3"/>
             <TextBlock Text="VOICE CLIPS" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
-            <CheckBox x:Name="VoiceClipBox" Content="Listen for the word and save a clip when I say it (while live, recording or with the replay buffer on)"
+            <CheckBox x:Name="VoiceClipBox" Content="Save a clip when I say the word"
                       Checked="VoiceClipBox_Changed" Unchecked="VoiceClipBox_Changed"/>
-            <TextBlock Text="Turning this on or off takes effect and is saved right away, even if you close this window with ✕."
+            <TextBlock Text="Applies immediately. Works while live, recording or with the replay buffer on."
                        Style="{StaticResource Hint}"/>
             <Grid Margin="0,2,0,0">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -180,28 +180,23 @@
                 <TextBox x:Name="VoiceWordBox"/>
               </StackPanel>
               <StackPanel Grid.Column="2">
-                <TextBlock Text="Clip length" Style="{StaticResource FieldLabel}"/>
-                <ComboBox x:Name="VoiceSecondsBox">
-                  <ComboBoxItem Content="30 seconds" Tag="30"/>
-                  <ComboBoxItem Content="50 seconds" Tag="50"/>
-                  <ComboBoxItem Content="60 seconds" Tag="60"/>
-                  <ComboBoxItem Content="90 seconds" Tag="90"/>
-                  <ComboBoxItem Content="2 minutes" Tag="120"/>
-                </ComboBox>
+                <TextBlock Text="Clip length (15–60 seconds)" Style="{StaticResource FieldLabel}"/>
+                <TextBox x:Name="VoiceSecondsBox" TextChanged="VoiceSecondsBox_TextChanged"/>
+                <TextBlock x:Name="VoiceSecondsHint" Style="{StaticResource Hint}" Visibility="Collapsed"/>
               </StackPanel>
             </Grid>
             <TextBlock Text="Sensitivity" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="VoiceSensitivityBox">
-              <ComboBoxItem Content="Normal: only when the word is clear" Tag="Normal"/>
-              <ComboBoxItem Content="High: catches it said quickly or mid-sentence (recommended)" Tag="High"/>
-              <ComboBoxItem Content="Max: catches almost anything like it (may clip by accident)" Tag="Max"/>
+              <ComboBoxItem Content="Normal" Tag="Normal"/>
+              <ComboBoxItem Content="High (recommended)" Tag="High"/>
+              <ComboBoxItem Content="Maximum (more false triggers)" Tag="Max"/>
             </ComboBox>
             <TextBlock Text="Save voice clips to" Style="{StaticResource FieldLabel}"/>
             <DockPanel>
               <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseClipFolder_Click"/>
               <TextBox x:Name="VoiceFolderBox"/>
             </DockPanel>
-            <TextBlock Text="Only clips made by saying the word go here, named by the day and then the time (e.g. 2026-11-04 15-57-32.mp4). Recognition uses Windows' built-in speech recognizer on your stream's microphone: nothing leaves your PC."
+            <TextBlock Text="Named by date and time (2026-11-04 15-57-32.mp4). Speech recognition runs on this PC."
                        Style="{StaticResource Hint}"/>
           
             </StackPanel>
@@ -212,7 +207,7 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">
             <StackPanel>
-            <TextBlock Text="FFmpeg location (leave empty to use the bundled copy)" Style="{StaticResource FieldLabel}"/>
+            <TextBlock Text="FFmpeg path (empty = bundled)" Style="{StaticResource FieldLabel}"/>
             <DockPanel>
               <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseFfmpeg_Click"/>
               <TextBox x:Name="FfmpegBox"/>

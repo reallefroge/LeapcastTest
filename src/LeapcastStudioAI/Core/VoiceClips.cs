@@ -27,6 +27,19 @@ public static class VoiceClips
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
+    public const int MinSeconds = 15, MaxSeconds = 60;
+
+    /// <summary>A clip length within the allowed range.</summary>
+    public static int ClampSeconds(int seconds) => Math.Clamp(seconds, MinSeconds, MaxSeconds);
+
+    /// <summary>A typed clip length ("45", "45 s"), or null when it isn't a whole number from 15 to 60.</summary>
+    public static int? ParseSeconds(string? text)
+    {
+        var t = (text ?? "").Trim().TrimEnd('s', 'S').Trim();
+        return int.TryParse(t, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v)
+               && v >= MinSeconds && v <= MaxSeconds ? v : null;
+    }
+
     /// <summary>How readily the word counts, by the Settings choice.</summary>
     /// <returns>Lowest confidence for the word said alone / inside a sentence, the recognizer's own rejection
     /// threshold (0–100, -1 = leave it), and whether results the recognizer rejected are still checked.</returns>
@@ -124,8 +137,11 @@ public sealed class SpeechPcmConverter
 /// </summary>
 public sealed class BlockingAudioStream : Stream
 {
-    private readonly Queue<byte[]> _chunks = new();
+    private readonly Queue<(byte[] Data, DateTime WrittenUtc)> _chunks = new();
     private byte[]? _current;
+    /// <summary>Where recent chunks start in the read position, and when they arrived (their audio ends then).</summary>
+    private readonly List<(long ReadStart, int Length, DateTime WrittenUtc)> _timeline = new();
+    private readonly int _bytesPerSecond;
     private int _offset;
     private long _queued;
     private bool _done;
@@ -137,9 +153,36 @@ public sealed class BlockingAudioStream : Stream
     /// <summary>Diagnostics: every call the reader makes (Length, Seek, Read sizes).</summary>
     public Action<string>? Trace { get; set; }
 
-    public BlockingAudioStream(int maxSeconds = 5, int bytesPerSecond = SpeechPcmConverter.OutRate * 2) => _maxBytes = (long)maxSeconds * bytesPerSecond;
+    public BlockingAudioStream(int maxSeconds = 5, int bytesPerSecond = SpeechPcmConverter.OutRate * 2)
+    {
+        _maxBytes = (long)maxSeconds * bytesPerSecond;
+        _bytesPerSecond = bytesPerSecond;
+    }
 
-    public void Write(short[] samples)
+    /// <summary>The time a position in what was read (e.g. where the recognizer heard a word start) was spoken.</summary>
+    public DateTime? WallTimeAt(TimeSpan audioPosition)
+    {
+        long pos = (long)(audioPosition.TotalSeconds * _bytesPerSecond);
+        lock (_chunks)
+        {
+            for (int i = _timeline.Count - 1; i >= 0; i--)
+            {
+                var (start, len, written) = _timeline[i];
+                if (pos < start) continue;
+                // a chunk's audio ends when it arrived; earlier bytes were spoken that much earlier
+                double before = (start + len - pos) / (double)_bytesPerSecond;
+                return written - TimeSpan.FromSeconds(Math.Max(0, before));
+            }
+        }
+        return null;
+    }
+
+    /// <summary>For tests: as <see cref="Write(short[])"/>, as if the audio arrived at <paramref name="writtenUtc"/>.</summary>
+    public void Write(short[] samples, DateTime writtenUtc) => WriteAt(samples, writtenUtc);
+
+    public void Write(short[] samples) => WriteAt(samples, DateTime.UtcNow);
+
+    private void WriteAt(short[] samples, DateTime writtenUtc)
     {
         if (samples.Length == 0) return;
         var bytes = new byte[samples.Length * 2];
@@ -147,9 +190,9 @@ public sealed class BlockingAudioStream : Stream
         lock (_chunks)
         {
             if (_done) return;
-            _chunks.Enqueue(bytes);
+            _chunks.Enqueue((bytes, writtenUtc));
             _queued += bytes.Length;
-            while (_queued > _maxBytes && _chunks.Count > 1) _queued -= _chunks.Dequeue().Length;
+            while (_queued > _maxBytes && _chunks.Count > 1) _queued -= _chunks.Dequeue().Data.Length;
             Monitor.PulseAll(_chunks);
         }
     }
@@ -169,9 +212,12 @@ public sealed class BlockingAudioStream : Stream
                 {
                     while (_chunks.Count == 0 && !_done) Monitor.Wait(_chunks);
                     if (_chunks.Count == 0) break; // completed: hand back what's left, then 0
-                    _current = _chunks.Dequeue();
-                    _queued -= _current.Length;
+                    var (data, written) = _chunks.Dequeue();
+                    _current = data;
+                    _queued -= data.Length;
                     _offset = 0;
+                    _timeline.Add((_readTotal + copied, data.Length, written));
+                    if (_timeline.Count > 4000) _timeline.RemoveRange(0, 1000); // ~40 s of 10 ms packets
                 }
                 int n = Math.Min(count - copied, _current.Length - _offset);
                 Buffer.BlockCopy(_current, _offset, buffer, offset + copied, n);

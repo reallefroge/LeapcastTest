@@ -29,6 +29,8 @@ public sealed class PreviewEditor
     private LayoutRect _startRect;
     private bool _changedSize;
     private bool _moved;
+    /// <summary>Dragging a folder: its sources and where each one started.</summary>
+    private List<(StudioSource Source, LayoutRect Start)>? _group;
 
     public Func<StudioScene?> Scene { get; init; } = () => null;
     public Func<(int W, int H)> CanvasSize { get; init; } = () => (1920, 1080);
@@ -61,6 +63,37 @@ public sealed class PreviewEditor
         _layer.MouseRightButtonUp += OnRightUp;
         _layer.LostMouseCapture += (_, _) => EndDrag();
         _layer.Focusable = true; // so arrow keys nudge only after clicking the preview
+    }
+
+    /// <summary>Locked itself or by its folder.</summary>
+    private bool IsLocked(StudioSource s) => Scene()?.IsLocked(s) ?? s.Locked;
+
+    /// <summary>A folder's sources drawn on this canvas.</summary>
+    private List<StudioSource> Members(StudioSource folder, IReadOnlyList<StudioSource> layers)
+    {
+        var scene = Scene();
+        return scene is null ? new() : layers.Where(x => x.FolderId == folder.Id && scene.FolderOf(x) is not null).ToList();
+    }
+
+    /// <summary>The box around everything in a folder (null when none of it is on this canvas).</summary>
+    private LayoutRect? FolderRect(StudioSource folder, IReadOnlyList<StudioSource> layers)
+    {
+        var rects = Members(folder, layers).Select(m => RectOf(m, layers)).ToList();
+        if (rects.Count == 0) return null;
+        double x = rects.Min(r => r.X), y = rects.Min(r => r.Y), right = rects.Max(r => r.Right), bottom = rects.Max(r => r.Bottom);
+        return new LayoutRect(x, y, right - x, bottom - y);
+    }
+
+    /// <summary>
+    /// What a click on <paramref name="hit"/> picks: the folder it's in (moved as one, like OBS groups), unless that
+    /// source itself is already selected (picked in the list) to move it on its own.
+    /// </summary>
+    private StudioSource? PickFor(StudioSource? hit)
+    {
+        if (hit is null) return null;
+        var folder = Scene()?.FolderOf(hit);
+        if (folder is null || ReferenceEquals(hit, Selected)) return hit;
+        return folder;
     }
 
     public void Select(StudioSource? s)
@@ -118,7 +151,7 @@ public sealed class PreviewEditor
     {
         for (int i = layers.Count - 1; i >= 0; i--)
         {
-            if (layers[i].Locked) continue;
+            if (IsLocked(layers[i])) continue;
             var r = RectOf(layers[i], layers);
             if (p.X >= r.X && p.X <= r.Right && p.Y >= r.Y && p.Y <= r.Bottom) return layers[i];
         }
@@ -128,7 +161,7 @@ public sealed class PreviewEditor
     /// <summary>The selected (unlocked) source's resize grip under the mouse, if any.</summary>
     private Grip GripUnder(Point p, IReadOnlyList<StudioSource> layers)
     {
-        if (Selected is null || Selected.Locked || !layers.Contains(Selected)) return Grip.None;
+        if (Selected is null || IsLocked(Selected) || !layers.Contains(Selected)) return Grip.None;
         return LayoutMath.GripAt(RectOf(Selected, layers), p.X, p.Y, 8 / Scale);
     }
 
@@ -156,13 +189,27 @@ public sealed class PreviewEditor
             return;
         }
         // locked sources are see-through for dragging: grab the unlocked source under them, else just select
-        var hit = HitTestUnlocked(p, layers) ?? HitTest(p, layers);
+        // a selected folder is grabbed anywhere inside its box
+        if (Selected is { IsFolder: true } sf && !IsLocked(sf) && FolderRect(sf, layers) is { } fr
+            && p.X >= fr.X && p.X <= fr.Right && p.Y >= fr.Y && p.Y <= fr.Bottom)
+        {
+            BeginGroupDrag(sf, p, layers, fr);
+            e.Handled = true;
+            Redraw();
+            return;
+        }
+        var hit = PickFor(HitTestUnlocked(p, layers) ?? HitTest(p, layers));
         if (!ReferenceEquals(hit, Selected))
         {
             Selected = hit;
             SelectionChanged?.Invoke(hit);
         }
-        if (hit is { Locked: false })
+        if (hit is { IsFolder: true } && !IsLocked(hit) && FolderRect(hit, layers) is { } box)
+        {
+            BeginGroupDrag(hit, p, layers, box);
+            e.Handled = true;
+        }
+        else if (hit is not null && !hit.IsFolder && !IsLocked(hit))
         {
             BeginDrag(hit, p, layers, Grip.Move);
             e.Handled = true;
@@ -170,8 +217,36 @@ public sealed class PreviewEditor
         Redraw();
     }
 
+    /// <summary>Starts moving a whole folder: every source in it keeps its place relative to the others.</summary>
+    private void BeginGroupDrag(StudioSource folder, Point p, IReadOnlyList<StudioSource> layers, LayoutRect box)
+    {
+        _group = Members(folder, layers).Select(m => (m, RectOf(m, layers))).ToList();
+        _startRect = box;
+        _drag = folder;
+        _grip = Grip.Move;
+        _moved = false;
+        _changedSize = false;
+        _grabOffset = new Point(p.X - box.X, p.Y - box.Y);
+        _layer.CaptureMouse();
+    }
+
+    /// <summary>Moves every source of the folder being dragged so the folder's box sits at (x, y).</summary>
+    private void PlaceGroup(double x, double y)
+    {
+        if (_group is null) return;
+        var (cw, ch) = CanvasSize();
+        double dx = x - _startRect.X, dy = y - _startRect.Y;
+        foreach (var (m, start) in _group)
+        {
+            MakeFree(m, start);
+            if (_kind == CanvasKind.Horizontal) { m.X = (start.X + dx) / cw; m.Y = (start.Y + dy) / ch; }
+            else { m.VX = (start.X + dx) / cw; m.VY = (start.Y + dy) / ch; }
+        }
+    }
+
     private void BeginDrag(StudioSource s, Point p, IReadOnlyList<StudioSource> layers, Grip grip)
     {
+        _group = null;
         _startRect = RectOf(s, layers);
         _drag = s;
         _grip = grip;
@@ -183,8 +258,11 @@ public sealed class PreviewEditor
     }
 
     /// <summary>Switch the source to free placement at its current spot (same size), so it can follow the mouse.</summary>
-    private void MakeFree(StudioSource s)
+    private void MakeFree(StudioSource s) => MakeFree(s, _startRect);
+
+    private void MakeFree(StudioSource s, LayoutRect at)
     {
+        var _startRect = at;
         var (cw, ch) = CanvasSize();
         if (_kind == CanvasKind.Horizontal)
         {
@@ -244,18 +322,18 @@ public sealed class PreviewEditor
             double dx = p.X - (_startRect.X + _grabOffset.X), dy = p.Y - (_startRect.Y + _grabOffset.Y);
             if (Math.Abs(dx) * Scale < 3 && Math.Abs(dy) * Scale < 3) return;
             _moved = true;
-            _mode = ModeNow(); // decided once per drag, so a key let go halfway doesn't mix crop and resize
-            if (_mode == EditMode.Crop)
+            _mode = _group is not null ? EditMode.Move : ModeNow(); // decided once per drag, so a key let go halfway doesn't mix crop and resize
+            if (_mode == EditMode.Crop && _group is null)
             {
                 _sourcePixels = SourcePixels(_drag);
                 if (_sourcePixels is null)
                 {
-                    Hint?.Invoke("Start the preview once so Leapcast knows this source's size, then Ctrl + Shift + drag to crop.");
+                    Hint?.Invoke("Start the preview once to enable cropping.");
                     _mode = EditMode.Resize;
                 }
             }
             // a full-screen source stays full-screen while it's cropped (the rest of the picture refills the canvas)
-            if (!(_mode == EditMode.Crop && _kind == CanvasKind.Horizontal && Anchors.Resolve(_drag) == Anchors.Fill)) MakeFree(_drag);
+            if (_group is null && !(_mode == EditMode.Crop && _kind == CanvasKind.Horizontal && Anchors.Resolve(_drag) == Anchors.Fill)) MakeFree(_drag);
         }
         bool snap = (Keyboard.Modifiers & ModifierKeys.Shift) == 0;
         if (_mode == EditMode.Crop)
@@ -280,7 +358,8 @@ public sealed class PreviewEditor
             double x = p.X - _grabOffset.X, y = p.Y - _grabOffset.Y;
             var r = new LayoutRect(x, y, _startRect.W, _startRect.H);
             if (snap) (x, y) = LayoutMath.Snap(r, cw, ch, 12 / Scale);
-            if (_kind == CanvasKind.Horizontal) { _drag.X = x / cw; _drag.Y = y / ch; }
+            if (_group is not null) PlaceGroup(x, y);
+            else if (_kind == CanvasKind.Horizontal) { _drag.X = x / cw; _drag.Y = y / ch; }
             else { _drag.VX = x / cw; _drag.VY = y / ch; }
             Moving?.Invoke();
         }
@@ -298,6 +377,7 @@ public sealed class PreviewEditor
     {
         if (_drag is null) return;
         _drag = null;
+        _group = null;
         if (_layer.IsMouseCaptured) _layer.ReleaseMouseCapture();
         Redraw();
     }
@@ -316,7 +396,19 @@ public sealed class PreviewEditor
     public bool Nudge(int dx, int dy)
     {
         var s = Selected;
-        if (s is null || s.Locked || !Layers().Contains(s)) return false;
+        if (s is { IsFolder: true } && !IsLocked(s))
+        {
+            var layers = Layers();
+            if (FolderRect(s, layers) is not { } box) return false;
+            _group = Members(s, layers).Select(m => (m, RectOf(m, layers))).ToList();
+            _startRect = box;
+            PlaceGroup(box.X + dx, box.Y + dy);
+            _group = null;
+            Redraw();
+            Moving?.Invoke();
+            return true;
+        }
+        if (s is null || IsLocked(s) || !Layers().Contains(s)) return false;
         var (cw, ch) = CanvasSize();
         _startRect = RectOf(s);
         MakeFree(s);
@@ -348,17 +440,18 @@ public sealed class PreviewEditor
         {
             var r = RectOf(s, layers);
             bool sel = ReferenceEquals(s, Selected);
+            bool locked = IsLocked(s);
             var box = new Rectangle
             {
                 Width = Math.Max(1, r.W), Height = Math.Max(1, r.H),
-                Stroke = sel ? (s.Locked ? LockedBrush : Accent) : Faint, StrokeThickness = sel ? thick : thin,
+                Stroke = sel ? (locked ? LockedBrush : Accent) : Faint, StrokeThickness = sel ? thick : thin,
                 StrokeDashArray = sel ? null : new DoubleCollection { 4, 3 },
                 IsHitTestVisible = false,
             };
             Canvas.SetLeft(box, r.X); Canvas.SetTop(box, r.Y);
             _layer.Children.Add(box);
             if (!sel) continue;
-            if (!s.Locked)
+            if (!locked)
             {
                 double hs = 10 / scale;
                 foreach (var g in Handles)
@@ -373,11 +466,32 @@ public sealed class PreviewEditor
             var label = new Border
             {
                 Background = LabelBg, CornerRadius = new CornerRadius(3 / scale), Padding = new Thickness(5 / scale, 2 / scale, 5 / scale, 2 / scale),
-                Child = new TextBlock { Text = s.Locked ? "🔒 " + s.Name + " (locked)" : s.Name, Foreground = Brushes.White, FontSize = 12 / scale },
+                Child = new TextBlock { Text = locked ? "🔒 " + s.Name : s.Name, Foreground = Brushes.White, FontSize = 12 / scale },
                 IsHitTestVisible = false,
             };
             Canvas.SetLeft(label, Math.Max(0, r.X));
             Canvas.SetTop(label, Math.Max(0, r.Y - 20 / scale));
+            _layer.Children.Add(label);
+        }
+        // a selected folder: one frame around everything in it (moved as one; no resize handles)
+        if (Selected is { IsFolder: true } folder && FolderRect(folder, layers) is { } fr)
+        {
+            bool locked = IsLocked(folder);
+            var frame = new Rectangle
+            {
+                Width = Math.Max(1, fr.W), Height = Math.Max(1, fr.H), Stroke = locked ? LockedBrush : Accent,
+                StrokeThickness = thick, StrokeDashArray = new DoubleCollection { 6, 3 }, IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(frame, fr.X); Canvas.SetTop(frame, fr.Y);
+            _layer.Children.Add(frame);
+            var label = new Border
+            {
+                Background = LabelBg, CornerRadius = new CornerRadius(3 / scale), Padding = new Thickness(5 / scale, 2 / scale, 5 / scale, 2 / scale),
+                Child = new TextBlock { Text = (locked ? "🔒 " : "") + folder.Name, Foreground = Brushes.White, FontSize = 12 / scale },
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(label, Math.Max(0, fr.X));
+            Canvas.SetTop(label, Math.Max(0, fr.Y - 20 / scale));
             _layer.Children.Add(label);
         }
     }

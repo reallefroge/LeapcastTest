@@ -1,5 +1,5 @@
 #define AppName "Leapcast Studio AI"
-#define AppVersion "0.9.4"
+#define AppVersion "0.9.5"
 #define AppPublisher "Leapcast Studio AI"
 #define AppExeName "Leapcast Studio AI.exe"
 

@@ -66,7 +66,7 @@ public static class LayoutMath
         Math.Max(16, SmartTuner.Even((int)Math.Round(cw * Math.Clamp(s.SizePercent, 1, 100) / 100.0)));
 
     /// <summary>Is the source shown on the vertical canvas?</summary>
-    public static bool ShownVertical(StudioSource s) => OnVerticalCanvas(s) && s.Visible;
+    public static bool ShownVertical(StudioSource s) => OnVerticalCanvas(s) && s.Shown;
 
     /// <summary>Drawn on the vertical canvas when visible (hidden sources stay in the pipeline, switched off).</summary>
     public static bool OnVerticalCanvas(StudioSource s)

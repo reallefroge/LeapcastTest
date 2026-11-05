@@ -117,3 +117,16 @@ on every FFmpeg version). FFmpeg's info log reports each input's real size, whic
 - Outputs with the same own bitrate share one encode (bus key `own_<kbps>_<h|v>`). When no destination uses the main
   bitrate, the largest same-bitrate group rides the main encode (`OutputBudget.MainRiders`), which also feeds the
   cache, so e.g. Twitch + YouTube at their own 4000 kbps is one encode instead of three.
+
+
+## Clip end point, folders, status bar (0.9.5)
+
+- Voice clips end where the word started: the recognizer's word audio position is mapped to wall-clock time through
+  the arrival time of each mic chunk (`BlockingAudioStream.WallTimeAt`), minus 0.25 s. Segment timestamps are the
+  pipeline's own (wall-clock seconds since the run's origin, no muxer offset), so the end point converts directly.
+  `SegmentCache.SaveEndingAtAsync` reads each segment's first video PTS from its TS packets (`TsTimestamps`), starts
+  on the segment at or before the window's start (a keyframe) and cuts the end with `-to` (stream copy).
+- Folders are `Folder`-type sources; members carry `FolderId` and sit directly behind the folder in `Sources`
+  (`StudioScene.Normalize`). The pipeline uses `Shown` (own eye and folder eye), never `Visible`; folders are not
+  drawn and are left out of the layout fingerprint. The list shows `Sources` reversed (front first).
+- `StatusSummary` computes the status bar items (testable, no WPF).

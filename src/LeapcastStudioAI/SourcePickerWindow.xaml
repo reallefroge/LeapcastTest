@@ -14,7 +14,7 @@
         <!-- sources already set up in other scenes: added as a copy with every setting -->
         <StackPanel x:Name="ExistingGroup">
           <TextBlock Text="Add one you already set up" FontSize="17" FontWeight="SemiBold" Margin="3,0,0,2"/>
-          <TextBlock Text="A copy with all its settings (device, crop, size, position, filters, hotkey)." Style="{StaticResource Hint}" Margin="3,0,0,8"/>
+          <TextBlock Text="Copies every setting." Style="{StaticResource Hint}" Margin="3,0,0,8"/>
           <ListBox x:Name="ExistingList" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}"
                    HorizontalContentAlignment="Stretch" MouseDoubleClick="SourceType_MouseDoubleClick" SelectionChanged="ExistingList_SelectionChanged">
             <ListBox.ItemTemplate>

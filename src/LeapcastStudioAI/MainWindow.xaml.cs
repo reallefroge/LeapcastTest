@@ -157,6 +157,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        var ver = typeof(MainWindow).Assembly.GetName().Version;
+        VersionLabel.Text = ver is null ? "" : $"v{ver.Major}.{ver.Minor}.{ver.Build}";
         _state = StateStore.Load();
         _engine = new StreamEngine(_audio, new WindowsPlatform(), StateStore.Folder)
         {
@@ -192,7 +194,7 @@ public partial class MainWindow : Window
         _commitTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
         _commitTimer.Tick += (_, _) => { _commitTimer.Stop(); SceneEdited(); };
 
-        HardwareLabel.Text = $"{Environment.ProcessorCount} CPU threads · detecting encoders…";
+        VersionLabel.ToolTip = $"{Environment.ProcessorCount} CPU threads · detecting encoders…";
         // Small laptop screens: fit the work area instead of hanging off the edge.
         var area = SystemParameters.WorkArea;
         if (Width > area.Width || Height > area.Height)
@@ -221,6 +223,7 @@ public partial class MainWindow : Window
         ed.Hint += Status;
         ed.SelectionChanged += s =>
         {
+            if (s is not null && SelectedScene?.FolderOf(s) is { Collapsed: true } f) { f.Collapsed = false; RefreshSourceRows(); }
             _syncingSelection = true;
             SourcesList.SelectedItem = s;
             _syncingSelection = false;
@@ -309,7 +312,7 @@ public partial class MainWindow : Window
         {
             SetBadge("FFMPEG MISSING", "#3A2224", "#FF7A7A");
             EngineStatus.Text = "FFmpeg wasn't found. Reinstall Leapcast (the installer bundles it) or set its path in Settings → Advanced.";
-            HardwareLabel.Text = $"{Environment.ProcessorCount} CPU threads · FFmpeg not found";
+            VersionLabel.ToolTip = $"{Environment.ProcessorCount} CPU threads · FFmpeg not found";
             return;
         }
         _engine.FfmpegPath = ffmpeg;
@@ -318,7 +321,7 @@ public partial class MainWindow : Window
         string? version = await FfmpegLocator.VersionAsync(ffmpeg);
         await _engine.ProbeEncodersAsync();
         var names = _engine.Encoders.Select(x => EncoderCatalog.DisplayName(x.Name) + (x.Tier == EncoderTier.Basic ? " (basic)" : ""));
-        HardwareLabel.Text = $"{Environment.ProcessorCount} CPU threads · Encoders: {string.Join(", ", names)} · FFmpeg {version ?? "?"}";
+        VersionLabel.ToolTip = $"{Environment.ProcessorCount} CPU threads\nEncoders: {string.Join(", ", names)}\nFFmpeg {version ?? "?"}";
         if (_engine.Encoders.Count == 0)
         {
             SetBadge("NO ENCODER", "#3A2224", "#FF7A7A");
@@ -338,7 +341,7 @@ public partial class MainWindow : Window
         {
             _state.Settings.AutoConfigOffered = true;
             Save();
-            if (MessageBox.Show(this, "Let Leapcast test this PC with your scene and pick the smoothest settings? It takes about a minute (keep your game open).",
+            if (MessageBox.Show(this, "Run the auto-configuration wizard? It takes about a minute. Keep the game open.",
                     "Auto-config", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
                 AutoConfig_Click(this, new RoutedEventArgs());
         }
@@ -469,7 +472,7 @@ public partial class MainWindow : Window
         bool want = s.VoiceClipEnabled && _engine.CanClip;
         // the mic in the scene on air; its capture is shared by every copy of it, keyed by the first one
         var scene = (_studio ? _programScene : SelectedScene) ?? SelectedScene;
-        var mic = scene?.Sources.FirstOrDefault(x => SourceTypes.KindOf(x.Type) == SourceKind.Microphone && x.Visible);
+        var mic = scene?.Sources.FirstOrDefault(x => SourceTypes.KindOf(x.Type) == SourceKind.Microphone && x.Shown);
         Guid? micId = null;
         if (mic is not null)
         {
@@ -487,7 +490,11 @@ public partial class MainWindow : Window
             var listener = new VoiceCommandListener();
             BlockingAudioStream? feed = micId is null ? null : new BlockingAudioStream();
             if (feed is not null) _audio.SetSpeechTap(micId, feed.Write);
-            listener.Heard += (text, conf) => { VoiceLog($"HEARD “{text}” ({conf:0.00}): saving a clip"); Dispatcher.BeginInvoke(() => SaveVoiceClip(text)); };
+            listener.Heard += (text, conf, spokenUtc) =>
+            {
+                VoiceLog($"HEARD “{text}” ({conf:0.00}), said at {spokenUtc.ToLocalTime():HH:mm:ss.fff}: saving a clip");
+                Dispatcher.BeginInvoke(() => SaveVoiceClip(text, spokenUtc));
+            };
             listener.Debug += VoiceLog;
             VoiceLog($"listening for “{s.VoiceClipWord}” on {(micId is null ? "Windows' default microphone" : "the scene's microphone")}, sensitivity {s.VoiceClipSensitivity}");
             listener.Start(s.VoiceClipWord, feed, s.VoiceClipSensitivity);
@@ -514,8 +521,8 @@ public partial class MainWindow : Window
         UpdateVoiceClips();
         try { await ApplyToEngineAsync(false); } catch (Exception ex) { Log("Voice clips: " + ex.Message, true); }
         UpdateVoiceClips();
-        Status(on ? $"Voice clips on: say “{_state.Settings.VoiceClipWord}” to save the last {_state.Settings.VoiceClipSeconds} seconds."
-                  : "Voice clips off: Leapcast isn't listening for the word.");
+        Status(on ? $"Voice clips on."
+                  : "Voice clips off.");
     }
 
     private static readonly object VoiceLogLock = new();
@@ -545,17 +552,23 @@ public partial class MainWindow : Window
         VoiceTag.Visibility = Visibility.Collapsed;
     }
 
-    private async void SaveVoiceClip(string heard)
+    /// <summary>How far before the word the clip ends, so none of it is heard.</summary>
+    private static readonly TimeSpan BeforeWord = TimeSpan.FromSeconds(0.25);
+
+    private async void SaveVoiceClip(string heard, DateTime spokenUtc)
     {
         if (_voiceSaving) return;
         _voiceSaving = true;
         var s = _state.Settings;
         try
         {
-            Status($"Heard “{heard}”: saving the last {s.VoiceClipSeconds} seconds…");
-            string path = await _engine.SaveClipAsync(s.VoiceClipSeconds, string.IsNullOrWhiteSpace(s.VoiceClipFolder) ? VoiceClips.DefaultFolder : s.VoiceClipFolder);
+            int seconds = VoiceClips.ClampSeconds(s.VoiceClipSeconds);
+            Status($"Saving clip ({seconds} s)…");
+            string path = await _engine.SaveClipAsync(seconds, string.IsNullOrWhiteSpace(s.VoiceClipFolder) ? VoiceClips.DefaultFolder : s.VoiceClipFolder,
+                endUtc: spokenUtc - BeforeWord);
+            VoiceLog("saved " + path);
             Log($"Clip saved: {Path.GetFileName(path)}", false);
-            Status($"Clip saved: {path}");
+            Status($"Clip saved: {Path.GetFileName(path)}");
         }
         catch (Exception ex) { Log("Clip: " + ex.Message, true); }
         finally { _voiceSaving = false; }
@@ -599,12 +612,13 @@ public partial class MainWindow : Window
         if (st.Health.StartsWith("Struggling") && !_struggleTipShown)
         {
             _struggleTipShown = true;
-            Log("Your PC is falling behind. Click Auto-config (top right) to find lighter settings that stay smooth.", true);
+            Log("Encoder overloaded. Run Tools → Auto-configuration wizard to find lighter settings.", true);
         }
         StatHealth.Foreground = st.Health.StartsWith("Struggling") || st.Health.StartsWith("Upload") ? (Brush)FindResource("BadBrush")
             : st.Reconnecting ? (Brush)FindResource("WarnBrush")
             : st.Health.StartsWith("Excellent") ? (Brush)FindResource("GoodBrush") : (Brush)FindResource("TextBrush");
         StatTime.Text = st.Live ? Fmt(st.LiveFor) : "—";
+        UpdateStatusBar(st);
         UpdateOutputRows(st.Outputs);
 
         if (_ready && !_busy)
@@ -618,6 +632,29 @@ public partial class MainWindow : Window
             UpdatePlanDisplay();
             UpdateCanvasLayout();
         }
+    }
+
+    private void UpdateStatusBar(EngineStatus st)
+    {
+        int fps = _engine.CurrentPlan?.Fps ?? _state.Settings.FrameRate;
+        void Show(FrameworkElement panel, System.Windows.Shapes.Ellipse dot, TextBlock text, StatusItem item)
+        {
+            text.Text = item.Text;
+            panel.ToolTip = string.IsNullOrEmpty(item.Tip) ? null : item.Tip;
+            var brush = (Brush)FindResource(item.Level switch
+            {
+                StatusLevel.Good => "GoodBrush", StatusLevel.Warn => "WarnBrush", StatusLevel.Bad => "BadBrush", _ => "MutedBrush",
+            });
+            dot.Fill = brush;
+            dot.Opacity = item.Level == StatusLevel.Off ? 0.4 : 1;
+            text.Foreground = (Brush)FindResource(item.Level == StatusLevel.Off ? "MutedBrush" : "TextBrush");
+        }
+        Show(SbHealth, SbHealthDot, SbHealthText, StatusSummary.StreamHealth(st));
+        Show(SbBitrate, SbBitrateDot, SbBitrateText, StatusSummary.Bitrate(st));
+        Show(SbEncoder, SbEncoderDot, SbEncoderText, StatusSummary.Encoder(st, fps));
+        Show(SbFps, SbFpsDot, SbFpsText, StatusSummary.Fps(st, fps));
+        Show(SbLive, SbLiveDot, SbLiveText, StatusSummary.Live(st));
+        Show(SbRec, SbRecDot, SbRecText, StatusSummary.Recording(st));
     }
 
     private static string Fmt(TimeSpan t) => t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : t.ToString(@"mm\:ss");
@@ -639,17 +676,17 @@ public partial class MainWindow : Window
         if (vertical) VerticalPlanText.Text = $"Vertical: {plans.Vertical!.Width} × {plans.Vertical.Height} up to {plans.Vertical.CapKbps} kbps";
         var rung = _engine.Performance;
         string tier = _engine.EncodersProbed ? $"{_engine.Tier.ToString().ToLowerInvariant()}-end PC" : "this PC";
-        PerformanceText.Text = !_state.Settings.AdaptivePerformance ? "Adaptive performance is off (Settings → Connection)."
-            : rung.Index == 0 ? $"Adaptive performance: full quality ({tier})."
-            : $"Adaptive performance: {rung.Name.ToLowerInvariant()} ({tier}): {rung.Explanation}.";
+        PerformanceText.Text = !_state.Settings.AdaptivePerformance ? "Adaptive performance: off"
+            : rung.Index == 0 ? $"Adaptive performance: full quality ({tier})"
+            : $"Adaptive performance: {rung.Name.ToLowerInvariant()} ({tier})";
         ReasonsList.ItemsSource = plan.Reasons.Concat(plans.Vertical is not null && vertical ? plans.Vertical.Reasons : Array.Empty<string>()).ToList();
         int enabled = _state.Settings.Outputs.Count(o => o.Enabled);
         int up = _state.Settings.UploadKbps;
         bool tooMuch = up > 0 && plans.UploadKbps > up * 0.75;
         UploadPlanText.Text = enabled == 0 ? ""
-            : $"Each destination gets the full bitrate, and extra destinations cost no extra encoding (one encode, copied to each). Going live on {enabled} destination{(enabled == 1 ? "" : "s")} uploads up to {plans.UploadKbps:N0} kbps in total"
-              + (up > 0 ? $" of your {up:N0} kbps{(tooMuch ? ": that's more than is safe, so lower the bitrate (Settings → Stream) or stream to fewer places." : ".")}"
-                        : ". Scan your upload (Tools → Auto-config or Settings → Connection) to check it fits.");
+            : $"Total upload: {plans.UploadKbps:N0} kbps across {enabled} destination{(enabled == 1 ? "" : "s")}"
+              + (up > 0 ? $" of {up:N0} kbps available{(tooMuch ? ". Too high: lower the bitrate or use fewer destinations." : ".")}"
+                        : ". Upload speed not measured (Tools → Connection test).");
         UploadPlanText.Foreground = tooMuch ? (Brush)FindResource("WarnBrush") : (Brush)FindResource("MutedBrush");
     }
 
@@ -725,7 +762,7 @@ public partial class MainWindow : Window
         w.Closed += (_, _) => _fullscreens--;
         Closed += (_, _) => { try { w.Close(); } catch { } };
         w.Show();
-        Status(_engine.Running ? "Fullscreen preview: press Esc (or double-click) to leave it." : "Start the preview to see the picture full screen. Press Esc to leave full screen.");
+        Status(_engine.Running ? "Fullscreen preview: press Esc (or double-click) to leave it." : "Start the preview first. Press Esc to exit full screen.");
     }
 
     // ------------------------------------------------------------------ docks (show / hide panels)
@@ -808,7 +845,7 @@ public partial class MainWindow : Window
     private bool BusyForProfiles()
     {
         if (!(_engine.Live || _engine.Recording)) return false;
-        MessageBox.Show(this, "End the stream and the recording first: switching profiles restarts Leapcast.", "Profiles", MessageBoxButton.OK, MessageBoxImage.Information);
+        MessageBox.Show(this, "Stop streaming and recording before switching profiles.", "Profiles", MessageBoxButton.OK, MessageBoxImage.Information);
         return true;
     }
 
@@ -985,7 +1022,7 @@ public partial class MainWindow : Window
         ApplyStudioLayout();
         try { await _engine.SetStudioModeAsync(_studio, SelectedScene); }
         catch (Exception ex) { Log(ex.Message, true); }
-        Status(_studio ? "Studio mode: pick a scene to preview and edit it, then click Transition to put it on air." : "Studio mode off.");
+        Status(_studio ? "Studio mode on. Pick a scene to edit, then click Transition." : "Studio mode off.");
     }
 
     private void ApplyStudioLayout()
@@ -1334,7 +1371,7 @@ public partial class MainWindow : Window
         UpdatePlanDisplay();
         UpdateCanvasLayout();
         RedrawEditors();
-        SourcesList.Items.Refresh();
+        RefreshSourceRows();
         try { await ApplyToEngineAsync(true); } catch (Exception ex) { Log(ex.Message, true); }
         if (ok) { Status("Auto-config applied: " + (_engine.CurrentPlan ?? _engine.PlanFor(_state.Settings)).Summary); Log("Auto-config applied.", false); }
     }
@@ -1362,7 +1399,7 @@ public partial class MainWindow : Window
         {
             if (_engine.Live)
             {
-                var answer = MessageBox.Show(this, "Apply the new settings now? Your destinations stay connected and viewers see a short pause (only a new resolution makes them reconnect for a second).",
+                var answer = MessageBox.Show(this, "Apply now? Viewers see a brief pause. A new resolution reconnects each destination.",
                     "Settings", MessageBoxButton.YesNo, MessageBoxImage.Question);
                 if (answer != MessageBoxResult.Yes) { await ApplyToEngineAsync(false); Status("Settings saved: they apply next time you go live."); return; }
             }
@@ -1383,11 +1420,39 @@ public partial class MainWindow : Window
         void Item(string header, Action act, bool isChecked = false)
         {
             var mi = new MenuItem { Header = header, IsChecked = isChecked };
-            mi.Click += (_, _) => { act(); SceneEdited(); RedrawEditors(); SourcesList.Items.Refresh(); };
+            mi.Click += (_, _) => { act(); SceneEdited(); RedrawEditors(); RefreshSourceRows(); };
             menu.Items.Add(mi);
         }
-        Item(s.Locked ? "Unlock (allow moving and resizing)" : "Lock (prevent moving and resizing)", () => s.Locked = !s.Locked, s.Locked);
+        Item(s.Locked ? "Unlock" : "Lock", () => s.Locked = !s.Locked, s.Locked);
+        if (SelectedScene is { } scene)
+        {
+            var folders = scene.Sources.Where(x => x.IsFolder).ToList();
+            var current = scene.FolderOf(s);
+            if (folders.Any(f => !ReferenceEquals(f, current)))
+            {
+                var into = new MenuItem { Header = "Move to folder" };
+                foreach (var f in folders.Where(f => !ReferenceEquals(f, current)))
+                {
+                    var dest = f;
+                    var mi = new MenuItem { Header = dest.Name };
+                    mi.Click += (_, _) => { scene.MoveToFolder(s, dest); RefreshSourceRows(); SceneEdited(); RedrawEditors(); };
+                    into.Items.Add(mi);
+                }
+                menu.Items.Add(into);
+            }
+            if (current is not null) Item($"Remove from \"{current.Name}\"", () => scene.MoveToFolder(s, null));
+        }
         menu.Items.Add(new Separator());
+        if (!SourceTypes.IsVideo(SourceTypes.KindOf(s.Type)))
+        {
+            // audio: nothing to place on a canvas
+            var p = new MenuItem { Header = "Properties…" };
+            p.Click += (_, _) => { SourcesList.SelectedItem = s; SourceProperties_Click(this, new RoutedEventArgs()); };
+            menu.Items.Add(p);
+            Item(s.Visible ? "Mute (hide)" : "Unmute (show)", () => s.Visible = !s.Visible);
+            menu.IsOpen = true;
+            return;
+        }
         if (kind == CanvasKind.Horizontal)
         {
             var k = SourceTypes.KindOf(s.Type);
@@ -1396,7 +1461,7 @@ public partial class MainWindow : Window
             foreach (var a in new[] { Anchors.TopLeft, Anchors.TopRight, Anchors.BottomLeft, Anchors.BottomRight, Anchors.Center })
             {
                 string anchor = a;
-                Item("Snap: " + anchor.ToLowerInvariant(), () => AnchorKeepingSize(s, anchor), Anchors.Resolve(s) == anchor);
+                Item("Align " + anchor.ToLowerInvariant(), () => AnchorKeepingSize(s, anchor), Anchors.Resolve(s) == anchor);
             }
             menu.Items.Add(new Separator());
             if (SourceTypes.IsVideo(k)) Item("Show on the vertical canvas", () => s.VShow = !s.VShow, s.VShow);
@@ -1410,7 +1475,7 @@ public partial class MainWindow : Window
         if (s.CropLeft + s.CropTop + s.CropRight + s.CropBottom > 0)
             Item("Reset crop", () => s.CropLeft = s.CropTop = s.CropRight = s.CropBottom = 0);
         if (kind == CanvasKind.Horizontal ? s.H > 0 : s.VH > 0)
-            Item("Reset shape (undo stretch)", () => { if (kind == CanvasKind.Horizontal) s.H = 0; else s.VH = 0; });
+            Item("Reset shape", () => { if (kind == CanvasKind.Horizontal) s.H = 0; else s.VH = 0; });
         menu.Items.Add(FullscreenMenu(kind, target));
         var props = new MenuItem { Header = "Properties…" };
         props.Click += (_, _) => { SourcesList.SelectedItem = s; SourceProperties_Click(this, new RoutedEventArgs()); };
@@ -1470,7 +1535,7 @@ public partial class MainWindow : Window
             RedrawEditors();
             return;
         }
-        SourcesList.ItemsSource = SelectedScene.Sources;
+        RefreshSourceRows();
         SelectedSceneLabel.Text = SelectedScene.Name;
         RebuildMixer();
         _state.SelectedSceneId = SelectedScene.Id;
@@ -1509,7 +1574,7 @@ public partial class MainWindow : Window
     {
         Save();
         RefreshMixerOnly();
-        SourcesList.Items.Refresh();
+        RefreshSourceRows();
         if (!_ready) return;
         // The engine rebuilds only if the edit changes what's captured/composited; moves are applied live.
         await ApplySceneSafelyAsync(restart: false, "Updating scene…", "Scene updated.");
@@ -1534,7 +1599,7 @@ public partial class MainWindow : Window
             foreach (var ch in _mixer)
             {
                 if (ch.IsMaster) ch.Load(_state.Settings.MasterVolumeDb, false);
-                else if (sources.FirstOrDefault(s => s.Id == ch.SourceId) is { } src) ch.Load(src.VolumeDb, !src.Visible);
+                else if (sources.FirstOrDefault(s => s.Id == ch.SourceId) is { } src) ch.Load(src.VolumeDb, !src.Shown);
             }
             return;
         }
@@ -1544,7 +1609,7 @@ public partial class MainWindow : Window
         {
             string key = PipelineBuilder.InputKey(s);
             var ch = new MixerChannel { SourceId = s.Id, Name = s.Name, MeterId = reps.FirstOrDefault(r => PipelineBuilder.InputKey(r) == key)?.Id ?? s.Id };
-            ch.Load(s.VolumeDb, !s.Visible);
+            ch.Load(s.VolumeDb, !s.Shown);
             ch.Changed = OnMixerChanged;
             _mixer.Add(ch);
         }
@@ -1564,7 +1629,7 @@ public partial class MainWindow : Window
         else if (SelectedScene?.Sources.FirstOrDefault(s => s.Id == ch.SourceId) is { } src)
         {
             src.VolumeDb = ch.Db;
-            if (src.Visible == ch.Muted) { src.Visible = !ch.Muted; SourcesList.Items.Refresh(); }
+            if (src.Visible == ch.Muted) { src.Visible = !ch.Muted; RefreshSourceRows(); }
         }
         _engine.SetAudioLevels(_state.Settings.MasterVolumeDb); // live: gain commands, no rebuild
         if (_mixerSave is null)
@@ -1600,10 +1665,7 @@ public partial class MainWindow : Window
         // Start new scenes with the same capture setup as the current one: handy for "Starting soon" / "BRB" variants.
         if (SelectedScene is not null)
         {
-            foreach (var s in SelectedScene.Sources)
-            {
-                scene.Sources.Add(s.Copy());
-            }
+            foreach (var copy in StudioScene.CopyAll(SelectedScene.Sources)) scene.Sources.Add(copy);
         }
         _state.Scenes.Add(scene);
         ScenesList.SelectedItem = scene; // selection change applies it (adding a scene while running rebuilds once)
@@ -1640,18 +1702,25 @@ public partial class MainWindow : Window
         if (SelectedScene is null) return;
         var picker = new SourcePickerWindow(_state.Scenes, SelectedScene) { Owner = this };
         if (picker.ShowDialog() != true) return;
+        var into = TargetFolder();
         if (picker.SelectedExisting is { } existing)
         {
-            // a copy with every setting: no properties dialog, it's ready to go
-            var copy = existing.Copy();
-            SelectedScene.Sources.Add(copy);
-            SourcesList.SelectedItem = copy;
-            Status($"Added {copy.Name} with the same settings as in the other scene.");
+            // a copy with every setting (a folder with everything in it): no properties dialog, it's ready to go
+            var from = _state.Scenes.FirstOrDefault(sc => sc.Sources.Contains(existing));
+            var originals = existing.IsFolder && from is not null ? from.ChildrenOf(existing).Append(existing) : new[] { existing };
+            var copies = StudioScene.CopyAll(originals);
+            var head = copies[^1];
+            foreach (var c in copies) SelectedScene.Sources.Add(c);
+            if (!head.IsFolder && into is not null) SelectedScene.MoveToFolder(head, into);
+            RefreshSourceRows();
+            SourcesList.SelectedItem = head;
+            Status($"Added {head.Name}.");
             SceneEdited();
             RedrawEditors();
             return;
         }
         if (string.IsNullOrWhiteSpace(picker.SelectedType)) return;
+        if (picker.SelectedType == SourceTypes.Folder) { AddFolder(); return; }
         var source = new StudioSource { Type = picker.SelectedType, Name = picker.SelectedType };
         if (source.Type == SourceTypes.Camera) source.Name = "Webcam";
         if (source.Type == SourceTypes.Window) source.Name = "Wizard101 window";
@@ -1662,6 +1731,8 @@ public partial class MainWindow : Window
         var props = new SourcePropertiesWindow(source, _engine.FfmpegPath) { Owner = this };
         if (props.ShowDialog() != true) return;
         SelectedScene.Sources.Add(source);
+        if (into is not null) SelectedScene.MoveToFolder(source, into);
+        RefreshSourceRows();
         SourcesList.SelectedItem = source;
         SceneEdited();
         RedrawEditors();
@@ -1670,20 +1741,26 @@ public partial class MainWindow : Window
     private void SourceProperties_Click(object sender, RoutedEventArgs e)
     {
         if (SourcesList.SelectedItem is not StudioSource source) return;
+        if (source.IsFolder) { RenameFolder(source); return; }
         var props = new SourcePropertiesWindow(source, _engine.FfmpegPath) { Owner = this };
         if (props.ShowDialog() != true) return;
-        SourcesList.Items.Refresh();
+        RefreshSourceRows();
         SceneEdited();
         RedrawEditors();
     }
 
     private void SourcesList_MouseDoubleClick(object sender, MouseButtonEventArgs e) => SourceProperties_Click(sender, e);
 
-    private void SourceVisible_Click(object sender, RoutedEventArgs e) { SceneEdited(); RedrawEditors(); }
+    private void SourceVisible_Click(object sender, RoutedEventArgs e)
+    {
+        SelectedScene?.ApplyFolders();
+        SceneEdited();
+        RedrawEditors();
+    }
 
     private void SourceLock_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: StudioSource s }) Status(s.Locked ? $"{s.Name} is locked in place." : $"{s.Name} can be moved again.");
+        if (sender is FrameworkElement { DataContext: StudioSource s }) Status(s.Locked ? $"{s.Name} locked." : $"{s.Name} unlocked.");
         Save();
         RedrawEditors();
     }
@@ -1691,24 +1768,186 @@ public partial class MainWindow : Window
     private void RemoveSource_Click(object sender, RoutedEventArgs e)
     {
         if (SelectedScene is null || SourcesList.SelectedItem is not StudioSource source) return;
-        SelectedScene.Sources.Remove(source);
+        if (source.IsFolder)
+        {
+            int n = SelectedScene.ChildrenOf(source).Count;
+            if (n > 0)
+            {
+                var answer = MessageBox.Show(this, $"Also delete the {(n == 1 ? "source" : $"{n} sources")} in \"{source.Name}\"?\n\nYes: delete the folder and its contents.\nNo: delete only the folder.",
+                    "Delete folder", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+                if (answer == MessageBoxResult.Cancel) return;
+                SelectedScene.RemoveFolder(source, keepContents: answer == MessageBoxResult.No);
+            }
+            else SelectedScene.RemoveFolder(source, keepContents: true);
+        }
+        else SelectedScene.Sources.Remove(source);
         _hEditor.Select(null); _vEditor.Select(null);
         SceneEdited();
         RedrawEditors();
     }
 
-    private void MoveSourceUp_Click(object sender, RoutedEventArgs e) => MoveSource(-1);
-    private void MoveSourceDown_Click(object sender, RoutedEventArgs e) => MoveSource(+1);
+    private void MoveSourceUp_Click(object sender, RoutedEventArgs e) => MoveSource(up: true);
+    private void MoveSourceDown_Click(object sender, RoutedEventArgs e) => MoveSource(up: false);
 
-    private void MoveSource(int delta)
+    /// <summary>Up = toward the front (the top of the list is drawn on top).</summary>
+    private void MoveSource(bool up)
     {
         if (SelectedScene is null || SourcesList.SelectedItem is not StudioSource source) return;
-        int i = SelectedScene.Sources.IndexOf(source), j = i + delta;
-        if (i < 0 || j < 0 || j >= SelectedScene.Sources.Count) return;
-        SelectedScene.Sources.Move(i, j);
+        SelectedScene.MoveInList(source, up);
+        RefreshSourceRows();
         SourcesList.SelectedItem = source;
         SceneEdited();
         RedrawEditors();
+    }
+
+    // ------------------------------------------------------------------ sources list: rows, folders, drag and drop
+
+    /// <summary>
+    /// The list shows the front first (the reverse of the drawing order), each folder followed by its contents,
+    /// indented (unless it's folded).
+    /// </summary>
+    private void RefreshSourceRows()
+    {
+        var scene = SelectedScene;
+        if (scene is null) { SourcesList.ItemsSource = null; return; }
+        scene.ApplyFolders();
+        var rows = new List<StudioSource>();
+        foreach (var block in Enumerable.Reverse(scene.Blocks()))
+        {
+            var head = block[^1];
+            head.ListIndent = 0;
+            if (head.IsFolder)
+            {
+                var kids = block.Take(block.Count - 1).ToList();
+                head.ListDetail = kids.Count == 0 ? "Empty folder" : kids.Count == 1 ? "1 source" : $"{kids.Count} sources";
+                rows.Add(head);
+                if (head.Collapsed) continue;
+                foreach (var k in Enumerable.Reverse(kids)) { k.ListIndent = 22; k.ListDetail = k.Type; rows.Add(k); }
+            }
+            else { head.ListDetail = head.Type; rows.Add(head); }
+        }
+        var selected = SourcesList.SelectedItem;
+        _syncingSelection = true;
+        SourcesList.ItemsSource = rows;
+        if (selected is StudioSource sel && rows.Contains(sel)) SourcesList.SelectedItem = sel;
+        _syncingSelection = false;
+    }
+
+    /// <summary>Where a new source goes: the selected folder, or the folder of the selected source.</summary>
+    private StudioSource? TargetFolder() =>
+        SourcesList.SelectedItem is StudioSource s && SelectedScene is { } sc ? (s.IsFolder ? s : sc.FolderOf(s)) : null;
+
+    private void AddFolder_Click(object sender, RoutedEventArgs e) => AddFolder();
+
+    private void AddFolder()
+    {
+        if (SelectedScene is null) return;
+        int n = 1;
+        while (SelectedScene.Sources.Any(x => x.IsFolder && x.Name == $"Folder {n}")) n++;
+        var name = TextPrompt.Ask(this, "New folder", "Folder name:", $"Folder {n}");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        var folder = new StudioSource { Type = SourceTypes.Folder, Name = name.Trim() };
+        SelectedScene.Sources.Add(folder); // top of the list
+        RefreshSourceRows();
+        SourcesList.SelectedItem = folder;
+        Status($"Added folder \"{folder.Name}\". Drag sources onto it.");
+        SceneEdited();
+        RedrawEditors();
+    }
+
+    private void RenameFolder(StudioSource folder)
+    {
+        var name = TextPrompt.Ask(this, "Rename folder", "Folder name:", folder.Name);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        folder.Name = name.Trim();
+        RefreshSourceRows();
+        Save();
+        RedrawEditors();
+    }
+
+    private void FolderCollapse_Click(object sender, RoutedEventArgs e)
+    {
+        Save();
+        RefreshSourceRows();
+    }
+
+    private Point _dragStart;
+    private StudioSource? _dragRow;
+
+    private static T? Ancestor<T>(DependencyObject? d) where T : DependencyObject
+    {
+        while (d is not null and not T) d = d is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d);
+        return d as T;
+    }
+
+    private StudioSource? RowAt(DependencyObject? d) => Ancestor<ListBoxItem>(d)?.DataContext as StudioSource;
+
+    private void SourcesList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        // the eye, lock and fold buttons are clicks, not drags
+        _dragRow = Ancestor<System.Windows.Controls.Primitives.ToggleButton>(e.OriginalSource as DependencyObject) is null ? RowAt(e.OriginalSource as DependencyObject) : null;
+        _dragStart = e.GetPosition(SourcesList);
+    }
+
+    private void SourcesList_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_dragRow is null || e.LeftButton != MouseButtonState.Pressed) return;
+        var p = e.GetPosition(SourcesList);
+        if (Math.Abs(p.X - _dragStart.X) < SystemParameters.MinimumHorizontalDragDistance
+            && Math.Abs(p.Y - _dragStart.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+        var row = _dragRow;
+        _dragRow = null;
+        DragDrop.DoDragDrop(SourcesList, new DataObject(typeof(StudioSource), row), DragDropEffects.Move);
+    }
+
+    private void SourcesList_DragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = e.Data.GetDataPresent(typeof(StudioSource)) ? DragDropEffects.Move : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    /// <summary>Dropped onto a folder: into it. Onto a source: directly above it (its folder, if it's in one). Below the rows: to the bottom.</summary>
+    private void SourcesList_Drop(object sender, DragEventArgs e)
+    {
+        if (SelectedScene is not { } scene || e.Data.GetData(typeof(StudioSource)) is not StudioSource moving) return;
+        var target = RowAt(e.OriginalSource as DependencyObject);
+        if (ReferenceEquals(target, moving)) return;
+        if (target is null) scene.PlaceAtBottom(moving);
+        else if (target.IsFolder && !moving.IsFolder) scene.MoveToFolder(moving, target);
+        else scene.PlaceAbove(moving, target);
+        RefreshSourceRows();
+        SourcesList.SelectedItem = moving;
+        SceneEdited();
+        RedrawEditors();
+    }
+
+    private void SourcesList_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (RowAt(e.OriginalSource as DependencyObject) is not { } s) return;
+        SourcesList.SelectedItem = s;
+        if (s.IsFolder) ShowFolderMenu(s, SourcesList);
+        else ShowSourceMenu(s, CanvasKind.Horizontal, SourcesList);
+        e.Handled = true;
+    }
+
+    private void ShowFolderMenu(StudioSource folder, FrameworkElement target)
+    {
+        var menu = new ContextMenu { PlacementTarget = target };
+        void Item(string header, Action act, bool isChecked = false)
+        {
+            var mi = new MenuItem { Header = header, IsChecked = isChecked };
+            mi.Click += (_, _) => { act(); SelectedScene?.ApplyFolders(); SceneEdited(); RedrawEditors(); };
+            menu.Items.Add(mi);
+        }
+        Item("Rename…", () => RenameFolder(folder));
+        Item(folder.Visible ? "Hide contents" : "Show contents", () => folder.Visible = !folder.Visible);
+        Item(folder.Locked ? "Unlock" : "Lock", () => folder.Locked = !folder.Locked, folder.Locked);
+        menu.Items.Add(new Separator());
+        Item("Ungroup (keep sources)", () => SelectedScene?.RemoveFolder(folder, keepContents: true));
+        var del = new MenuItem { Header = "Delete…" };
+        del.Click += (_, _) => { SourcesList.SelectedItem = folder; RemoveSource_Click(this, new RoutedEventArgs()); };
+        menu.Items.Add(del);
+        menu.IsOpen = true;
     }
 }
 

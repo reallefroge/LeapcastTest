@@ -144,7 +144,7 @@ public sealed class StreamEngine : IDisposable
         if (ranFor > TimeSpan.FromSeconds(15) || producedFrames) return false;
         if (!_runnerCommand.Contains("ddagrab=", StringComparison.Ordinal) || _gpuDisplayFailed) return false;
         _gpuDisplayFailed = true;
-        Message?.Invoke(this, new EngineMessageEventArgs("GPU screen capture isn't working on this PC, so Leapcast switched to compatibility capture (30 FPS).", true));
+        Message?.Invoke(this, new EngineMessageEventArgs("GPU capture failed. Using compatibility capture (30 FPS).", true));
         return true;
     }
     /// <summary>The scene currently on air.</summary>
@@ -345,11 +345,11 @@ public sealed class StreamEngine : IDisposable
         if (gdi && plan.Fps > 30)
         {
             plan = plan with { Fps = 30 };
-            reasons.Add("Capture is using the slower GDI method, so the stream runs at 30 FPS to stay smooth.");
+            reasons.Add("GDI capture: limited to 30 FPS.");
         }
         bool wizard = shown.Any(x => x.WindowTitle.Contains("Wizard101", StringComparison.OrdinalIgnoreCase) || x.Name.Contains("Wizard101", StringComparison.OrdinalIgnoreCase));
         if (wizard && s.ContentType == "HighMotion")
-            reasons.Add("Tip: Wizard101 is turn-based. \"Low-motion\" (30 FPS) looks the same on stream, halves the data and leaves more power for smooth capture.");
+            reasons.Add("Tip: Low motion (30 FPS) suits Wizard101 and halves the bitrate needed.");
 
         // the performance governor's rung: lighter encoder, lower frame rate, smaller picture
         var rung = PerfLevel.At(level);
@@ -366,13 +366,12 @@ public sealed class StreamEngine : IDisposable
             "Quality" => p with { HighQuality = true },
             _ => p,
         };
-        if (s.EncoderPreset == "Performance") reasons.Add("Encoder preset: Performance (the fastest encoder settings, a little more data for the same picture).");
-        else if (s.EncoderPreset == "Quality") reasons.Add("Encoder preset: Quality (slower encoder settings for a slightly sharper picture; uses more GPU/CPU).");
+        if (s.EncoderPreset == "Performance") reasons.Add("Preset: Performance.");
+        else if (s.EncoderPreset == "Quality") reasons.Add("Preset: Quality.");
         plan = Preset(plan);
         var adapted = Rung(plan);
         if (level > 0)
-            reasons.Add($"Adapted to this PC: {rung.Explanation} ({adapted.Width}×{adapted.Height} · {adapted.Fps} FPS). " +
-                        "Leapcast steps back up when the PC has headroom.");
+            reasons.Add($"Reduced for performance: {rung.Explanation} ({adapted.Width}×{adapted.Height} · {adapted.Fps} FPS).");
         plan = adapted with { Reasons = reasons };
         // every canvas runs at the main frame rate (one shared compositor clock)
         var vplan = set.Vertical is null ? null : Rung(Preset(set.Vertical)) with { Fps = plan.Fps };
@@ -412,6 +411,7 @@ public sealed class StreamEngine : IDisposable
         bool restartIfRunning) => Locked(async () =>
     {
         var list = scenes.Count > 0 ? scenes.ToList() : new List<StudioScene> { active };
+        foreach (var sc in list.Append(active)) sc.ApplyFolderVisibility(); // a hidden folder hides what's in it
         int index = list.FindIndex(s => ReferenceEquals(s, active));
         if (index < 0) index = list.FindIndex(s => s.Id == active.Id);
         if (index < 0) { list.Add(active); index = list.Count - 1; }
@@ -483,7 +483,7 @@ public sealed class StreamEngine : IDisposable
             {
                 var layers = PipelineBuilder.VerticalLayers(sc.Sources.ToList(), includeHidden: true)
                     .Where(s => names.Contains(PipelineBuilder.OverlayName(s.Id, CanvasKind.Vertical))).ToList();
-                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto && x.Visible);
+                bool hasCam = layers.Any(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && x.VAuto && x.Shown);
                 foreach (var src in layers)
                 {
                     var rect = LayoutMath.Vertical(src, vc.W, vc.H, PipelineBuilder.AspectFor(src, _knownSizes), hasCam);
@@ -572,7 +572,7 @@ public sealed class StreamEngine : IDisposable
     private bool WantEnabled(VisibilityStage st, int active)
     {
         var s = SourceById(st.SourceId);
-        bool visible = s?.Visible ?? false;
+        bool visible = s?.Shown ?? false;
         return st.Cover ? !visible : visible && (!st.OnlyWhileSceneShown || st.Scene == active || st.Scene == StagedComposited);
     }
 
@@ -794,7 +794,7 @@ public sealed class StreamEngine : IDisposable
     public async Task<string> SaveReplayAsync()
     {
         if (!(_runnerShape?.Main == true && _runner is not null))
-            throw new InvalidOperationException("Turn on the replay buffer (or go live / record) first. Replays are cut from the encoded stream.");
+            throw new InvalidOperationException("Start the replay buffer, recording or stream first.");
         Directory.CreateDirectory(Settings.RecordingFolder);
         string file = Path.Combine(Settings.RecordingFolder, $"Replay {DateTime.Now:yyyy-MM-dd HH-mm-ss}.mp4");
         return await _cache.SaveReplayAsync(RequireFfmpeg(), Math.Clamp(Settings.ReplaySeconds, 5, 600), file);
@@ -807,12 +807,18 @@ public sealed class StreamEngine : IDisposable
     /// Saves the last <paramref name="seconds"/> of the stream to <paramref name="folder"/>, named by the day and
     /// time (voice clips: "Clip"). Cut from the already-encoded stream: no extra encoding, nothing interrupted.
     /// </summary>
-    public async Task<string> SaveClipAsync(int seconds, string folder, CancellationToken ct = default)
+    /// <param name="endUtc">End the clip here (just before the word was said); null = the last seconds up to now.</param>
+    public async Task<string> SaveClipAsync(int seconds, string folder, CancellationToken ct = default, DateTime? endUtc = null)
     {
-        if (!CanClip) throw new InvalidOperationException("Nothing to clip yet: clips come from the stream while you're live, recording or have the replay buffer on.");
+        if (!CanClip) throw new InvalidOperationException("Nothing to clip. Start streaming, recording or the replay buffer.");
         Directory.CreateDirectory(folder);
-        string file = VoiceClips.PathFor(folder, DateTime.Now);
-        return await _cache.SaveReplayAsync(RequireFfmpeg(), Math.Clamp(seconds, 5, 600), file, ct);
+        var now = DateTime.UtcNow;
+        var end = endUtc is { } e && e <= now && now - e < TimeSpan.FromSeconds(20) ? e : (DateTime?)null;
+        string file = VoiceClips.PathFor(folder, (end ?? now).ToLocalTime());
+        seconds = Math.Clamp(seconds, 5, 600);
+        return end is { } at
+            ? await _cache.SaveEndingAtAsync(RequireFfmpeg(), seconds, at, file, ct)
+            : await _cache.SaveReplayAsync(RequireFfmpeg(), seconds, file, ct);
     }
 
     public sealed record BenchmarkResult(double Fps, int TargetFps, double Speed, long Dropped, string Health)
@@ -883,9 +889,9 @@ public sealed class StreamEngine : IDisposable
     {
         var ffmpeg = RequireFfmpeg();
         var scene = Scene ?? throw new InvalidOperationException("No scene selected.");
-        if (!scene.Sources.Contains(camera) || !camera.Visible)
+        if (!scene.Sources.Contains(camera) || !camera.Shown)
             throw new InvalidOperationException("Show the camera in the current scene first.");
-        if (!scene.Sources.Any(x => x.Visible && SourceTypes.KindOf(x.Type) == SourceKind.Microphone))
+        if (!scene.Sources.Any(x => x.Shown && SourceTypes.KindOf(x.Type) == SourceKind.Microphone))
             throw new InvalidOperationException("Add your microphone to the current scene first (the clap is heard through it).");
         bool hadReplay = ReplayBuffer;
         if (!(_runnerShape?.Main == true && _runner is not null)) await SetReplayBufferAsync(true);
@@ -1039,7 +1045,7 @@ public sealed class StreamEngine : IDisposable
             browserUses.TryAdd(PipelineBuilder.InputKey(src), src);
         var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)));
         lock (_windows.CaptureSizes) foreach (var (k, v) in _windows.CaptureSizes) _knownSizes[k] = v;
-        string? segPattern = shape.Main ? _cache.BeginSession() : null;
+        string? segPattern = shape.Main ? _cache.BeginSession(origin) : null;
         _stuckWarned = false;
 
         // One TS bus per encode that feeds destinations; outputs subscribe/unsubscribe at will.
@@ -1342,8 +1348,8 @@ public sealed class StreamEngine : IDisposable
                 if (!_stuckWarned && _cache.SegmentsStuck())
                 {
                     _stuckWarned = true;
-                    Message?.Invoke(this, new EngineMessageEventArgs($"{EncoderCatalog.DisplayName(CurrentPlan?.Encoder ?? "")} isn't making keyframes, so replays and voice clips " +
-                        "can't be cut and viewers may have trouble joining. Pick another encoder in Settings → Stream.", true));
+                    Message?.Invoke(this, new EngineMessageEventArgs($"{EncoderCatalog.DisplayName(CurrentPlan?.Encoder ?? "")} is not producing keyframes. Replays and clips will fail. " +
+                        "Choose another encoder in Settings → Stream.", true));
                 }
                 if (_outputs.AnyActive && _runnerShape?.MainBus == true)
                 {
@@ -1433,13 +1439,13 @@ public sealed class StreamEngine : IDisposable
         string text = d.Action switch
         {
             PerformanceGovernor.Action.LowerBitrate =>
-                $"Your upload couldn't keep up ({string.Join(", ", slow)}), so the bitrate was lowered 25% (the stream stays connected).",
+                $"Upload congestion ({string.Join(", ", slow)}): bitrate lowered 25%.",
             PerformanceGovernor.Action.StepDown =>
-                $"Adapting to this PC: {d.Reason}, so Leapcast switched to {PerfLevel.At(d.Level).Explanation}" +
+                $"Encoder overloaded ({d.Reason}). Switched to {PerfLevel.At(d.Level).Explanation}" +
                 (!_outputs.AnyActive ? "."
                  : PlansFor(Settings, before).Main is var was && PlansFor(Settings, d.Level).Main is var now && (was.Width, was.Height) == (now.Width, now.Height)
-                    ? " (the stream stays connected; viewers may see a short pause)." : " (outputs reconnect for a second)."),
-            _ => $"This PC has headroom again, so Leapcast stepped back up to {PerfLevel.At(d.Level).Name.ToLowerInvariant()}.",
+                    ? " (brief pause, stream stays connected)." : " (destinations reconnect)."),
+            _ => $"Performance recovered. Back to {PerfLevel.At(d.Level).Name.ToLowerInvariant()}.",
         };
         _ = Locked(async () =>
         {

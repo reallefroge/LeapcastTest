@@ -67,7 +67,7 @@ public partial class SettingsWindow : Window
         SelectTag(ReplayBox, current.ReplaySeconds.ToString(CultureInfo.InvariantCulture));
         VoiceClipBox.IsChecked = current.VoiceClipEnabled;
         VoiceWordBox.Text = current.VoiceClipWord;
-        SelectTag(VoiceSecondsBox, current.VoiceClipSeconds.ToString(CultureInfo.InvariantCulture));
+        VoiceSecondsBox.Text = VoiceClips.ClampSeconds(current.VoiceClipSeconds).ToString(CultureInfo.InvariantCulture);
         VoiceFolderBox.Text = current.VoiceClipFolder;
         SelectTag(VoiceSensitivityBox, current.VoiceClipSensitivity);
         ReconnectBox.IsChecked = current.AutoReconnect;
@@ -84,6 +84,13 @@ public partial class SettingsWindow : Window
         _loaded = true;
         UpdatePlan();
         Closed += (_, _) => _testCts?.Cancel();
+    }
+
+    private void VoiceSecondsBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        bool ok = VoiceClips.ParseSeconds(VoiceSecondsBox.Text) is not null;
+        VoiceSecondsHint.Text = ok ? "" : $"Enter a whole number from {VoiceClips.MinSeconds} to {VoiceClips.MaxSeconds}.";
+        VoiceSecondsHint.Visibility = ok ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void VoiceClipBox_Changed(object sender, RoutedEventArgs e)
@@ -132,7 +139,7 @@ public partial class SettingsWindow : Window
         s.ReplaySeconds = int.Parse(TagOf(ReplayBox, "60"), CultureInfo.InvariantCulture);
         s.VoiceClipEnabled = VoiceClipBox.IsChecked == true;
         s.VoiceClipWord = string.IsNullOrWhiteSpace(VoiceWordBox.Text) ? "clip" : VoiceWordBox.Text.Trim().Split(' ')[0];
-        s.VoiceClipSeconds = int.Parse(TagOf(VoiceSecondsBox, "50"), CultureInfo.InvariantCulture);
+        s.VoiceClipSeconds = VoiceClips.ParseSeconds(VoiceSecondsBox.Text) ?? Result.VoiceClipSeconds;
         s.VoiceClipFolder = string.IsNullOrWhiteSpace(VoiceFolderBox.Text) ? VoiceClips.DefaultFolder : VoiceFolderBox.Text.Trim();
         s.VoiceClipSensitivity = TagOf(VoiceSensitivityBox, "High");
         s.AutoReconnect = ReconnectBox.IsChecked == true;
@@ -284,6 +291,14 @@ public partial class SettingsWindow : Window
             Tabs.SelectedItem = Tabs.Items.OfType<TabItem>().First(t => (t.Tag as string) == "Hotkeys");
             MessageBox.Show(this, $"{string.Join(", ", doubles)} is used for more than one thing. Give each its own combination.", "Hotkeys",
                 MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (VoiceClips.ParseSeconds(VoiceSecondsBox.Text) is null)
+        {
+            Tabs.SelectedItem = Tabs.Items.OfType<TabItem>().First(t => (t.Tag as string) == "Recording");
+            MessageBox.Show(this, $"Clip length must be a whole number from {VoiceClips.MinSeconds} to {VoiceClips.MaxSeconds} seconds.", "Voice clips",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            VoiceSecondsBox.Focus();
             return;
         }
         if (s.QualityProfile == "Custom" && !SmartTuner.TryParseResolution(s.Resolution, out _, out _))

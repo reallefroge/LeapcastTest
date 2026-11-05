@@ -22,7 +22,7 @@
           <Button DockPanel.Dock="Right" Content="Clear" Margin="6,0,0,0" Click="ClearHotkey_Click"/>
           <TextBox x:Name="HotkeyBox" IsReadOnly="True" PreviewKeyDown="HotkeyBox_PreviewKeyDown" ToolTip="Click here, then press the keys"/>
         </DockPanel>
-        <TextBlock Text="Click the box and press a combination such as Ctrl+Shift+1. It works while the game has focus; copies of this source in other scenes with the same hotkey switch together."
+        <TextBlock Text="Click the box, then press the keys. Copies in other scenes with the same hotkey toggle together."
                    Style="{StaticResource Hint}"/>
 
         <!-- Display -->
@@ -38,7 +38,7 @@
             <Button DockPanel.Dock="Right" Content="Refresh" Click="RefreshWindows_Click"/>
             <ComboBox x:Name="WindowBox" IsEditable="True"/>
           </DockPanel>
-          <TextBlock Text="Pick the game's window. GPU window capture works in windowed or borderless mode, even when other windows cover it; for exclusive fullscreen use Display Capture."
+          <TextBlock Text="Works in windowed and borderless mode. For exclusive fullscreen, use Display Capture."
                      Style="{StaticResource Hint}"/>
         </StackPanel>
 
@@ -46,15 +46,15 @@
         <StackPanel x:Name="CaptureGroup">
           <TextBlock Text="Capture method" Style="{StaticResource FieldLabel}"/>
           <ComboBox x:Name="MethodBox">
-            <ComboBoxItem Content="GPU (smooth, works with DirectX games, recommended)" Tag="Auto"/>
-            <ComboBoxItem Content="GDI (old compatibility mode: slow, 30 FPS max)" Tag="GDI"/>
+            <ComboBoxItem Content="GPU (recommended)" Tag="Auto"/>
+            <ComboBoxItem Content="GDI (compatibility, 30 FPS max)" Tag="GDI"/>
           </ComboBox>
           <CheckBox x:Name="CursorBox" Content="Show mouse cursor"/>
-          <TextBlock Text="Crop (pixels): left, top, right, bottom" Style="{StaticResource FieldLabel}"/>
+          <TextBlock Text="Crop (px): left, top, right, bottom" Style="{StaticResource FieldLabel}"/>
           <UniformGrid Columns="4">
             <TextBox x:Name="CropL"/><TextBox x:Name="CropT"/><TextBox x:Name="CropR"/><TextBox x:Name="CropB"/>
           </UniformGrid>
-          <TextBlock Text="Tip: cropping out a second monitor or taskbar is free and saves bandwidth." Style="{StaticResource Hint}"/>
+          <TextBlock Text="Cropping costs nothing and saves bandwidth." Style="{StaticResource Hint}"/>
         </StackPanel>
 
         <!-- Camera -->
@@ -80,14 +80,14 @@
             <ComboBoxItem Content="30 (recommended)" Tag="30"/>
             <ComboBoxItem Content="60" Tag="60"/>
           </ComboBox>
-          <CheckBox x:Name="DenoiseBox" Content="Smart denoise (removes sensor grain: big bandwidth saver in dim rooms)"/>
+          <CheckBox x:Name="DenoiseBox" Content="Denoise (saves bandwidth in low light)"/>
           <CheckBox x:Name="MirrorBox" Content="Mirror"/>
-          <TextBlock Text="Sync offset (ms): raise it if your lips move after you're heard" Style="{StaticResource FieldLabel}"/>
+          <TextBlock Text="Sync offset (ms)" Style="{StaticResource FieldLabel}"/>
           <DockPanel>
             <Button x:Name="ClapButton" DockPanel.Dock="Right" Content="Sync automatically (clap test)" Click="ClapTest_Click"/>
             <TextBox x:Name="SyncOffsetBox"/>
           </DockPanel>
-          <TextBlock x:Name="ClapHint" Text="Built-in and USB cameras show your picture a little after your voice. The clap test measures exactly how much: click it, then clap 4–5 times where the camera can see your hands."
+          <TextBlock x:Name="ClapHint" Text="Webcams lag behind audio. Run the clap test and clap 4–5 times in view to measure it."
                      Style="{StaticResource Hint}"/>
         </StackPanel>
 
@@ -104,7 +104,7 @@
         <StackPanel x:Name="BrowserGroup">
           <TextBlock Text="Web address (URL)" Style="{StaticResource FieldLabel}"/>
           <TextBox x:Name="UrlBox"/>
-          <TextBlock Text="Paste your chat's pop-out or overlay link (Twitch pop-out chat, YouTube live chat, StreamElements/Streamlabs widgets, a local multichat page). A local .html file works too."
+          <TextBlock Text="A pop-out chat or overlay URL, or a local .html file."
                      Style="{StaticResource Hint}"/>
           <UniformGrid Columns="3">
             <StackPanel>
@@ -126,7 +126,7 @@
           </UniformGrid>
           <TextBlock Text="Custom CSS" Style="{StaticResource FieldLabel}"/>
           <TextBox x:Name="CssBox" AcceptsReturn="True" MinHeight="54" TextWrapping="Wrap" FontFamily="Consolas"/>
-          <TextBlock Text="The default makes the page background see-through. Pages only cost CPU when something on them changes."
+          <TextBlock Text="Transparent background by default."
                      Style="{StaticResource Hint}"/>
         </StackPanel>
 
@@ -153,11 +153,11 @@
           <StackPanel x:Name="FillGroup">
             <TextBlock Text="When it fills the screen" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="FillBox">
-              <ComboBoxItem Content="Fill: trim the edges (no black bars, never stretched; recommended)" Tag="Crop"/>
-              <ComboBoxItem Content="Fit: show everything (black bars if the shape differs)" Tag="Fit"/>
-              <ComboBoxItem Content="Stretch (distorts a picture of a different shape)" Tag="Stretch"/>
+              <ComboBoxItem Content="Fill: crop to fit (recommended)" Tag="Crop"/>
+              <ComboBoxItem Content="Fit: letterbox" Tag="Fit"/>
+              <ComboBoxItem Content="Stretch" Tag="Stretch"/>
             </ComboBox>
-            <TextBlock Text="Example: an 800×500 game window (16:10) fills a 16:9 stream with ~5% trimmed from the top and bottom."
+            <TextBlock Text="An 800×500 window fills 16:9 by cropping about 5% from the top and bottom."
                        Style="{StaticResource Hint}"/>
           </StackPanel>
           <TextBlock x:Name="SizeLabel" Text="Width (% of the stream width)" Style="{StaticResource FieldLabel}"/>
@@ -175,7 +175,7 @@
           <ComboBox x:Name="AudioDeviceBox"/>
           <TextBlock Text="Volume (dB, 0 = unchanged)" Style="{StaticResource FieldLabel}"/>
           <TextBox x:Name="VolumeBox"/>
-          <CheckBox x:Name="NoiseBox" Content="Noise cleanup (removes fans, hum and keyboard hiss)"/>
+          <CheckBox x:Name="NoiseBox" Content="Noise suppression"/>
         </StackPanel>
       </StackPanel>
     </ScrollViewer>

@@ -380,6 +380,73 @@ Console.WriteLine("Upload speed scan (kbps), against a local server limited to ~
     Check(2 * (perDest + 160) + 2000 + 160 <= 8000 * 0.75 + 1, $"auto-config picks a bitrate where every destination fits the upload ({perDest:N0} kbps each for 2 destinations + vertical on 8,000 kbps)");
 }
 
+Console.WriteLine("Sources list: top = in front; folders show, hide, lock and move what's in them together");
+{
+    var sc = new StudioScene();
+    StudioSource Add(string n, string t = SourceTypes.Image) { var x = new StudioSource { Name = n, Type = t }; sc.Sources.Add(x); return x; }
+    var fGame = Add("Game", SourceTypes.Window); var fCam = Add("Cam", SourceTypes.Camera); var fLogo = Add("Logo"); var fChat = Add("Chat", SourceTypes.Browser);
+    var fFolder = Add("Overlays", SourceTypes.Folder);
+    string Order() => string.Join(",", sc.Sources.Select(x => x.Name));
+    sc.MoveToFolder(fLogo, fFolder); sc.MoveToFolder(fChat, fFolder);
+    Check(Order() == "Game,Cam,Logo,Chat,Overlays" && sc.ChildrenOf(fFolder).Count == 2,
+        $"sources dropped into a folder sit together right behind it, newest on top ({Order()})");
+    fFolder.Visible = false; sc.ApplyFolders();
+    Check(!fLogo.Shown && !fChat.Shown && fLogo.Visible && fGame.Shown, "hiding the folder hides what's in it, and keeps each source's own eye");
+    var hiddenLayers = PipelineBuilder.VisibleLayers(sc.Sources).Select(x => x.Name).ToList();
+    Check(!hiddenLayers.Contains("Logo") && !hiddenLayers.Contains("Overlays") && hiddenLayers.Contains("Cam"), $"…so the encoder doesn't draw them, and never draws a folder ({string.Join(",", hiddenLayers)})");
+    fFolder.Visible = true; sc.ApplyFolders();
+    fFolder.Locked = true;
+    Check(sc.IsLocked(fLogo) && !sc.IsLocked(fCam), "locking a folder locks what's in it");
+    fFolder.Locked = false;
+    sc.MoveInList(fCam, up: true);
+    Check(Order() == "Game,Logo,Chat,Overlays,Cam", $"moving a source up passes a whole folder ({Order()})");
+    sc.MoveInList(fFolder, up: false);
+    Check(Order() == "Logo,Chat,Overlays,Game,Cam", $"a folder moves with everything in it ({Order()})");
+    sc.MoveInList(fChat, up: true);
+    Check(Order() == "Logo,Overlays,Chat,Game,Cam" && fChat.FolderId is null, $"moving the top item of a folder up takes it out ({Order()})");
+    sc.PlaceAbove(fChat, fLogo);
+    Check(Order() == "Logo,Chat,Overlays,Game,Cam" && fChat.FolderId == fFolder.Id, $"dropping onto a source in a folder puts it in that folder above it ({Order()})");
+    var copies = StudioScene.CopyAll(sc.Sources);
+    var cf = copies.First(x => x.IsFolder);
+    Check(copies.Count(x => x.FolderId == cf.Id) == 2 && copies.All(x => x.Id != fFolder.Id), "copying a scene keeps its folders together (new ids)");
+    sc.RemoveFolder(fFolder, keepContents: true);
+    Check(Order() == "Logo,Chat,Game,Cam" && sc.Sources.All(x => x.FolderId is null), $"ungrouping keeps the sources ({Order()})");
+    Check(VoiceClips.ParseSeconds("45") == 45 && VoiceClips.ParseSeconds("15 s") == 15 && VoiceClips.ParseSeconds("14") is null
+          && VoiceClips.ParseSeconds("61") is null && VoiceClips.ParseSeconds("abc") is null && VoiceClips.ClampSeconds(120) == 60,
+        "clip length: a whole number of seconds from 15 to 60");
+    var bs2 = new BlockingAudioStream();
+    var t0 = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
+    for (int i = 0; i < 10; i++) bs2.Write(new short[1600], t0 + TimeSpan.FromMilliseconds(100 * (i + 1))); // 100 ms each, arriving as they end
+    var rb = new byte[16000 * 2];
+    bs2.Read(rb, 0, 16000); // half a second
+    var at = bs2.WallTimeAt(TimeSpan.FromSeconds(0.25));
+    Check(at is { } w && Math.Abs((w - (t0 + TimeSpan.FromSeconds(0.25))).TotalMilliseconds) < 1,
+        $"a position in the recognizer's audio maps back to when it was said ({(at is { } w2 ? (w2 - t0).TotalSeconds : double.NaN):0.000} s)");
+}
+
+Console.WriteLine("Status bar: stream health, uptime, record time, bitrate, encoder load");
+{
+    OutputStatus O(OutputState st, double queued) => new(Guid.NewGuid(), "Twitch", "Twitch", false, st, 4000, TimeSpan.FromMinutes(5), queued, null);
+    EngineStatus S(bool live, bool rec, double speed, double fps, params OutputStatus[] outs) =>
+        new(true, live, rec, false, false, "", 4000, fps, 12, 0, speed, 3900, 3800, TimeSpan.FromSeconds(3725), TimeSpan.FromSeconds(65), "", null)
+        { Outputs = outs, UploadKbps = 4012 };
+    var ok = S(true, true, 1.0, 60, O(OutputState.Live, 0.2));
+    Check(StatusSummary.Live(ok).Text == "LIVE 01:02:05" && StatusSummary.Recording(ok).Text == "REC 00:01:05",
+        $"uptime and record time read like OBS ({StatusSummary.Live(ok).Text}, {StatusSummary.Recording(ok).Text})");
+    Check(StatusSummary.StreamHealth(ok).Level == StatusLevel.Good && StatusSummary.Bitrate(ok) is { Text: "4,012 kbps", Level: StatusLevel.Good }
+          && StatusSummary.Encoder(ok, 60) is { Text: "Encoder OK", Level: StatusLevel.Good },
+        $"a healthy stream: {StatusSummary.StreamHealth(ok).Text} · {StatusSummary.Bitrate(ok).Text} · {StatusSummary.Encoder(ok, 60).Text}");
+    var congested = S(true, false, 1.0, 60, O(OutputState.Live, 3.2));
+    Check(StatusSummary.StreamHealth(congested).Level == StatusLevel.Bad && StatusSummary.Bitrate(congested).Level == StatusLevel.Bad,
+        $"upload falling behind shows as poor ({StatusSummary.StreamHealth(congested).Text})");
+    var slow = S(true, false, 0.82, 48, O(OutputState.Live, 0.1));
+    Check(StatusSummary.Encoder(slow, 60) is { Text: "Encoder overloaded", Level: StatusLevel.Bad } && StatusSummary.Encoder(slow, 60).Tip.Contains("0.82×"),
+        $"an overloaded encoder says so, with the numbers on hover ({StatusSummary.Encoder(slow, 60).Tip.Split('\n')[0]})");
+    var idle = new EngineStatus(false, false, false, false, false, null, 0, 0, 0, 0, 0, 0, 0, TimeSpan.Zero, TimeSpan.Zero, "Idle", null);
+    Check(StatusSummary.Live(idle).Level == StatusLevel.Off && StatusSummary.Encoder(idle, 60).Text == "Encoder: idle" && StatusSummary.StreamHealth(idle).Text == "Stream: offline",
+        "idle: everything dimmed");
+}
+
 Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by day and time");
 {
     // AMD's encoder ignored -g on the user's PC (one keyframe, then none): keyframes are forced every 2 s
@@ -414,6 +481,9 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
     }
     await Encode("red", 30, 60, cache.BeginSession(), true);   // an earlier run: proper 2 s pieces
     cache.EndSession();
+    var redSegs = Directory.GetFiles(Path.Combine(segRoot, "s0001"), "seg_*.ts").OrderBy(f => f).Take(4).Select(TsTimestamps.FirstPts).ToList();
+    Check(redSegs.All(t => t is not null) && redSegs.Zip(redSegs.Skip(1), (x, y) => y!.Value - x!.Value).All(d => Math.Abs(d - 2) < 0.1),
+        $"each cached piece's start time is read from its own packets ({string.Join(", ", redSegs.Select(t => $"{t:0.00}"))} s)");
     string trimmed = Path.Combine(work, "clip-trim.mp4");
     await cache.SaveReplayAsync(ffmpeg, 10, trimmed);
     var tp = await ProbeAsync(trimmed);
@@ -695,7 +765,7 @@ async Task AdaptSection(StudioScene light)
     File.WriteAllText(Path.Combine(work, "adapt-run.log"), ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")));
     Console.WriteLine($"    rungs: {(rungs.Count == 0 ? "none needed" : string.Join(", ", rungs))}; final {engine.CurrentPlan?.Summary}, speed {final.Speed:0.00}, {final.Health}");
     bool adapted;
-    lock (messages) adapted = messages.Any(m => m.StartsWith("Adapting to this PC"));
+    lock (messages) adapted = messages.Any(m => m.StartsWith("Encoder overloaded"));
     Check(final.Running && final.Speed >= 0.95 && !final.Health.StartsWith("Struggling"),
         $"ends up keeping up with real time on its own (speed {final.Speed:0.00}, {final.Health})");
     if (engine.StallRestarts > 0) Console.WriteLine($"    note: the stall watchdog restarted a frozen pipeline {engine.StallRestarts}× along the way");
@@ -996,7 +1066,7 @@ if (OperatingSystem.IsWindows() && engine.GpuWindowCaptureSupported)
     await engine.UpdateAsync(new[] { wscene }, wscene, WithEncoder(settings, "libx264"), false);
     try
     {
-        bool sawFallback() { lock (messages) return messages.Any(m => m.Contains("switched to compatibility capture")); }
+        bool sawFallback() { lock (messages) return messages.Any(m => m.Contains("compatibility capture")); }
         try { await engine.SetPreviewAsync(true); } catch (Exception ex) { Console.WriteLine("    gpu-window: start: " + ex.Message); }
         var gw = Stopwatch.StartNew();
         while (wf < 30 && gw.Elapsed < TimeSpan.FromSeconds(20)) await Task.Delay(200);
@@ -1288,6 +1358,32 @@ async Task LiveSwitchSection(StudioScene light)
     Check(File.Exists(clip) && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(clip), @"^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}( \(\d+\))?\.mp4$")
           && cp.ok && cp.duration is > 5 and < 11 && engine.PipelineStarts == starts,
         $"a clip of the last seconds is saved as {Path.GetFileName(clip)} ({cp.duration:0.0}s, no rebuild)");
+    // a voice clip ends just before the word: cut at a moment in real time, not "now"
+    async Task<(int r, int g, int b)> ClipEnd(string file, double fx, double fy)
+    {
+        var px = await RawAsync(new[] { "-v", "error", "-sseof", "-0.3", "-i", file, "-frames:v", "1", "-vf",
+            $"scale=640:360,crop=6:6:{(int)(fx * 640) - 3}:{(int)(fy * 360) - 3},scale=1:1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-" });
+        return px.Length >= 3 ? (px[0], px[1], px[2]) : (-1, -1, -1);
+    }
+    card.Visible = true;
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    await Task.Delay(2500);
+    var whileShown = DateTime.UtcNow;
+    await Task.Delay(1500);
+    card.Visible = false;
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
+    var hiddenAt = DateTime.UtcNow;
+    await Task.Delay(500);
+    string beforeHide = await engine.SaveClipAsync(4, clipDir, endUtc: whileShown);
+    string afterHide = await engine.SaveClipAsync(4, clipDir, endUtc: hiddenAt + TimeSpan.FromSeconds(1.2));
+    var cardY = (0.05 * 360 + 36) / 360;
+    var endA = await ClipEnd(beforeHide, 0.15, cardY);
+    var endB = await ClipEnd(afterHide, 0.15, cardY);
+    var pa = await ProbeAsync(beforeHide);
+    Check(endA.r > 150 && endA.g < 80 && !(endB.r > 150 && endB.g < 80) && pa.duration is > 3.5 and < 7,
+        $"a clip ends at the moment asked for, not when it's saved: ending before the card was hidden shows it ({endA}), ending after doesn't ({endB}); {pa.duration:0.0}s long");
+    card.Visible = true;
+    await engine.UpdateAsync(new[] { hs }, hs, hset, false);
     Check(!ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log")).Contains("ret:-"), "ffmpeg accepted every show/hide command");
 
     Console.WriteLine("Studio mode: the Preview stages a scene beside the Program; Transition puts it on air");

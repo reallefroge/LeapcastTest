@@ -24,8 +24,8 @@ public sealed class VoiceCommandListener : IDisposable
     public static readonly TimeSpan Cooldown = TimeSpan.FromSeconds(6);
     private (float Alone, float InSentence, int Rejection, bool UseRejected) _level = VoiceClips.Sensitivity("High");
 
-    /// <summary>The word was heard: (what was recognized, confidence).</summary>
-    public event Action<string, float>? Heard;
+    /// <summary>The word was heard: (what was recognized, confidence, when the word started being said, UTC).</summary>
+    public event Action<string, float, DateTime>? Heard;
     /// <summary>Everything the recognizer reports (diagnostics: speech detected, recognized, rejected).</summary>
     public event Action<string>? Debug;
 
@@ -91,20 +91,48 @@ public sealed class VoiceCommandListener : IDisposable
         var r = e.Result;
         if (r is null) return;
         Debug?.Invoke($"recognized: {r.Text} ({r.Confidence:0.00}, {r.Grammar?.Name})");
-        if (Accept(r)) return;
+        if (Accept(r, r)) return;
         // the best guess isn't the word, but a close second may be ("clip" vs "click" in a noisy room)
-        foreach (var alt in r.Alternates.Skip(1).Take(4)) if (Accept(alt)) return;
+        foreach (var alt in r.Alternates.Skip(1).Take(4)) if (Accept(alt, r)) return;
     }
 
     private void OnRejected(object? sender, SpeechRecognitionRejectedEventArgs e)
     {
         var alts = e.Result?.Alternates.Take(5).ToList() ?? new List<RecognizedPhrase>();
         Debug?.Invoke("rejected: " + string.Join(" | ", alts.Select(a => $"{a.Text} ({a.Confidence:0.00}, {a.Grammar?.Name})")));
-        if (!_level.UseRejected) return;
-        foreach (var alt in alts) if (Accept(alt)) return;
+        if (!_level.UseRejected || e.Result is null) return;
+        foreach (var alt in alts) if (Accept(alt, e.Result)) return;
     }
 
-    private bool Accept(RecognizedPhrase p)
+    /// <summary>
+    /// When the word started being said: the word's own audio position when the recognizer gives one (else the
+    /// phrase's start), turned into a time through the audio stream's arrival times. Without a stream (Windows'
+    /// default mic), counted back from now by the phrase's length, plus the recognizer's end-of-speech wait.
+    /// </summary>
+    private DateTime SpokenAt(RecognizedPhrase p, RecognitionResult result)
+    {
+        var now = DateTime.UtcNow;
+        try
+        {
+            TimeSpan? pos = null;
+            if (ReferenceEquals(p, result))
+            {
+                var unit = result.Words.FirstOrDefault(w => VoiceClips.Matches(w.Text, _word));
+                if (unit is not null) pos = result.GetAudioForWordRange(unit, unit)?.AudioPosition;
+            }
+            pos ??= result.Audio?.AudioPosition;
+            if (pos is { } at && _stream?.WallTimeAt(at) is { } wall && wall <= now && now - wall < TimeSpan.FromSeconds(15)) return wall;
+            if (result.Audio is { } audio)
+            {
+                var offset = (pos ?? audio.AudioPosition) - audio.AudioPosition;
+                return now - audio.Duration + offset - TimeSpan.FromSeconds(0.4);
+            }
+        }
+        catch (Exception ex) { Debug?.Invoke("word timing: " + ex.Message); }
+        return now - TimeSpan.FromSeconds(1.2); // the word took at least this long to say and recognize
+    }
+
+    private bool Accept(RecognizedPhrase p, RecognitionResult result)
     {
         if (!VoiceClips.Matches(p.Text, _word)) return false;
         bool alone = p.Grammar?.Name == "command";
@@ -112,7 +140,7 @@ public sealed class VoiceCommandListener : IDisposable
         var now = DateTime.UtcNow;
         if (now - _last < Cooldown) return true; // heard, but a clip was just saved
         _last = now;
-        Heard?.Invoke(p.Text, p.Confidence);
+        Heard?.Invoke(p.Text, p.Confidence, SpokenAt(p, result));
         return true;
     }
 

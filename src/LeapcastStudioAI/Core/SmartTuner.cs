@@ -99,7 +99,7 @@ public static class SmartTuner
         }
 
         if (s.ContentType != "HighMotion" && s.QualityProfile != "Custom")
-            reasons.Add("Low-motion game: 30 FPS keeps Wizard101 smooth and uses about half the data of 60 FPS.");
+            reasons.Add("Low motion: 30 FPS.");
 
         int cap = Math.Min(p.CapKbps, platform.MaxKbps);
         if (cap < p.CapKbps) reasons.Add($"Capped at {platform.Name}'s {platform.MaxKbps} kbps limit.");
@@ -111,7 +111,7 @@ public static class SmartTuner
             if (safe < cap)
             {
                 cap = Math.Max(800, safe);
-                reasons.Add($"Bitrate held to {cap} kbps so it fits inside your {s.UploadKbps:N0} kbps upload.");
+                reasons.Add($"Limited to {cap} kbps to fit your {s.UploadKbps:N0} kbps upload.");
             }
         }
 
@@ -120,8 +120,8 @@ public static class SmartTuner
         string preset = cpuThreads >= 16 ? "faster" : cpuThreads >= 8 ? "veryfast" : "superfast";
         bool cbr = s.RateControl == "Cbr";
         reasons.Add(cbr
-            ? "Constant bitrate: always sends the full cap, even on static screens."
-            : "Smart VBR: static screens (menus, waiting for your turn) use far less upload; battles can use up to the cap.");
+            ? "Constant bitrate."
+            : "Smart VBR: static scenes use less bandwidth.");
 
         return new EncodePlan(Even(p.W), Even(p.H), p.Fps, cap, p.Quality, encoder, tier, cbr, s.LowLatencyMode,
             preset, p.Name, reasons);
@@ -131,7 +131,7 @@ public static class SmartTuner
     {
         if (s.UploadKbps <= 0)
         {
-            reasons.Add("Auto: no connection test yet, using Balanced. Run \"Test connection\" in Settings to tune it.");
+            reasons.Add("Auto: no upload speed set, using Balanced. Run the connection test to tune it.");
             return table[1] with { Name = "Auto (Balanced)" };
         }
         int budget = Math.Min(platform.MaxKbps, (int)(s.UploadKbps * 0.75) - s.AudioBitrateKbps);
@@ -142,10 +142,10 @@ public static class SmartTuner
             var low = budget < 1800
                 ? new Profile("Auto (Low)", 960, 540, 30, Math.Max(800, budget), 24)
                 : table[0] with { CapKbps = budget };
-            reasons.Add($"Auto: picked {low.W}×{low.H} for your {s.UploadKbps:N0} kbps upload.");
+            reasons.Add($"Auto: {low.W}×{low.H} for {s.UploadKbps:N0} kbps upload.");
             return low with { Name = "Auto (" + (budget < 1800 ? "Low" : "Data saver") + ")" };
         }
-        reasons.Add($"Auto: picked {best.Name} ({best.W}×{best.H}) for your {s.UploadKbps:N0} kbps upload.");
+        reasons.Add($"Auto: {best.Name} ({best.W}×{best.H}) for {s.UploadKbps:N0} kbps upload.");
         return best with { Name = $"Auto ({best.Name})" };
     }
 
@@ -155,7 +155,7 @@ public static class SmartTuner
         {
             var hit = available.FirstOrDefault(e => e.Name == requested);
             if (hit is not null) return (hit.Name, hit.Tier);
-            reasons.Add($"{EncoderCatalog.DisplayName(requested)} isn't available on this PC, choosing automatically.");
+            reasons.Add($"{EncoderCatalog.DisplayName(requested)} isn't available. Using automatic.");
         }
 
         // Streaming and playing on one PC: a GPU's media engine encodes without touching the CPU the game needs,
@@ -164,14 +164,14 @@ public static class SmartTuner
         {
             var hw = available.FirstOrDefault(e => e.Name == name && e.Tier == EncoderTier.Rich);
             if (hw is null) continue;
-            reasons.Add($"Using {EncoderCatalog.DisplayName(name)}: the GPU encodes, so the game keeps your CPU.");
+            reasons.Add($"Encoder: {EncoderCatalog.DisplayName(name)} (GPU).");
             return (hw.Name, hw.Tier);
         }
         var x264 = available.FirstOrDefault(e => e.Name == "libx264");
         // Older hardware encoders look noticeably worse; with a big CPU, x264 is the better trade.
         if (x264 is not null && cpuThreads >= 16)
         {
-            reasons.Add($"Using x264 on your {cpuThreads}-thread CPU: your GPU's encoder is an older generation.");
+            reasons.Add($"Encoder: x264 (CPU, {cpuThreads} threads). The GPU encoder is an older generation.");
             return (x264.Name, x264.Tier);
         }
         foreach (var name in new[] { "h264_nvenc", "h264_qsv", "h264_amf" })
@@ -179,16 +179,16 @@ public static class SmartTuner
             var hw = available.FirstOrDefault(e => e.Name == name);
             if (hw is not null)
             {
-                reasons.Add($"Using {EncoderCatalog.DisplayName(name)} so the game keeps your CPU.");
+                reasons.Add($"Encoder: {EncoderCatalog.DisplayName(name)}.");
                 return (hw.Name, hw.Tier);
             }
         }
         if (x264 is not null)
         {
-            reasons.Add("No hardware encoder found, using x264 (CPU) with a light preset.");
+            reasons.Add("No GPU encoder found. Using x264 (CPU).");
             return (x264.Name, x264.Tier);
         }
-        reasons.Add("Encoder detection hasn't finished; assuming x264.");
+        reasons.Add("Detecting encoders…");
         return ("libx264", EncoderTier.Basic);
     }
 
@@ -278,16 +278,16 @@ public static class OutputBudget
             main = main with
             {
                 Reasons = main.Reasons.Append(riding.Count > 1
-                    ? $"Multistream: {string.Join(", ", riding.Select(o => o.Name))} ({riders.Kbps} kbps each) share one encode, which also feeds recording, replay and clips."
-                    : $"{riding[0].Name}: {riders.Kbps} kbps (its own setting), from the main encode that also feeds recording, replay and clips.").ToList(),
+                    ? $"{string.Join(" + ", riding.Select(o => o.Name))}: one shared encode, {riders.Kbps} kbps each."
+                    : $"{riding[0].Name}: {riders.Kbps} kbps.").ToList(),
             };
         }
         if (hShared.Count > 1)
-            main = main with { Reasons = main.Reasons.Append($"Multistream: {string.Join(", ", hShared.Select(o => o.Name))} share one encode, and each receives the full {main.CapKbps} kbps.").ToList() };
+            main = main with { Reasons = main.Reasons.Append($"{string.Join(" + ", hShared.Select(o => o.Name))}: one shared encode, {main.CapKbps} kbps each.").ToList() };
         if (scale < 0.999)
         {
             int cap = Math.Max(1000, (int)(main.CapKbps * scale));
-            main = main with { CapKbps = cap, Reasons = main.Reasons.Append($"Lowered to {cap} kbps because a destination's upload was struggling.").ToList() };
+            main = main with { CapKbps = cap, Reasons = main.Reasons.Append($"Lowered to {cap} kbps: upload congestion.").ToList() };
         }
 
         EncodePlan? vertical = null;
@@ -300,13 +300,13 @@ public static class OutputBudget
             if (s.VerticalBitrateKbps > 0)
             {
                 cap = Math.Clamp(s.VerticalBitrateKbps, 500, platformCap);
-                why = $"Vertical canvas {vw}×{vh}: {cap} kbps (your setting).";
+                why = $"Vertical {vw}×{vh}: {cap} kbps.";
             }
             else
             {
                 double pixels = vw * (double)vh / (main.Width * (double)main.Height);
                 cap = (int)Math.Clamp(main.CapKbps * pixels * 1.1, 1500, platformCap);
-                why = $"Vertical canvas {vw}×{vh}: up to {cap} kbps (automatic from its size; set your own in Settings → Canvas).";
+                why = $"Vertical {vw}×{vh}: up to {cap} kbps (automatic).";
             }
             if (scale < 0.999) cap = Math.Max(800, (int)(cap * scale));
             vertical = main with { Width = vw, Height = vh, CapKbps = cap, ProfileName = "Vertical", Reasons = new[] { why } };
@@ -322,8 +322,8 @@ public static class OutputBudget
             {
                 CapKbps = Math.Clamp(group.Key.OwnBitrateKbps, 500, 50000),
                 Reasons = new[] { names.Count > 1
-                    ? $"{string.Join(", ", names)}: one shared encode at up to {group.Key.OwnBitrateKbps} kbps."
-                    : $"{names[0]}: its own encode at up to {group.Key.OwnBitrateKbps} kbps." },
+                    ? $"{string.Join(" + ", names)}: one shared encode, {group.Key.OwnBitrateKbps} kbps each."
+                    : $"{names[0]}: separate encode, {group.Key.OwnBitrateKbps} kbps." },
             };
             foreach (var o in group) ownPlans[o.Id] = plan;
         }
@@ -333,8 +333,7 @@ public static class OutputBudget
         if (s.UploadKbps > 0 && upload > s.UploadKbps * 0.75 && hShared.Count + riding.Count + vShared.Count + own.Count > 1)
             main = main with
             {
-                Reasons = main.Reasons.Append($"Heads-up: together your destinations need about {upload:N0} kbps, more than 75% of your " +
-                    $"{s.UploadKbps:N0} kbps upload. Lower the bitrate (Settings → Stream) or stream to fewer places at once.").ToList(),
+                Reasons = main.Reasons.Append($"Heads-up: {upload:N0} kbps total exceeds 75% of your {s.UploadKbps:N0} kbps upload. Lower the bitrate or use fewer destinations.").ToList(),
             };
         return new PlanSet(main, vertical, ownPlans) { UploadKbps = upload };
     }

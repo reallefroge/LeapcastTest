@@ -19,8 +19,8 @@
     <TextBlock Text="Stream key" Style="{StaticResource FieldLabel}"/>
     <PasswordBox x:Name="KeyBox"/>
     <TextBlock x:Name="KeyHint" Style="{StaticResource Hint}"/>
-    <CheckBox x:Name="AskKeyBox" Content="Ask for a fresh key every time this output starts"/>
-    <TextBlock Text="Keys are stored encrypted for your Windows account only." Style="{StaticResource Hint}"/>
+    <CheckBox x:Name="AskKeyBox" Content="Ask for the key each time"/>
+    <TextBlock Text="Keys are encrypted for your Windows account." Style="{StaticResource Hint}"/>
 
     <TextBlock Text="Canvas" Style="{StaticResource FieldLabel}"/>
     <ComboBox x:Name="CanvasBox">
@@ -30,17 +30,17 @@
 
     <TextBlock Text="Encoding" Style="{StaticResource FieldLabel}"/>
     <ComboBox x:Name="EncodeBox" SelectionChanged="EncodeBox_SelectionChanged">
-      <ComboBoxItem Content="Share the canvas encode (recommended: no extra GPU/CPU)" Tag="Shared"/>
-      <ComboBoxItem Content="Own encode with its own bitrate (adds a second encode: more GPU/CPU)" Tag="Own"/>
+      <ComboBoxItem Content="Shared encode (recommended)" Tag="Shared"/>
+      <ComboBoxItem Content="Custom bitrate" Tag="Own"/>
     </ComboBox>
     <StackPanel x:Name="OwnPanel" Margin="12,0,0,0">
       <TextBlock Text="Bitrate for this output (kbps)" Style="{StaticResource FieldLabel}"/>
       <TextBox x:Name="OwnBitrateBox"/>
-      <TextBlock Text="Only needed when one platform needs a different bitrate than the others (e.g. YouTube at 9000 while Twitch is capped at 6000). Costs a second encode."
+      <TextBlock Text="Destinations with the same bitrate share one encode. A different bitrate adds an encode."
                  Style="{StaticResource Hint}"/>
     </StackPanel>
 
-    <CheckBox x:Name="EnabledBox" Content="Include in &quot;Go live&quot; / Start all"/>
+    <CheckBox x:Name="EnabledBox" Content="Include in Go live"/>
 
     <DockPanel Margin="0,14,0,0">
       <Button x:Name="DeleteButton" DockPanel.Dock="Left" Content="Delete output" Click="Delete_Click" Foreground="{StaticResource BadBrush}"/>
