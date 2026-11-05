@@ -107,7 +107,8 @@ public sealed class VoiceCommandListener : IDisposable
     {
         var r = e.Result;
         if (r is null) return;
-        Debug?.Invoke($"recognized: {r.Text} ({r.Confidence:0.00}, {r.Grammar?.Name})");
+        Debug?.Invoke($"recognized: {r.Text} ({r.Confidence:0.00}, {r.Grammar?.Name}) words: " +
+                      string.Join(" ", r.Words.Select(w => $"{w.Text}={w.Confidence:0.00}")));
         if (Accept(r, r)) return;
         // the best guess isn't the word, but a close second may be ("clip" vs "click" in a noisy room)
         foreach (var alt in r.Alternates.Skip(1).Take(4)) if (Accept(alt, r)) return;

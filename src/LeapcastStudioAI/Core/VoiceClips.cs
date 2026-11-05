@@ -62,10 +62,12 @@ public static class VoiceClips
         // Every level listens the same way: only for the word (alone or with any speech around it), with nothing
         // competing for it (dictation out-voted it: "clip" heard as "but", "by", "Felice set"). The levels differ in
         // how sure the recognizer must be, and how far a mishearing may be from the word.
+        // Measured with Windows' recognizer: the word really said scores ~0.99 (alone, mid-sentence, noisy mic);
+        // ordinary speech forced onto it ("the weather is nice today" → "… clip") scores 0.72–0.79.
         // Normal: a clear "clip" only
-        "Normal" => new(0.80f, 0.80f, 30, false, 0, 0f),
-        // High: a fairly sure match, or one letter off ("klip", "clap")
-        "High" => new(0.55f, 0.55f, 10, true, 1, 0f),
+        "Normal" => new(0.93f, 0.93f, 30, false, 0, 0f),
+        // High: a sure match, or one letter off ("klip", "clap")
+        "High" => new(0.85f, 0.85f, 10, true, 1, 0f),
         // Maximum: almost any match, up to two letters off ("click", "chip")
         "Max" => new(0.05f, 0.05f, 0, true, 2, 0f),
         _ => Sensitivity("High"),
