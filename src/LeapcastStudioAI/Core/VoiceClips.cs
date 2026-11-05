@@ -48,7 +48,10 @@ public static class VoiceClips
     /// <param name="NearLetters">Accept words this many letters away from the word ("klip", "clap"); 0 = exact only.</param>
     /// <param name="DictationWeight">How much free dictation competes with the word (0 = not loaded: everything is heard
     /// as a possible "clip"). Lower = the word wins more often; dictation is what keeps other speech from triggering.</param>
-    public sealed record SensitivityLevel(float Alone, float InSentence, int Rejection, bool UseRejected, int NearLetters, float DictationWeight)
+    /// <param name="Filler">Instead of dictation, a list of everyday words soaks up other speech: lighter than
+    /// dictation, so a word said over a noisy mic still wins.</param>
+    public sealed record SensitivityLevel(float Alone, float InSentence, int Rejection, bool UseRejected, int NearLetters, float DictationWeight,
+        bool Filler = false)
     {
         public bool Near => NearLetters > 0;
     }
@@ -59,10 +62,24 @@ public static class VoiceClips
         // cautious: clear "clip"s, rarely a false one
         "Normal" => new(0.40f, 0.30f, 30, true, 0, 0.6f),
         // the word wins over dictation more often, and a one-letter mishearing counts
-        "High" => new(0.20f, 0.15f, 10, true, 1, 0.3f),
+        "High" => new(0.30f, 0.25f, 10, true, 1, 0f, Filler: true),
         // no dictation at all: every utterance is matched against the word; two-letter mishearings count
         "Max" => new(0.05f, 0.05f, 0, true, 2, 0f),
         _ => Sensitivity("High"),
+    };
+
+    /// <summary>Everyday words that soak up other speech on High (so it isn't forced onto the trigger word).</summary>
+    public static readonly string[] FillerWords =
+    {
+        "a", "about", "after", "again", "all", "alright", "and", "any", "are", "as", "at", "back", "bad", "be", "because", "been",
+        "before", "big", "but", "by", "can", "come", "could", "day", "did", "do", "does", "done", "dont", "down", "even", "first",
+        "for", "from", "game", "get", "go", "going", "gonna", "good", "got", "guys", "had", "has", "have", "he", "hello", "her",
+        "here", "hey", "him", "his", "how", "i", "if", "im", "in", "is", "it", "its", "just", "kill", "know", "last", "let", "lets",
+        "like", "live", "look", "lot", "make", "man", "me", "more", "my", "need", "new", "nice", "no", "not", "now", "of", "oh", "ok",
+        "okay", "on", "one", "only", "or", "our", "out", "over", "play", "really", "right", "see", "she", "so", "some", "still",
+        "stream", "take", "than", "thank", "thanks", "that", "the", "their", "them", "then", "there", "they", "thing", "think",
+        "this", "time", "to", "today", "too", "turn", "two", "up", "us", "very", "wait", "want", "was", "way", "we", "weather",
+        "well", "were", "what", "when", "where", "which", "who", "why", "will", "win", "with", "wow", "yeah", "yes", "you", "your",
     };
 
     /// <summary>

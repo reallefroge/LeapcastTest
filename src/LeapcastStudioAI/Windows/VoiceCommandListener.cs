@@ -73,6 +73,12 @@ public sealed class VoiceCommandListener : IDisposable
             engine.LoadGrammar(new Grammar(new GrammarBuilder(new Choices(around, before))) { Name = "sentence", Priority = 8, Weight = 0.9f });
             // free dictation, weighted down: it recognizes other speech as what it is (so it doesn't trigger), but
             // shouldn't out-vote the word ("clip" heard as "but", "by", "let")
+            if (_level.Filler)
+            {
+                // one to eight everyday words in a row: other speech lands here instead of on the word
+                var filler = VoiceClips.FillerWords.Where(w => !VoiceClips.NearMatch(w, _word, 1)).ToArray();
+                engine.LoadGrammar(new Grammar(new GrammarBuilder(new Choices(filler), 1, 8)) { Name = "filler", Priority = 0, Weight = 0.5f });
+            }
             if (_level.DictationWeight > 0)
                 try { engine.LoadGrammar(new DictationGrammar { Name = "dictation", Priority = 0, Weight = _level.DictationWeight }); }
                 catch { /* some recognizers have no dictation: the word alone still works */ }
