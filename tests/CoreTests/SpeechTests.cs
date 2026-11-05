@@ -106,6 +106,10 @@ static class SpeechTests
         check(normalChat.Count == 0, $"Normal ignores an ordinary sentence ({(normalChat.Count == 0 ? "nothing" : string.Join(", ", normalChat))})");
         var chat = await Listen(new[] { "The weather is really nice today, isn't it?" });
         check(chat.Count == 0, $"High ignores an ordinary sentence too ({(chat.Count == 0 ? "nothing" : string.Join(", ", chat))})");
+        var near = await Listen(new[] { "Let's take a quick trip to the shop." });
+        check(near.Count == 0, $"…and one with a similar-sounding word ({(near.Count == 0 ? "nothing" : string.Join(", ", near))})");
+        var maxChat = await Listen(new[] { "The weather is really nice today, isn't it?" }, sensitivity: "Max");
+        Console.WriteLine($"    note: Maximum on an ordinary sentence: {(maxChat.Count == 0 ? "nothing" : string.Join(", ", maxChat))} (Maximum may trigger by accident)");
     }
 }
 #endif

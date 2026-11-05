@@ -59,11 +59,14 @@ public static class VoiceClips
     /// <summary>How readily the word counts, by the Settings choice.</summary>
     public static SensitivityLevel Sensitivity(string? level) => level switch
     {
-        // cautious: clear "clip"s, rarely a false one
-        "Normal" => new(0.40f, 0.30f, 30, true, 0, 0.6f),
-        // the word wins over dictation more often, and a one-letter mishearing counts
-        "High" => new(0.30f, 0.25f, 10, true, 1, 0f, Filler: true),
-        // no dictation at all: every utterance is matched against the word; two-letter mishearings count
+        // Every level listens the same way: only for the word (alone or with any speech around it), with nothing
+        // competing for it (dictation out-voted it: "clip" heard as "but", "by", "Felice set"). The levels differ in
+        // how sure the recognizer must be, and how far a mishearing may be from the word.
+        // Normal: a clear "clip" only
+        "Normal" => new(0.80f, 0.80f, 30, false, 0, 0f),
+        // High: a fairly sure match, or one letter off ("klip", "clap")
+        "High" => new(0.55f, 0.55f, 10, true, 1, 0f),
+        // Maximum: almost any match, up to two letters off ("click", "chip")
         "Max" => new(0.05f, 0.05f, 0, true, 2, 0f),
         _ => Sensitivity("High"),
     };

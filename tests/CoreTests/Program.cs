@@ -556,9 +556,9 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
     Check(VoiceClips.NearMatch("click", "clip", 2) && VoiceClips.NearMatch("chip", "clip", 2) && !VoiceClips.NearMatch("but", "clip", 2) && !VoiceClips.NearMatch("the weather", "clip", 2),
         "Maximum goes to two letters (\"click\", \"chip\"), still not \"but\"");
     var nl = VoiceClips.Sensitivity("Normal"); var hl = VoiceClips.Sensitivity("High"); var ml = VoiceClips.Sensitivity("Max");
-    Check(nl.Alone > hl.Alone && hl.Alone > ml.Alone && nl.DictationWeight > hl.DictationWeight && ml.DictationWeight == 0
+    Check(nl.Alone > hl.Alone && hl.Alone > ml.Alone && nl.DictationWeight == 0 && ml.DictationWeight == 0
           && nl.NearLetters == 0 && hl.NearLetters == 1 && ml.NearLetters == 2 && nl.Rejection > hl.Rejection && hl.Rejection > ml.Rejection,
-        $"the three levels really differ: confidence {nl.Alone}/{hl.Alone}/{ml.Alone}, Normal: dictation, High: everyday-word filler, Maximum: neither, near-misses 0/1/2 letters");
+        $"the three levels really differ: confidence {nl.Alone}/{hl.Alone}/{ml.Alone}, nothing competing with the word on any level, near-misses 0/1/2 letters");
     // a quiet microphone is brought up for the recognizer (not the stream), but its background noise isn't
     (int peak, float gain) Run(double toneAmp, double noise)
     {
