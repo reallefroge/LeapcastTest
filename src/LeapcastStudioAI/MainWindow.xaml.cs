@@ -477,7 +477,7 @@ public partial class MainWindow : Window
             var rep = PipelineBuilder.AudioRepresentatives(_state.Scenes).FirstOrDefault(r => PipelineBuilder.InputKey(r) == key);
             if (rep is not null && _audio.IsCapturing(rep.Id)) micId = rep.Id;
         }
-        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}" : "";
+        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}|{s.VoiceClipSensitivity}" : "";
         if (wantKey == _voiceKey) { VoiceTag.Visibility = _voice?.Running == true ? Visibility.Visible : Visibility.Collapsed; return; }
         StopVoice();
         if (!want) return;
@@ -487,8 +487,10 @@ public partial class MainWindow : Window
             var listener = new VoiceCommandListener();
             BlockingAudioStream? feed = micId is null ? null : new BlockingAudioStream();
             if (feed is not null) _audio.SetSpeechTap(micId, feed.Write);
-            listener.Heard += (text, conf) => Dispatcher.BeginInvoke(() => SaveVoiceClip(text));
-            listener.Start(s.VoiceClipWord, feed);
+            listener.Heard += (text, conf) => { VoiceLog($"HEARD “{text}” ({conf:0.00}): saving a clip"); Dispatcher.BeginInvoke(() => SaveVoiceClip(text)); };
+            listener.Debug += VoiceLog;
+            VoiceLog($"listening for “{s.VoiceClipWord}” on {(micId is null ? "Windows' default microphone" : "the scene's microphone")}, sensitivity {s.VoiceClipSensitivity}");
+            listener.Start(s.VoiceClipWord, feed, s.VoiceClipSensitivity);
             _voice = listener;
             _voiceKey = wantKey;
             VoiceTagText.Text = $"🎙 Say “{CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s.VoiceClipWord.Trim())}”";
@@ -500,6 +502,38 @@ public partial class MainWindow : Window
             _voiceRetryAfter = DateTime.UtcNow + TimeSpan.FromMinutes(2);
             Log("Voice clips: " + ex.Message, true);
         }
+    }
+
+    /// <summary>Switches the voice-clip listener on/off and saves it straight away (the Settings checkbox).</summary>
+    private async Task SetVoiceClipsAsync(bool on)
+    {
+        if (_state.Settings.VoiceClipEnabled == on) return;
+        _state.Settings.VoiceClipEnabled = on;
+        Save();
+        VoiceLog(on ? "turned on in Settings" : "turned off in Settings");
+        UpdateVoiceClips();
+        try { await ApplyToEngineAsync(false); } catch (Exception ex) { Log("Voice clips: " + ex.Message, true); }
+        UpdateVoiceClips();
+        Status(on ? $"Voice clips on: say “{_state.Settings.VoiceClipWord}” to save the last {_state.Settings.VoiceClipSeconds} seconds."
+                  : "Voice clips off: Leapcast isn't listening for the word.");
+    }
+
+    private static readonly object VoiceLogLock = new();
+
+    /// <summary>What the speech recognizer heard (logs\voice.log), to see why a word did or didn't count.</summary>
+    private static void VoiceLog(string line)
+    {
+        try
+        {
+            string path = Path.Combine(StateStore.Folder, "logs", "voice.log");
+            lock (VoiceLogLock)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                if (File.Exists(path) && new FileInfo(path).Length > 512 * 1024) File.Move(path, path + ".old", true);
+                File.AppendAllText(path, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {line}{Environment.NewLine}");
+            }
+        }
+        catch { }
     }
 
     private void StopVoice()
@@ -1312,6 +1346,7 @@ public partial class MainWindow : Window
     private async void OpenSettings(string? tab)
     {
         var window = new SettingsWindow(_state.Settings, _engine, _state.Scenes, tab) { Owner = this };
+        window.VoiceClipToggled += on => _ = SetVoiceClipsAsync(on);
         if (window.ShowDialog() != true) return;
         bool ffmpegChanged = window.Result.FfmpegPath != _state.Settings.FfmpegPath;
         window.ApplySceneHotkeys(); // scene and source hotkeys live on the scenes

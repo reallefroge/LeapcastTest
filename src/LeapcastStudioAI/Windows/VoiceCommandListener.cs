@@ -22,8 +22,7 @@ public sealed class VoiceCommandListener : IDisposable
     private string _word = "clip";
 
     public static readonly TimeSpan Cooldown = TimeSpan.FromSeconds(6);
-    /// <summary>Lowest confidence accepted for the word alone / within dictation.</summary>
-    public const float CommandConfidence = 0.55f, DictationConfidence = 0.35f;
+    private (float Alone, float InSentence, int Rejection, bool UseRejected) _level = VoiceClips.Sensitivity("High");
 
     /// <summary>The word was heard: (what was recognized, confidence).</summary>
     public event Action<string, float>? Heard;
@@ -51,25 +50,30 @@ public sealed class VoiceCommandListener : IDisposable
     /// Starts listening. With <paramref name="feed"/> the recognizer hears that audio (16 kHz mono 16-bit, e.g. the
     /// stream's own microphone); without it, Windows' default microphone.
     /// </summary>
-    public void Start(string word, BlockingAudioStream? feed)
+    public void Start(string word, BlockingAudioStream? feed, string? sensitivity = "High")
     {
         Stop();
+        _level = VoiceClips.Sensitivity(sensitivity);
         _word = string.IsNullOrWhiteSpace(word) ? "clip" : word.Trim().ToLowerInvariant();
         if (!Available(out var culture) || culture is null)
             throw new InvalidOperationException("Windows has no speech recognizer installed. Add one in Windows Settings → Time & language → Speech (English).");
         var engine = new SpeechRecognitionEngine(new CultureInfo(culture));
         try
         {
-            var command = new Grammar(new GrammarBuilder(new Choices(_word, _word + " it", _word + " that", _word + " this"))) { Name = "command", Priority = 10 };
+            var forms = new[] { _word, _word + "s", _word + " it", _word + " that", _word + " this", _word + " it now", _word + " that now" };
+            var command = new Grammar(new GrammarBuilder(new Choices(forms))) { Name = "command", Priority = 10, Weight = 1f };
             engine.LoadGrammar(command);
             try { engine.LoadGrammar(new DictationGrammar { Name = "dictation", Priority = 0 }); }
             catch { /* some recognizers have no dictation: the word alone still works */ }
             if (feed is not null) engine.SetInputToAudioStream(feed, new SpeechAudioFormatInfo(SpeechPcmConverter.OutRate, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
             else engine.SetInputToDefaultAudioDevice();
+            // the recognizer drops results below its own confidence bar before we see them: lower it
+            if (_level.Rejection >= 0)
+                try { engine.UpdateRecognizerSetting("CFGConfidenceRejectionThreshold", _level.Rejection); }
+                catch (Exception ex) { Debug?.Invoke("rejection threshold not set: " + ex.Message); }
             engine.SpeechRecognized += OnRecognized;
             engine.SpeechDetected += (_, e) => Debug?.Invoke($"speech detected at {e.AudioPosition}");
-            engine.SpeechRecognitionRejected += (_, e) =>
-                Debug?.Invoke("rejected: " + string.Join(" | ", e.Result?.Alternates.Take(3).Select(a => $"{a.Text} ({a.Confidence:0.00}, {a.Grammar?.Name})") ?? Array.Empty<string>()));
+            engine.SpeechRecognitionRejected += OnRejected;
             engine.RecognizeCompleted += (_, e) => Debug?.Invoke($"recognition ended{(e.Error is null ? "" : ": " + e.Error.Message)}");
             engine.RecognizeAsync(RecognizeMode.Multiple);
         }
@@ -85,14 +89,31 @@ public sealed class VoiceCommandListener : IDisposable
     private void OnRecognized(object? sender, SpeechRecognizedEventArgs e)
     {
         var r = e.Result;
-        if (r is not null) Debug?.Invoke($"recognized: {r.Text} ({r.Confidence:0.00}, {r.Grammar?.Name})");
-        if (r is null || !VoiceClips.Matches(r.Text, _word)) return;
-        bool alone = r.Grammar?.Name == "command";
-        if (r.Confidence < (alone ? CommandConfidence : DictationConfidence)) return;
+        if (r is null) return;
+        Debug?.Invoke($"recognized: {r.Text} ({r.Confidence:0.00}, {r.Grammar?.Name})");
+        if (Accept(r)) return;
+        // the best guess isn't the word, but a close second may be ("clip" vs "click" in a noisy room)
+        foreach (var alt in r.Alternates.Skip(1).Take(4)) if (Accept(alt)) return;
+    }
+
+    private void OnRejected(object? sender, SpeechRecognitionRejectedEventArgs e)
+    {
+        var alts = e.Result?.Alternates.Take(5).ToList() ?? new List<RecognizedPhrase>();
+        Debug?.Invoke("rejected: " + string.Join(" | ", alts.Select(a => $"{a.Text} ({a.Confidence:0.00}, {a.Grammar?.Name})")));
+        if (!_level.UseRejected) return;
+        foreach (var alt in alts) if (Accept(alt)) return;
+    }
+
+    private bool Accept(RecognizedPhrase p)
+    {
+        if (!VoiceClips.Matches(p.Text, _word)) return false;
+        bool alone = p.Grammar?.Name == "command";
+        if (p.Confidence < (alone ? _level.Alone : _level.InSentence)) return false;
         var now = DateTime.UtcNow;
-        if (now - _last < Cooldown) return;
+        if (now - _last < Cooldown) return true; // heard, but a clip was just saved
         _last = now;
-        Heard?.Invoke(r.Text, r.Confidence);
+        Heard?.Invoke(p.Text, p.Confidence);
+        return true;
     }
 
     public void Stop()
@@ -102,7 +123,7 @@ public sealed class VoiceCommandListener : IDisposable
         _stream?.Complete();
         _stream = null;
         if (engine is null) return;
-        try { engine.SpeechRecognized -= OnRecognized; engine.RecognizeAsyncCancel(); } catch { }
+        try { engine.SpeechRecognized -= OnRecognized; engine.SpeechRecognitionRejected -= OnRejected; engine.RecognizeAsyncCancel(); } catch { }
         try { engine.Dispose(); } catch { }
     }
 

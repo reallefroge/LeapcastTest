@@ -13,6 +13,9 @@ public partial class SettingsWindow : Window
 
     public StudioSettings Result { get; private set; }
 
+    /// <summary>The voice-clip listener was switched on/off: applied and saved at once, not only on OK.</summary>
+    public event Action<bool>? VoiceClipToggled;
+
     /// <summary>The Twitch output used for the connection test (Twitch has a private bandwidth-test mode).</summary>
     private readonly StreamOutput? _twitch;
 
@@ -66,6 +69,7 @@ public partial class SettingsWindow : Window
         VoiceWordBox.Text = current.VoiceClipWord;
         SelectTag(VoiceSecondsBox, current.VoiceClipSeconds.ToString(CultureInfo.InvariantCulture));
         VoiceFolderBox.Text = current.VoiceClipFolder;
+        SelectTag(VoiceSensitivityBox, current.VoiceClipSensitivity);
         ReconnectBox.IsChecked = current.AutoReconnect;
         AdjustBox.IsChecked = current.AutoAdjustBitrate;
         AdaptBox.IsChecked = current.AdaptivePerformance;
@@ -80,6 +84,14 @@ public partial class SettingsWindow : Window
         _loaded = true;
         UpdatePlan();
         Closed += (_, _) => _testCts?.Cancel();
+    }
+
+    private void VoiceClipBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_loaded) return;
+        bool on = VoiceClipBox.IsChecked == true;
+        Result.VoiceClipEnabled = on;
+        VoiceClipToggled?.Invoke(on);
     }
 
     private static void SelectTag(ComboBox box, string tag)
@@ -122,6 +134,7 @@ public partial class SettingsWindow : Window
         s.VoiceClipWord = string.IsNullOrWhiteSpace(VoiceWordBox.Text) ? "clip" : VoiceWordBox.Text.Trim().Split(' ')[0];
         s.VoiceClipSeconds = int.Parse(TagOf(VoiceSecondsBox, "50"), CultureInfo.InvariantCulture);
         s.VoiceClipFolder = string.IsNullOrWhiteSpace(VoiceFolderBox.Text) ? VoiceClips.DefaultFolder : VoiceFolderBox.Text.Trim();
+        s.VoiceClipSensitivity = TagOf(VoiceSensitivityBox, "High");
         s.AutoReconnect = ReconnectBox.IsChecked == true;
         s.AutoAdjustBitrate = AdjustBox.IsChecked == true;
         s.AdaptivePerformance = AdaptBox.IsChecked == true;

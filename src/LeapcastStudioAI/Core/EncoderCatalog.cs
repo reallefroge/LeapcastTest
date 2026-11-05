@@ -24,6 +24,20 @@ public static class EncoderCatalog
 
     private static string K(int kbps) => kbps.ToString(CultureInfo.InvariantCulture) + "k";
 
+    /// <summary>The FFmpeg build's AMD encoder can make the keyframes it's asked for real IDR frames (FFmpeg 7.1+).</summary>
+    public static bool AmfForcedIdr { get; set; } = true;
+
+    /// <summary>
+    /// A keyframe every GOP's worth of seconds, counted from the previous forced one (the pipeline's timestamps
+    /// don't start at 0, so a plain "every 2 s since 0" would force keyframes on every frame at first).
+    /// </summary>
+    public static string ForcedKeyframes(EncodePlan plan)
+    {
+        double sec = plan.GopFrames / (double)Math.Max(1, plan.Fps);
+        string g = sec.ToString("0.###", CultureInfo.InvariantCulture);
+        return $"expr:if(isnan(prev_forced_t),1,gte(t,prev_forced_t+{g}-0.001))";
+    }
+
     public static List<string> BuildVideoArgs(EncodePlan plan)
     {
         int cap = plan.CapKbps;
@@ -76,7 +90,11 @@ public static class EncoderCatalog
                 if (plan.Cbr) a.AddRange(new[] { "-rc", "cbr", "-b:v", K(cap), "-maxrate", K(cap), "-bufsize", K(cap) });
                 else a.AddRange(new[] { "-rc", "vbr_peak", "-b:v", K(target), "-maxrate", K(cap), "-bufsize", K(cap) });
                 if (rich) a.AddRange(light ? new[] { "-vbaq", "1" } : new[] { "-vbaq", "1", "-preanalysis", "1" });
-                a.AddRange(new[] { "-g", gop });
+                // AMD's encoder can ignore -g (seen in low-latency mode: one keyframe at the start, then none for the
+                // whole stream). Destinations need a keyframe every 2 s for viewers to join, and the segment cache
+                // can only cut at keyframes (no keyframes = no replay or voice clips), so they are requested per frame.
+                a.AddRange(new[] { "-g", gop, "-force_key_frames", ForcedKeyframes(plan) });
+                if (AmfForcedIdr) a.AddRange(new[] { "-forced_idr", "1" });
                 break;
 
             default: // libx264
@@ -120,6 +138,11 @@ public static class EncoderCatalog
         var found = new List<ProbedEncoder>();
         foreach (var enc in Candidates)
         {
+            if (enc == "h264_amf")
+            {
+                var (_, help) = await RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-h", "encoder=h264_amf" }, TimeSpan.FromSeconds(10), ct);
+                AmfForcedIdr = help.Contains("forced_idr", StringComparison.Ordinal);
+            }
             foreach (var tier in new[] { EncoderTier.Rich, EncoderTier.Basic })
             {
                 var plan = new EncodePlan(1280, 720, 30, 3000, 22, enc, tier, false, false, "veryfast", "probe", Array.Empty<string>());

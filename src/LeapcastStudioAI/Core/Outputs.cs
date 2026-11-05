@@ -193,7 +193,19 @@ public sealed class OutputManager : IDisposable
         _logDir = logDir;
     }
 
-    public static string BusKey(StreamOutput o) => o.OwnBitrateKbps > 0 ? "own_" + o.Id.ToString("N") : (o.IsVertical ? "vertical" : "main");
+    /// <summary>
+    /// Which encode a destination takes: the main or vertical one, or the shared encode for its own bitrate (outputs
+    /// with the same own bitrate share one). <paramref name="mainRiders"/>: own-bitrate outputs that ride the main
+    /// encode (<see cref="OutputBudget.MainRiders"/>).
+    /// </summary>
+    public static string BusKey(StreamOutput o, IReadOnlySet<Guid>? mainRiders = null) =>
+        mainRiders is not null && mainRiders.Contains(o.Id) ? "main"
+        : o.OwnBitrateKbps > 0 ? $"own_{o.OwnBitrateKbps}_{(o.IsVertical ? "v" : "h")}"
+        : (o.IsVertical ? "vertical" : "main");
+
+    /// <summary>Own-bitrate outputs that currently ride the main encode (set with each new encoder run).</summary>
+    public IReadOnlySet<Guid> MainRiders { get; set; } = new HashSet<Guid>();
+    private string KeyOf(StreamOutput o) => BusKey(o, MainRiders);
 
     public bool AnyActive { get { lock (_lock) return _pushers.Count > 0; } }
     public bool IsActive(Guid id) { lock (_lock) return _pushers.ContainsKey(id); }
@@ -215,7 +227,7 @@ public sealed class OutputManager : IDisposable
             if (signatures is not null) foreach (var (k, v) in signatures) _signatures[k] = v;
             foreach (var p in _pushers.Values)
             {
-                string key = BusKey(p.Output);
+                string key = KeyOf(p.Output);
                 _signatures.TryGetValue(key, out var sig);
                 if (p.Proc is { HasExited: false } && p.Feeds is { IsAddingCompleted: false } feeds && !p.Overflowed
                     && sig is not null && sig == p.Signature && _buses.TryGetValue(key, out var bus) && !bus.Ended)
@@ -306,7 +318,7 @@ public sealed class OutputManager : IDisposable
     {
         KillProcess(p);
         p.RetryCts?.Cancel();
-        if (!_buses.TryGetValue(BusKey(p.Output), out var bus) || bus.Ended)
+        if (!_buses.TryGetValue(KeyOf(p.Output), out var bus) || bus.Ended)
         {
             p.State = OutputState.Reconnecting;
             p.Message = "Waiting for the encoder…";
@@ -327,7 +339,7 @@ public sealed class OutputManager : IDisposable
                 lock (_lock)
                 {
                     if (p.Stopping || !_pushers.ContainsKey(p.Output.Id)) return;
-                    if (_buses.TryGetValue(BusKey(p.Output), out var b) && !b.Ended) Spawn(p, b);
+                    if (_buses.TryGetValue(KeyOf(p.Output), out var b) && !b.Ended) Spawn(p, b);
                 }
                 Changed?.Invoke();
             });
@@ -358,7 +370,7 @@ public sealed class OutputManager : IDisposable
         p.Bus = bus;
         p.Sub = bus.Subscribe();
         p.Overflowed = false;
-        p.Signature = _signatures.TryGetValue(BusKey(p.Output), out var sig) ? sig : "";
+        p.Signature = _signatures.TryGetValue(KeyOf(p.Output), out var sig) ? sig : "";
         var feeds = new BlockingCollection<TsBus.Subscriber>();
         feeds.Add(p.Sub);
         p.Feeds = feeds;

@@ -169,7 +169,10 @@
                        Style="{StaticResource Hint}"/>
             <Button Content="Open the folder" HorizontalAlignment="Left" Click="OpenRecordings_Click" Margin="3,8,3,3"/>
             <TextBlock Text="VOICE CLIPS" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
-            <CheckBox x:Name="VoiceClipBox" Content="Save a clip when I say the word (while live, recording or with the replay buffer on)"/>
+            <CheckBox x:Name="VoiceClipBox" Content="Listen for the word and save a clip when I say it (while live, recording or with the replay buffer on)"
+                      Checked="VoiceClipBox_Changed" Unchecked="VoiceClipBox_Changed"/>
+            <TextBlock Text="Turning this on or off takes effect and is saved right away, even if you close this window with ✕."
+                       Style="{StaticResource Hint}"/>
             <Grid Margin="0,2,0,0">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <StackPanel>
@@ -187,6 +190,12 @@
                 </ComboBox>
               </StackPanel>
             </Grid>
+            <TextBlock Text="Sensitivity" Style="{StaticResource FieldLabel}"/>
+            <ComboBox x:Name="VoiceSensitivityBox">
+              <ComboBoxItem Content="Normal: only when the word is clear" Tag="Normal"/>
+              <ComboBoxItem Content="High: catches it said quickly or mid-sentence (recommended)" Tag="High"/>
+              <ComboBoxItem Content="Max: catches almost anything like it (may clip by accident)" Tag="Max"/>
+            </ComboBox>
             <TextBlock Text="Save voice clips to" Style="{StaticResource FieldLabel}"/>
             <DockPanel>
               <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseClipFolder_Click"/>

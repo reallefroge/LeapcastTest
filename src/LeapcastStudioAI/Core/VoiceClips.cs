@@ -11,15 +11,31 @@ public static class VoiceClips
 
     /// <summary>
     /// Does <paramref name="heard"/> contain the trigger word on its own ("clip", "Clip!", "clip that", "let's clip
-    /// it")? Other words that merely contain it ("clipboard", "eclipse") don't count, and neither do the near
-    /// misses a recognizer produces for other speech ("click", "flip").
+    /// it")? Its plain inflections count too, since a recognizer often hears one ("clips", "clipped", "clipping",
+    /// "clip it" run together as "clipit"), and so does a k- spelling ("klip"). Other words that merely contain it
+    /// ("clipboard", "eclipse") don't count, and neither do near misses for other speech ("click", "flip").
     /// </summary>
     public static bool Matches(string? heard, string word)
     {
         if (string.IsNullOrWhiteSpace(heard) || string.IsNullOrWhiteSpace(word)) return false;
-        var w = Regex.Escape(word.Trim());
-        return Regex.IsMatch(heard, $@"(?<![\p{{L}}\p{{N}}]){w}(?![\p{{L}}\p{{N}}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        string t = word.Trim();
+        string w = Regex.Escape(t);
+        // "c" at the start of the word may be heard as "k" (klip)
+        if (t.Length > 1 && char.ToLowerInvariant(t[0]) == 'c' && char.IsLetter(t[1])) w = "[ck]" + Regex.Escape(t[1..]);
+        string last = char.IsLetter(t[^1]) ? Regex.Escape(t[^1].ToString()) + "?" : "";
+        return Regex.IsMatch(heard, $@"(?<![\p{{L}}\p{{N}}]){w}(?:{last}(?:s|es|ed|ing|it|er|ers))?(?![\p{{L}}\p{{N}}])",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
+
+    /// <summary>How readily the word counts, by the Settings choice.</summary>
+    /// <returns>Lowest confidence for the word said alone / inside a sentence, the recognizer's own rejection
+    /// threshold (0–100, -1 = leave it), and whether results the recognizer rejected are still checked.</returns>
+    public static (float Alone, float InSentence, int Rejection, bool UseRejected) Sensitivity(string? level) => level switch
+    {
+        "Normal" => (0.55f, 0.35f, -1, false),
+        "Max" => (0.12f, 0.08f, 5, true),
+        _ => (0.30f, 0.18f, 20, true), // High
+    };
 
     /// <summary>
     /// The clip's file: the day, then the time it was saved, e.g. "2026-11-04 15-57-32.mp4" (sorts in order;
@@ -43,6 +59,16 @@ public sealed class SpeechPcmConverter
     public const int OutRate = 16000;
     private double _pos;      // position of the next output sample, in input frames (relative to the packet)
     private float _last;      // last input frame of the previous packet (for interpolation across packets)
+    private float _env;       // level follower (fast up, slow down)
+    private float _gain = 1f;
+
+    /// <summary>
+    /// Brings a quiet microphone up to a level the recognizer hears well (up to <see cref="MaxGain"/>, about +18 dB),
+    /// without touching the stream's audio: this only shapes what the speech recognizer listens to.
+    /// </summary>
+    public bool AutoGain { get; set; } = true;
+    public const float TargetLevel = 0.3f, MaxGain = 8f;
+    public float Gain => _gain;
 
     /// <param name="mono">Mono input frames (already mixed down), at <paramref name="rate"/>.</param>
     public short[] Convert(ReadOnlySpan<float> mono, int rate)
@@ -59,6 +85,14 @@ public sealed class SpeechPcmConverter
             float a = i < 0 ? _last : mono[i];
             float b = mono[i + 1];
             float v = (float)(a + (b - a) * frac);
+            if (AutoGain)
+            {
+                float lvl = Math.Abs(v);
+                _env = lvl > _env ? _env + (lvl - _env) * 0.02f : _env * 0.99996f;  // rises in ms, falls over ~1.5 s
+                float want = Math.Clamp(TargetLevel / Math.Max(_env, 1e-4f), 1f, MaxGain);
+                _gain += (want - _gain) * (want < _gain ? 0.02f : 0.0003f);          // turns down at once, up over ~0.2 s
+                v *= _gain;
+            }
             output.Add((short)Math.Clamp(v * 32767f, short.MinValue, short.MaxValue));
             _pos += step;
         }

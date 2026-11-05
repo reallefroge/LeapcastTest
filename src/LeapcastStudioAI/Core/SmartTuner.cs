@@ -241,12 +241,28 @@ public static class OutputBudget
     /// <summary>Automatic vertical bitrate: this share of the main bitrate per pixel, roughly.</summary>
     public const double VerticalShare = 0.6;
 
+    /// <summary>
+    /// Outputs with their own bitrate that ride the main encode anyway. When no destination uses the main bitrate,
+    /// the main encode would only feed recording, replay and voice clips, so the largest group of horizontal outputs
+    /// with the same own bitrate becomes the main encode instead: one encode serves them all (and clips are exactly
+    /// what viewers saw), rather than one encode for the cache plus one per bitrate.
+    /// </summary>
+    public static (int Kbps, HashSet<Guid> Ids) MainRiders(IReadOnlyList<StreamOutput> pool)
+    {
+        if (pool.Any(o => !o.IsVertical && o.OwnBitrateKbps <= 0)) return (0, new HashSet<Guid>());
+        var group = pool.Where(o => !o.IsVertical && o.OwnBitrateKbps > 0).GroupBy(o => o.OwnBitrateKbps)
+            .OrderByDescending(g => g.Count()).ThenByDescending(g => g.Key).FirstOrDefault();
+        return group is null ? (0, new HashSet<Guid>()) : (group.Key, group.Select(o => o.Id).ToHashSet());
+    }
+
     public static PlanSet Resolve(StudioSettings s, IReadOnlyList<StreamOutput> pool, bool verticalCanvas,
         IReadOnlyList<ProbedEncoder> encoders, int cpuThreads, double scale = 1.0)
     {
         var hShared = pool.Where(o => !o.IsVertical && o.OwnBitrateKbps <= 0).ToList();
         var vShared = verticalCanvas ? pool.Where(o => o.IsVertical && o.OwnBitrateKbps <= 0).ToList() : new List<StreamOutput>();
-        var own = pool.Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || verticalCanvas)).ToList();
+        var riders = MainRiders(pool);
+        var riding = pool.Where(o => riders.Ids.Contains(o.Id)).ToList();
+        var own = pool.Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || verticalCanvas) && !riders.Ids.Contains(o.Id)).ToList();
         int audio = Math.Clamp(s.AudioBitrateKbps, 64, 320);
 
         // The strictest horizontal service sets the main cap (e.g. Twitch 6000 while also on YouTube).
@@ -256,6 +272,16 @@ public static class OutputBudget
         var tuned = s.Clone();
         tuned.Platform = platform;
         var main = SmartTuner.Resolve(tuned, encoders, cpuThreads);
+        if (riding.Count > 0)
+        {
+            main = main with { CapKbps = Math.Clamp(riders.Kbps, 500, 50000) };
+            main = main with
+            {
+                Reasons = main.Reasons.Append(riding.Count > 1
+                    ? $"Multistream: {string.Join(", ", riding.Select(o => o.Name))} ({riders.Kbps} kbps each) share one encode, which also feeds recording, replay and clips."
+                    : $"{riding[0].Name}: {riders.Kbps} kbps (its own setting), from the main encode that also feeds recording, replay and clips.").ToList(),
+            };
+        }
         if (hShared.Count > 1)
             main = main with { Reasons = main.Reasons.Append($"Multistream: {string.Join(", ", hShared.Select(o => o.Name))} share one encode, and each receives the full {main.CapKbps} kbps.").ToList() };
         if (scale < 0.999)
@@ -286,20 +312,25 @@ public static class OutputBudget
             vertical = main with { Width = vw, Height = vh, CapKbps = cap, ProfileName = "Vertical", Reasons = new[] { why } };
         }
 
+        // outputs with the same own bitrate (and canvas) share one encode
         var ownPlans = new Dictionary<Guid, EncodePlan>();
-        foreach (var o in own)
+        foreach (var group in own.GroupBy(o => (o.OwnBitrateKbps, o.IsVertical)))
         {
-            var basePlan = o.IsVertical && vertical is not null ? vertical : main;
-            ownPlans[o.Id] = basePlan with
+            var names = group.Select(o => o.Name).ToList();
+            var basePlan = group.Key.IsVertical && vertical is not null ? vertical : main;
+            var plan = basePlan with
             {
-                CapKbps = Math.Clamp(o.OwnBitrateKbps, 500, 50000),
-                Reasons = new[] { $"{o.Name}: its own encode at up to {o.OwnBitrateKbps} kbps." },
+                CapKbps = Math.Clamp(group.Key.OwnBitrateKbps, 500, 50000),
+                Reasons = new[] { names.Count > 1
+                    ? $"{string.Join(", ", names)}: one shared encode at up to {group.Key.OwnBitrateKbps} kbps."
+                    : $"{names[0]}: its own encode at up to {group.Key.OwnBitrateKbps} kbps." },
             };
+            foreach (var o in group) ownPlans[o.Id] = plan;
         }
 
-        int upload = hShared.Count * (main.CapKbps + audio) + vShared.Count * ((vertical?.CapKbps ?? 0) + audio)
+        int upload = (hShared.Count + riding.Count) * (main.CapKbps + audio) + vShared.Count * ((vertical?.CapKbps ?? 0) + audio)
                      + own.Sum(o => o.OwnBitrateKbps + audio);
-        if (s.UploadKbps > 0 && upload > s.UploadKbps * 0.75 && hShared.Count + vShared.Count + own.Count > 1)
+        if (s.UploadKbps > 0 && upload > s.UploadKbps * 0.75 && hShared.Count + riding.Count + vShared.Count + own.Count > 1)
             main = main with
             {
                 Reasons = main.Reasons.Append($"Heads-up: together your destinations need about {upload:N0} kbps, more than 75% of your " +

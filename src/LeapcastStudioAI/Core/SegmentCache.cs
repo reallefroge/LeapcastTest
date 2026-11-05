@@ -44,6 +44,7 @@ public sealed class SegmentCache
             _activeSession = ++_sessionCounter;
             _activeDir = System.IO.Path.Combine(_root, "s" + _activeSession.ToString("0000", CultureInfo.InvariantCulture));
             Directory.CreateDirectory(_activeDir);
+            _sessionStartedUtc = DateTime.UtcNow;
             _scanCache = null;
             return System.IO.Path.Combine(_activeDir, "seg_%06d.ts").Replace('\\', '/');
         }
@@ -202,23 +203,64 @@ public sealed class SegmentCache
     /// <summary>Drops a <see cref="Mark"/> (its segments may be housekept again).</summary>
     public void Release(long fromKey) { lock (_lock) _pinned.RemoveAll(p => p.from == fromKey && p.to == long.MaxValue); }
 
-    /// <summary>Saves the last <paramref name="seconds"/> of the stream as an MP4.</summary>
+    /// <summary>
+    /// Saves the last <paramref name="seconds"/> of the stream as an MP4, ending now. A couple of extra segments are
+    /// joined and the result is trimmed to exactly the last <paramref name="seconds"/> (segments only end at
+    /// keyframes, so they aren't always 2 s long). If the newest segment doesn't finish in time (an encoder that
+    /// makes no keyframes never ends one) what's written of it so far is used: a clip is always the newest video,
+    /// never older pieces from before it.
+    /// </summary>
     public async Task<string> SaveReplayAsync(string ffmpeg, int seconds, string outputPath, CancellationToken ct = default)
     {
         long to = LastExistingKey();
         lock (_lock) _pinned.Add((long.MinValue, to));
         try
         {
-            await WaitClosedAsync(to, TimeSpan.FromSeconds(SegmentSeconds * 4 + 4), ct);
-            var closed = Scan().Where(s => s.Closed && s.Key <= to && s.Size > 0).ToList();
-            int need = Math.Max(1, (int)Math.Ceiling(seconds / (double)SegmentSeconds));
-            var segs = closed.Skip(Math.Max(0, closed.Count - need)).ToList();
+            await WaitClosedAsync(to, TimeSpan.FromSeconds(SegmentSeconds * 2 + 3), ct);
+            InvalidateScan();
+            var all = Scan().Where(s => s.Key <= to && s.Size > 0).ToList();
+            // everything up to the newest segment, which is used even when it's still being written
+            var usable = all.Where(s => s.Closed || s.Key == to).ToList();
+            int need = Math.Max(1, (int)Math.Ceiling(seconds / (double)SegmentSeconds)) + 2;
+            var segs = usable.Skip(Math.Max(0, usable.Count - need)).ToList();
             if (segs.Count == 0) throw new InvalidOperationException("The replay buffer is empty. It fills while you are live, recording, or have the replay buffer on.");
-            await ConcatAsync(ffmpeg, segs, outputPath, ct);
+            // the newest segment never finished: the encoder isn't making keyframes, so a cut without re-encoding
+            // would have nothing to start on (the video would be missing). Re-encode just the clip instead.
+            bool noKeyframes = !segs[^1].Closed;
+            if (noKeyframes)
+            {
+                // re-encoding means decoding the whole open piece from its one keyframe: fine for a couple of minutes,
+                // too heavy mid-stream for a long one
+                DateTime openSince;
+                lock (_lock) openSince = segs[^1].Session == _activeSession ? _sessionStartedUtc : DateTime.MinValue;
+                var before = all.LastOrDefault(x => x.Session == segs[^1].Session && x.Key < segs[^1].Key);
+                if (before is not null) openSince = before.WrittenUtc;
+                if (openSince == DateTime.MinValue || DateTime.UtcNow - openSince > TimeSpan.FromMinutes(3))
+                    throw new InvalidOperationException("The encoder isn't making keyframes, so a clip can't be cut from the last few minutes. " +
+                                                        "Pick another encoder in Settings → Stream (or restart the stream).");
+                segs = segs.Where(x => x.Session == segs[^1].Session).ToList();
+            }
+            await ConcatAsync(ffmpeg, segs, outputPath, ct, lastSeconds: seconds, reencode: noKeyframes);
             return outputPath;
         }
         finally { lock (_lock) _pinned.Remove((long.MinValue, to)); }
     }
+
+    /// <summary>The segment being written has been open far longer than a segment should be: the encoder isn't making keyframes.</summary>
+    public bool SegmentsStuck(TimeSpan? limit = null)
+    {
+        var segs = Scan();
+        lock (_lock)
+        {
+            if (_activeSession <= 0 || DateTime.UtcNow - _sessionStartedUtc < (limit ?? TimeSpan.FromSeconds(SegmentSeconds * 6 + 4))) return false;
+            var mine = segs.Where(s => s.Session == _activeSession).ToList();
+            // still on the session's first segment, and it is being written
+            return mine.Count == 1 && mine[0].Size > 0;
+        }
+    }
+
+    private DateTime _sessionStartedUtc = DateTime.UtcNow;
+    private TimeSpan SessionAge() => DateTime.UtcNow - _sessionStartedUtc;
 
     private long LastExistingKey()
     {
@@ -284,7 +326,18 @@ public sealed class SegmentCache
     /// are joined and remuxed. Re-timing every 2 s segment (concat demuxer) leaves tiny audio gaps that MP4 turns
     /// into progressive A/V drift.
     /// </summary>
-    public static async Task ConcatAsync(string ffmpeg, IReadOnlyList<Segment> segs, string outputPath, CancellationToken ct)
+    /// <summary>A file's duration from ffmpeg's own report (no ffprobe needed).</summary>
+    private static async Task<double> DurationAsync(string ffmpeg, string file, CancellationToken ct)
+    {
+        var (_, info) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-i", file }, TimeSpan.FromSeconds(30), ct);
+        var m = System.Text.RegularExpressions.Regex.Match(info, @"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)");
+        return m.Success ? int.Parse(m.Groups[1].Value) * 3600 + int.Parse(m.Groups[2].Value) * 60
+                           + double.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture) : 0;
+    }
+
+    /// <param name="lastSeconds">Keep only the last this many seconds (cut at the keyframe just before, no re-encode).</param>
+    /// <param name="reencode">Re-encode the video (with <paramref name="lastSeconds"/>: when the video has no keyframe to cut at).</param>
+    public static async Task ConcatAsync(string ffmpeg, IReadOnlyList<Segment> segs, string outputPath, CancellationToken ct, int? lastSeconds = null, bool reencode = false)
     {
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(outputPath))!);
         string work = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"leapcast-export-{Guid.NewGuid():N}");
@@ -307,16 +360,37 @@ public sealed class SegmentCache
             }
 
             List<string> args;
-            if (sessionFiles.Count == 1)
-                args = new() { "-hide_banner", "-loglevel", "error", "-y", "-i", sessionFiles[0] };
-            else
+            string? concatList = null;
+            if (sessionFiles.Count > 1)
             {
                 // pipeline restarts during a recording: join the (few) sessions end to end
-                string list = System.IO.Path.Combine(work, "sessions.txt");
-                await File.WriteAllLinesAsync(list, sessionFiles.Select(f => "file '" + f.Replace('\\', '/').Replace("'", "'\\''") + "'"), ct);
-                args = new() { "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", list };
+                concatList = System.IO.Path.Combine(work, "sessions.txt");
+                await File.WriteAllLinesAsync(concatList, sessionFiles.Select(f => "file '" + f.Replace('\\', '/').Replace("'", "'\\''") + "'"), ct);
             }
-            args.AddRange(new[] { "-map", "0", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", outputPath });
+            if (lastSeconds is int keep && concatList is not null)
+            {
+                // trimming needs one file with a known end: join the sessions into one stream first
+                string joinedAll = System.IO.Path.Combine(work, "joined.ts");
+                var (jc, je) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
+                    "-i", concatList, "-map", "0", "-c", "copy", "-f", "mpegts", joinedAll }, TimeSpan.FromMinutes(10), ct);
+                if (jc != 0) throw new InvalidOperationException("Could not write the video file: " + je.Trim());
+                sessionFiles = new List<string> { joinedAll };
+                concatList = null;
+            }
+            args = new() { "-hide_banner", "-loglevel", "error", "-y" };
+            if (lastSeconds is int last && !reencode) args.AddRange(new[] { "-sseof", "-" + last.ToString(CultureInfo.InvariantCulture) });
+            if (concatList is null) args.AddRange(new[] { "-i", sessionFiles[0] });
+            else args.AddRange(new[] { "-f", "concat", "-safe", "0", "-i", concatList });
+            if (lastSeconds is int tail && reencode && concatList is null)
+            {
+                // no keyframe to seek to: decode from the start and drop all but the tail
+                double dur = await DurationAsync(ffmpeg, sessionFiles[0], ct);
+                if (dur > tail) args.AddRange(new[] { "-ss", (dur - tail).ToString("0.###", CultureInfo.InvariantCulture) });
+            }
+            if (reencode)
+                args.AddRange(new[] { "-map", "0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-g", "60", "-c:a", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", outputPath });
+            else
+                args.AddRange(new[] { "-map", "0", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", outputPath });
             var (code, err) = await EncoderCatalog.RunQuietAsync(ffmpeg, args, TimeSpan.FromMinutes(30), ct);
             if (code != 0) throw new InvalidOperationException("Could not write the video file: " + err.Trim());
         }

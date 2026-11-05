@@ -66,6 +66,24 @@ Check(noTest.Main.CapKbps <= 6000, $"Twitch + YouTube share an encode capped by 
 var ownO = new StreamOutput { Name = "YouTube HQ", Service = "YouTube", OwnBitrateKbps = 9000 };
 var withOwn = OutputBudget.Resolve(new StudioSettings(), new[] { twitchO, ownO }, false, enc, 8);
 Check(withOwn.Own.TryGetValue(ownO.Id, out var ownPlan) && ownPlan.CapKbps == 9000, "an output with its own encode gets its own bitrate");
+{
+    // Twitch and YouTube both set to their own 4000 kbps (and nothing on the main bitrate): one encode, not three
+    var t4 = new StreamOutput { Name = "Twitch", Service = "Twitch", OwnBitrateKbps = 4000 };
+    var y4 = new StreamOutput { Name = "YouTube", Service = "YouTube", OwnBitrateKbps = 4000 };
+    var pair = OutputBudget.Resolve(new StudioSettings { MaxBitrateKbps = 3000, QualityProfile = "Custom" }, new[] { t4, y4 }, false, enc, 8);
+    var riders = OutputBudget.MainRiders(new[] { t4, y4 }).Ids;
+    Check(pair.Own.Count == 0 && pair.Main.CapKbps == 4000 && riders.SetEquals(new[] { t4.Id, y4.Id })
+          && OutputManager.BusKey(t4, riders) == "main" && OutputManager.BusKey(y4, riders) == "main",
+        $"two destinations with the same own bitrate ride one encode, which also feeds clips and recording ({pair.Main.CapKbps} kbps, {pair.Own.Count} extra encodes)");
+    var y6 = new StreamOutput { Name = "YouTube HQ", Service = "YouTube", OwnBitrateKbps = 6000 };
+    var k6 = new StreamOutput { Name = "Kick", Service = "Custom", OwnBitrateKbps = 6000 };
+    var shared = new StreamOutput { Name = "Twitch", Service = "Twitch" };
+    var mixed = OutputBudget.Resolve(new StudioSettings(), new[] { shared, y6, k6 }, false, enc, 8);
+    var noRiders = OutputBudget.MainRiders(new[] { shared, y6, k6 }).Ids;
+    Check(noRiders.Count == 0 && mixed.Own.Count == 2 && mixed.Own[y6.Id] == mixed.Own[k6.Id]
+          && OutputManager.BusKey(y6, noRiders) == OutputManager.BusKey(k6, noRiders) && OutputManager.BusKey(shared, noRiders) == "main",
+        "outputs with the same own bitrate share one extra encode (Twitch on the main one, YouTube HQ + Kick at 6000 on one more)");
+}
 
 var lcam = new StudioSource { Type = SourceTypes.Camera };
 var lgame = new StudioSource { Type = SourceTypes.Display };
@@ -364,10 +382,62 @@ Console.WriteLine("Upload speed scan (kbps), against a local server limited to ~
 
 Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by day and time");
 {
+    // AMD's encoder ignored -g on the user's PC (one keyframe, then none): keyframes are forced every 2 s
+    var amfPlan = new EncodePlan(960, 540, 60, 4000, 22, "h264_amf", EncoderTier.Rich, false, true, "veryfast", "t", Array.Empty<string>());
+    var amfArgs = EncoderCatalog.BuildVideoArgs(amfPlan);
+    int fk = amfArgs.IndexOf("-force_key_frames");
+    Check(fk >= 0 && amfArgs[fk + 1] == "expr:if(isnan(prev_forced_t),1,gte(t,prev_forced_t+2-0.001))",
+        $"AMD encodes force a keyframe every 2 s ({(fk >= 0 ? amfArgs[fk + 1] : "missing")})");
+    var (_, encList) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-encoders" }, TimeSpan.FromSeconds(20), CancellationToken.None);
+    if (encList.Contains("h264_amf"))
+    {
+        var (_, amfHelp) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-h", "encoder=h264_amf" }, TimeSpan.FromSeconds(20), CancellationToken.None);
+        Check(amfHelp.Contains("forced_idr"), "the bundled FFmpeg's AMD encoder can make forced keyframes real IDR frames (forced_idr)");
+    }
+
+    // a clip is always the newest video, trimmed to the length asked for
+    string segRoot = Path.Combine(work, "clip-cache");
+    var cache = new SegmentCache(segRoot);
+    async Task<(int r, int g, int b)> LastColor(string file)
+    {
+        var px = await RawAsync(new[] { "-v", "error", "-sseof", "-0.5", "-i", file, "-frames:v", "1", "-vf", "scale=1:1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-" });
+        return px.Length >= 3 ? (px[0], px[1], px[2]) : (-1, -1, -1);
+    }
+    async Task Encode(string color, int seconds, int gop, string pattern, bool segment)
+    {
+        var a = new List<string> { "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", $"color=c={color}:s=320x180:r=30:d={seconds}",
+            "-f", "lavfi", "-i", $"sine=f=440:d={seconds}", "-c:v", "libx264", "-preset", "ultrafast", "-g", gop.ToString(), "-keyint_min", gop.ToString(), "-sc_threshold", "0",
+            "-c:a", "aac", "-shortest" };
+        a.AddRange(segment ? new[] { "-f", "segment", "-segment_time", "2", "-segment_format", "mpegts", pattern } : new[] { "-f", "mpegts", pattern.Replace("%06d", "000000") });
+        var (code, err) = await EncoderCatalog.RunQuietAsync(ffmpeg, a, TimeSpan.FromSeconds(60), CancellationToken.None);
+        if (code != 0) throw new Exception(err);
+    }
+    await Encode("red", 30, 60, cache.BeginSession(), true);   // an earlier run: proper 2 s pieces
+    cache.EndSession();
+    string trimmed = Path.Combine(work, "clip-trim.mp4");
+    await cache.SaveReplayAsync(ffmpeg, 10, trimmed);
+    var tp = await ProbeAsync(trimmed);
+    Check(tp.ok && tp.duration is > 9.5 and < 12.5, $"a 10 s clip from 30 s of pieces is 10 s long ({tp.duration:0.0}s), not every piece it touched");
+    await Encode("blue", 20, 100000, cache.BeginSession(), false); // newest run: an encoder that made one keyframe, so one never-ending piece
+    string stuck = Path.Combine(work, "clip-stuck.mp4");
+    await cache.SaveReplayAsync(ffmpeg, 10, stuck);
+    var sc = await LastColor(stuck);
+    var sp = await ProbeAsync(stuck);
+    Check(sc.b > 150 && sc.r < 80 && sp.streams.Contains("h264") && sp.duration is > 9 and < 12,
+        $"when the newest piece never ends (no keyframes), the clip is still the newest 10 s with its video ({sp.duration:0.0}s {sp.streams}, last frame rgb {sc})");
+
     Check(VoiceClips.Matches("Clip", "clip") && VoiceClips.Matches("clip that!", "clip") && VoiceClips.Matches("ok let's CLIP it", "clip"),
         "\"Clip\", \"clip that!\" and \"let's CLIP it\" trigger a clip");
     Check(!VoiceClips.Matches("clipboard", "clip") && !VoiceClips.Matches("eclipse", "clip") && !VoiceClips.Matches("click", "clip") && !VoiceClips.Matches("", "clip"),
         "\"clipboard\", \"eclipse\" and \"click\" don't");
+    Check(new[] { "clips", "Clipped that", "clipping time", "clipit", "Klip", "clip it now" }.All(h => VoiceClips.Matches(h, "clip")),
+        "what a recognizer often hears for it counts too: \"clips\", \"clipped\", \"clipping\", \"clipit\", \"Klip\"");
+    Check(new[] { "clipboard", "flip", "slip", "lip", "cliff", "eclipse", "clippers" }.All(h => !VoiceClips.Matches(h, "clip") || h == "clippers"),
+        "…but not other words (\"clipboard\", \"flip\", \"slip\", \"cliff\")");
+    var hi = VoiceClips.Sensitivity(new StudioSettings().VoiceClipSensitivity);
+    var norm = VoiceClips.Sensitivity("Normal");
+    Check(new StudioSettings().VoiceClipSensitivity == "High" && hi.Alone < norm.Alone && hi.InSentence < norm.InSentence && hi.UseRejected && hi.Rejection is >= 0 and < 60,
+        $"sensitivity High by default: accepts the word from {hi.Alone:0.00} confidence alone / {hi.InSentence:0.00} in a sentence (Normal: {norm.Alone:0.00}/{norm.InSentence:0.00}) and rechecks what the recognizer rejected");
     string cf = Path.Combine(work, "clips-test");
     if (Directory.Exists(cf)) Directory.Delete(cf, true);
     Directory.CreateDirectory(cf);
@@ -391,6 +461,27 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
     int crossings = 0;
     for (int k = 1; k < all.Count; k++) if (all[k - 1] < 0 && all[k] >= 0) crossings++;
     Check(Math.Abs(all.Count - 16000) <= 2 && Math.Abs(crossings - 440) <= 2, $"48 kHz stereo → 16 kHz mono: {all.Count} samples per second, a 440 Hz tone stays 440 Hz ({crossings})");
+    // a quiet microphone is brought up for the recognizer (not the stream)
+    var quiet = new SpeechPcmConverter();
+    var qout = new List<short>();
+    for (int packet = 0; packet < 300; packet++) // 3 s of a tone at -34 dBFS
+    {
+        var st = new float[480];
+        for (int f = 0; f < 480; f++) st[f] = (float)(0.02 * Math.Sin(2 * Math.PI * 220 * (packet * 480 + f) / 48000.0));
+        qout.AddRange(quiet.Convert(st, 48000));
+    }
+    int qpeak = qout.Skip(qout.Count - 16000).Max(v => Math.Abs((int)v));
+    var loud = new SpeechPcmConverter();
+    var lout = new List<short>();
+    for (int packet = 0; packet < 100; packet++)
+    {
+        var st = new float[480];
+        for (int f = 0; f < 480; f++) st[f] = (float)(0.9 * Math.Sin(2 * Math.PI * 220 * (packet * 480 + f) / 48000.0));
+        lout.AddRange(loud.Convert(st, 48000));
+    }
+    int lpeak = lout.Skip(8000).Max(v => Math.Abs((int)v));
+    Check(qpeak > 0.02 * 32767 * 5 && qpeak < 32767 && Math.Abs(lpeak - 0.9 * 32767) < 0.05 * 32767,
+        $"a quiet mic is turned up for the recognizer ({0.02 * 32767:0} → {qpeak} peak, ×{quiet.Gain:0.0}); a loud one is left alone ({lpeak})");
     var bs = new BlockingAudioStream();
     var reads = new List<int>();
     var reader = Task.Run(() => { var b = new byte[1920]; long total = 0; int n; while ((n = bs.Read(b, 0, b.Length)) > 0) { total += n; lock (reads) reads.Add(n); } return total; });

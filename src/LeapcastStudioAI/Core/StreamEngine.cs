@@ -325,6 +325,8 @@ public sealed class StreamEngine : IDisposable
     public PlanSet PlansFor(StudioSettings s) => PlansFor(s, LevelFor(s));
 
     /// <summary>Every encode for these settings at a rung of the performance ladder.</summary>
+    private bool _stuckWarned;
+
     private PlanSet PlansFor(StudioSettings s, int level)
     {
         var pool = Pool(s);
@@ -954,8 +956,9 @@ public sealed class StreamEngine : IDisposable
         bool anyOut = _outputs.AnyActive;
         var pool = anyOut ? Pool(Settings) : new List<StreamOutput>();
         bool vCanvas = Settings.VerticalCanvas || _outputs.ActiveOutputs().Any(o => o.IsVertical);
-        bool mainBus = pool.Any(o => !o.IsVertical && o.OwnBitrateKbps <= 0);
-        bool main = ReplayBuffer || _cache.IsRecording || mainBus;
+        bool mainBus = pool.Any(o => !o.IsVertical && o.OwnBitrateKbps <= 0) || OutputBudget.MainRiders(pool).Ids.Count > 0;
+        // while live, the main encode also keeps the last seconds for voice clips
+        bool main = ReplayBuffer || _cache.IsRecording || mainBus || (anyOut && Settings.VoiceClipEnabled);
         bool vEnc = vCanvas && pool.Any(o => o.IsVertical && o.OwnBitrateKbps <= 0);
         string own = string.Join(",", pool.Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || vCanvas))
             .Select(o => $"{o.Id:N}:{o.OwnBitrateKbps}:{(o.IsVertical ? "v" : "h")}").OrderBy(x => x, StringComparer.Ordinal));
@@ -1037,6 +1040,7 @@ public sealed class StreamEngine : IDisposable
         var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)));
         lock (_windows.CaptureSizes) foreach (var (k, v) in _windows.CaptureSizes) _knownSizes[k] = v;
         string? segPattern = shape.Main ? _cache.BeginSession() : null;
+        _stuckWarned = false;
 
         // One TS bus per encode that feeds destinations; outputs subscribe/unsubscribe at will.
         var buses = new Dictionary<string, TsBus>();
@@ -1046,10 +1050,12 @@ public sealed class StreamEngine : IDisposable
         var extra = new List<(string BusPath, bool Vertical, EncodePlan Plan)>();
         if (shape.MainBus) { buses["main"] = new TsBus(_pipeDir, "main"); signatures["main"] = Sig(plan); }
         if (shape.VerticalEncode && plans.Vertical is not null) { buses["vertical"] = new TsBus(_pipeDir, "vertical"); signatures["vertical"] = Sig(plans.Vertical); }
+        var riders = _outputs.AnyActive ? OutputBudget.MainRiders(Pool(Settings)).Ids : new HashSet<Guid>();
+        _outputs.MainRiders = riders;
         if (shape.Own.Length > 0)
             foreach (var o in Pool(Settings).Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || shape.Vertical)))
             {
-                string k = OutputManager.BusKey(o);
+                string k = OutputManager.BusKey(o, riders);
                 if (buses.ContainsKey(k) || !plans.Own.TryGetValue(o.Id, out var op)) continue;
                 var bus = new TsBus(_pipeDir, "own" + extra.Count);
                 buses[k] = bus;
@@ -1333,6 +1339,12 @@ public sealed class StreamEngine : IDisposable
             {
                 // keep enough history for a voice clip too
                 _cache.Housekeep(Math.Clamp(Math.Max(Settings.ReplaySeconds, Settings.VoiceClipEnabled ? Settings.VoiceClipSeconds : 0), 5, 600));
+                if (!_stuckWarned && _cache.SegmentsStuck())
+                {
+                    _stuckWarned = true;
+                    Message?.Invoke(this, new EngineMessageEventArgs($"{EncoderCatalog.DisplayName(CurrentPlan?.Encoder ?? "")} isn't making keyframes, so replays and voice clips " +
+                        "can't be cut and viewers may have trouble joining. Pick another encoder in Settings → Stream.", true));
+                }
                 if (_outputs.AnyActive && _runnerShape?.MainBus == true)
                 {
                     foreach (var s in _cache.Scan())

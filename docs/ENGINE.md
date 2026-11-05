@@ -101,3 +101,19 @@ coalesces: only the newest position of each overlay is sent, one axis per tick. 
 (`LayoutFingerprint`) compares what is composited (sizes, layers), not raw placement fields, so changing a corner anchor
 to a free position at the same size does not rebuild. Resizing does (runtime scale changes aren't safe with every filter
 on every FFmpeg version). FFmpeg's info log reports each input's real size, which makes the vertical auto-layout exact.
+
+
+## Keyframes, the segment cache and shared encodes (0.9.4)
+
+- Replay, recording and voice clips are cut from 2 s MPEG-TS segments, and a segment can only end on a keyframe.
+  AMD's encoder (`h264_amf`, low-latency usage) was seen ignoring `-g`: one keyframe at the start, none after, so a
+  whole stream went into one never-ending segment and clips fell back to the few closed segments from the start.
+  AMF now gets `-force_key_frames expr:if(isnan(prev_forced_t),1,gte(t,prev_forced_t+2))` (counted from the previous
+  forced keyframe, since pipeline timestamps don't start at 0) plus `-forced_idr 1` when the FFmpeg build has it
+  (checked with `-h encoder=h264_amf`). Destinations get their 2 s keyframes too.
+- `SaveReplayAsync` joins the last N/2 + 2 segments, uses the newest one even while it is still open, and trims to the
+  last N seconds with `-sseof` (stream copy). If the active session stays on its first segment, the engine warns that
+  the encoder isn't making keyframes.
+- Outputs with the same own bitrate share one encode (bus key `own_<kbps>_<h|v>`). When no destination uses the main
+  bitrate, the largest same-bitrate group rides the main encode (`OutputBudget.MainRiders`), which also feeds the
+  cache, so e.g. Twitch + YouTube at their own 4000 kbps is one encode instead of three.

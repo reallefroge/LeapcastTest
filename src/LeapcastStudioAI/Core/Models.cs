@@ -251,6 +251,8 @@ public sealed class StudioSettings
     public string VoiceClipWord { get; set; } = "clip";
     public int VoiceClipSeconds { get; set; } = 50;
     public string VoiceClipFolder { get; set; } = VoiceClips.DefaultFolder;
+    /// <summary>How readily the word counts: "Normal", "High" (default) or "Max" (<see cref="VoiceClips.Sensitivity"/>).</summary>
+    public string VoiceClipSensitivity { get; set; } = "High";
 
     // Reliability
     public bool AutoReconnect { get; set; } = true;
