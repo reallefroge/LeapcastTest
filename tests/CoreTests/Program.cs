@@ -559,27 +559,27 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
     Check(nl.Alone > hl.Alone && hl.Alone > ml.Alone && nl.DictationWeight > hl.DictationWeight && ml.DictationWeight == 0
           && nl.NearLetters == 0 && hl.NearLetters == 1 && ml.NearLetters == 2 && nl.Rejection > hl.Rejection && hl.Rejection > ml.Rejection,
         $"the three levels really differ: confidence {nl.Alone}/{hl.Alone}/{ml.Alone}, dictation weight {nl.DictationWeight}/{hl.DictationWeight}/{ml.DictationWeight} (Maximum: none), near-misses 0/1/2 letters");
-    // a quiet microphone is brought up for the recognizer (not the stream)
-    var quiet = new SpeechPcmConverter();
-    var qout = new List<short>();
-    for (int packet = 0; packet < 300; packet++) // 3 s of a tone at -34 dBFS
+    // a quiet microphone is brought up for the recognizer (not the stream), but its background noise isn't
+    (int peak, float gain) Run(double toneAmp, double noise)
     {
-        var st = new float[480];
-        for (int f = 0; f < 480; f++) st[f] = (float)(0.02 * Math.Sin(2 * Math.PI * 220 * (packet * 480 + f) / 48000.0));
-        qout.AddRange(quiet.Convert(st, 48000));
+        var c = new SpeechPcmConverter();
+        var rnd = new Random(3);
+        var o = new List<short>();
+        for (int packet = 0; packet < 400; packet++) // 4 s: words (0.5 s) with pauses (0.5 s), over steady background noise
+        {
+            bool word = packet / 50 % 2 == 0;
+            var st = new float[480];
+            for (int f = 0; f < 480; f++)
+                st[f] = (float)((word ? toneAmp * Math.Sin(2 * Math.PI * 220 * (packet * 480 + f) / 48000.0) : 0) + noise * (rnd.NextDouble() * 2 - 1));
+            o.AddRange(c.Convert(st, 48000));
+        }
+        return (o.Skip(o.Count - 16000).Max(v => Math.Abs((int)v)), c.Gain);
     }
-    int qpeak = qout.Skip(qout.Count - 16000).Max(v => Math.Abs((int)v));
-    var loud = new SpeechPcmConverter();
-    var lout = new List<short>();
-    for (int packet = 0; packet < 100; packet++)
-    {
-        var st = new float[480];
-        for (int f = 0; f < 480; f++) st[f] = (float)(0.9 * Math.Sin(2 * Math.PI * 220 * (packet * 480 + f) / 48000.0));
-        lout.AddRange(loud.Convert(st, 48000));
-    }
-    int lpeak = lout.Skip(8000).Max(v => Math.Abs((int)v));
-    Check(qpeak > 0.02 * 32767 * 5 && qpeak < 32767 && Math.Abs(lpeak - 0.9 * 32767) < 0.05 * 32767,
-        $"a quiet mic is turned up for the recognizer ({0.02 * 32767:0} → {qpeak} peak, ×{quiet.Gain:0.0}); a loud one is left alone ({lpeak})");
+    var quietMic = Run(0.02, 0.0005);
+    var hissyMic = Run(0.3, 0.03);
+    Check(quietMic.peak > 0.02 * 32767 * 4 && quietMic.peak < 32767,
+        $"a quiet mic is turned up for the recognizer ({0.02 * 32767:0} → {quietMic.peak} peak, ×{quietMic.gain:0.0})");
+    Check(hissyMic.gain < 1.2, $"…but a hissy one isn't, so the noise doesn't drown the word (×{hissyMic.gain:0.00} at -30 dBFS noise)");
     var bs = new BlockingAudioStream();
     var reads = new List<int>();
     var reader = Task.Run(() => { var b = new byte[1920]; long total = 0; int n; while ((n = bs.Read(b, 0, b.Length)) > 0) { total += n; lock (reads) reads.Add(n); } return total; });

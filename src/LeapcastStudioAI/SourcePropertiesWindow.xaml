@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Icon="pack://application:,,,/Assets/leapcast.ico"
         Title="Source properties" Height="640" Width="500" MinHeight="380"
-        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}">
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}" FontFamily="{StaticResource UiFont}">
   <DockPanel Margin="18,16,18,14">
     <StackPanel DockPanel.Dock="Top">
       <TextBlock x:Name="HeaderText" Text="Source" FontSize="20" FontWeight="Bold" Margin="3,0,0,2"/>
@@ -11,7 +11,7 @@
     </StackPanel>
     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
       <Button Content="Cancel" IsCancel="True" Click="Cancel_Click"/>
-      <Button Content="OK" IsDefault="True" MinWidth="80" Background="#5748C7" Click="Ok_Click"/>
+      <Button Content="OK" IsDefault="True" MinWidth="80" Style="{StaticResource PrimaryButton}" Click="Ok_Click"/>
     </StackPanel>
     <ScrollViewer VerticalScrollBarVisibility="Auto">
       <StackPanel Margin="0,6,8,0">

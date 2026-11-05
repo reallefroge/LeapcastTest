@@ -3,12 +3,12 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Icon="pack://application:,,,/Assets/leapcast.ico"
         Title="Leapcast Studio AI" Height="900" Width="1520" MinHeight="600" MinWidth="980"
-        Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}"
+        Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}" FontFamily="{StaticResource UiFont}"
         WindowStartupLocation="CenterScreen" Loaded="Window_Loaded" Closing="Window_Closing" PreviewKeyDown="Window_PreviewKeyDown">
   <Window.Resources>
     <!-- One multistream output row: status dot, name, live details, start/stop, edit -->
     <DataTemplate x:Key="OutputRowTemplate">
-      <Border Background="{StaticResource PanelAltBrush}" CornerRadius="8" Padding="8,6" Margin="0,3">
+      <Border Background="#0DFFFFFF" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="12" Padding="10,7" Margin="0,3">
         <DockPanel>
           <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE713;" Click="EditOutput_Click" Tag="{Binding Id}" ToolTip="Edit output"/>
           <Button DockPanel.Dock="Right" Content="{Binding ActionText}" Background="{Binding ActionBrush}" Click="ToggleOutput_Click"
@@ -31,7 +31,7 @@
 
     <!-- ===================== Menu bar + top bar ===================== -->
     <StackPanel Grid.Row="0">
-    <Menu x:Name="MainMenu" Padding="8,2,8,0" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1">
+    <Menu x:Name="MainMenu" Padding="10,3,10,1" Background="#990E1220" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1">
       <MenuItem Header="_Settings">
         <MenuItem Header="Stream…" Click="SettingsMenu_Click" Tag="Stream"/>
         <MenuItem Header="Hotkeys…" Click="SettingsMenu_Click" Tag="Hotkeys"/>
@@ -68,26 +68,26 @@
         <MenuItem Header="Open log folder" Click="OpenLogs_Click"/>
       </MenuItem>
     </Menu>
-    <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1" Padding="14,8">
+    <Border Background="#990E1220" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1" Padding="16,10">
       <DockPanel LastChildFill="False">
         <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
           <Image Source="pack://application:,,,/Assets/leapcast-64.png" Width="28" Height="28" Margin="0,0,9,0" VerticalAlignment="Center"
                  RenderOptions.BitmapScalingMode="HighQuality"/>
-          <TextBlock Text="LEAPCAST" FontSize="17" FontWeight="Bold" VerticalAlignment="Center"/>
-          <TextBlock Text="STUDIO AI" FontSize="17" Foreground="{StaticResource AccentBrush}" Margin="6,0,0,0" VerticalAlignment="Center"/>
-          <Border x:Name="EngineBadge" Background="#332F26" CornerRadius="10" Padding="9,3" Margin="16,0,0,0" VerticalAlignment="Center">
+          <TextBlock Text="LEAPCAST" FontFamily="{StaticResource DisplayFont}" FontSize="17" FontWeight="Bold" VerticalAlignment="Center"/>
+          <TextBlock Text="STUDIO AI" FontFamily="{StaticResource DisplayFont}" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource AccentGradient}" Margin="6,0,0,0" VerticalAlignment="Center"/>
+          <Border x:Name="EngineBadge" Background="#332F26" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="11" Padding="10,3" Margin="16,0,0,0" VerticalAlignment="Center">
             <TextBlock x:Name="EngineBadgeText" Text="STARTING ENGINE…" Foreground="{StaticResource WarnBrush}" FontSize="11" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-          <Border x:Name="LiveTag" Background="{StaticResource LiveBrush}" CornerRadius="6" Padding="9,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center">
+          <Border x:Name="LiveTag" Background="{StaticResource LiveBrush}" CornerRadius="11" Padding="11,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center">
             <TextBlock x:Name="LiveTagText" Text="LIVE" FontWeight="Bold" FontSize="12"/>
           </Border>
-          <Border x:Name="VoiceTag" Background="#24304A" CornerRadius="6" Padding="9,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center"
+          <Border x:Name="VoiceTag" Background="#1A3DD6F5" BorderBrush="#553DD6F5" BorderThickness="1" CornerRadius="11" Padding="11,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center"
                   ToolTip="Voice clips on (Settings → Recording)">
-            <TextBlock x:Name="VoiceTagText" Text="🎙 Say “Clip”" FontWeight="SemiBold" FontSize="12" Foreground="#9FC2FF"/>
+            <TextBlock x:Name="VoiceTagText" Text="🎙 Say “Clip”" FontWeight="SemiBold" FontSize="12" Foreground="#9FE8FF"/>
           </Border>
-          <Border x:Name="RecTag" Background="#7A2E31" CornerRadius="6" Padding="9,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center">
+          <Border x:Name="RecTag" Background="#7A2E31" CornerRadius="11" Padding="11,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center">
             <TextBlock x:Name="RecTagText" Text="● REC" FontWeight="Bold" FontSize="12"/>
           </Border>
           <Button x:Name="StudioModeButton" Content="Studio mode" Click="StudioMode_Click" Padding="12,8" Margin="0,0,6,0"
@@ -191,7 +191,7 @@
           <RowDefinition Height="Auto"/>
           <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <Border Grid.Row="0" Background="#07080C" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="10" Padding="10">
+        <Border Grid.Row="0" Background="#05060A" BorderBrush="{StaticResource CardEdgeBrush}" BorderThickness="1" CornerRadius="16" Padding="12">
           <Grid>
             <Grid.ColumnDefinitions>
               <ColumnDefinition x:Name="StageColumn" Width="0"/>
@@ -202,7 +202,7 @@
             <!-- Studio mode: the staged scene (editable) -->
             <DockPanel x:Name="StagePanel" Grid.Column="0" Visibility="Collapsed">
               <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
-                <TextBlock x:Name="StageSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#BEB6FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="StageSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#B9B0FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="PREVIEW" Style="{StaticResource SectionHeader}" Margin="0" ToolTip="Changes here go live when you click Transition"/>
               </DockPanel>
               <Viewbox x:Name="SViewbox" Stretch="Uniform">
@@ -390,7 +390,7 @@
     </Grid>
 
     <!-- ===================== Status bar ===================== -->
-    <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="14,5">
+    <Border Grid.Row="2" Background="#990E1220" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="16,6">
       <DockPanel>
         <TextBlock x:Name="VersionLabel" DockPanel.Dock="Right" Text="v" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center" Margin="18,0,0,0"/>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">

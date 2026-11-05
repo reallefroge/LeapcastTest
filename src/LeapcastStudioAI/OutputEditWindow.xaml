@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Icon="pack://application:,,,/Assets/leapcast.ico"
         Title="Output" Width="480" SizeToContent="Height" ResizeMode="NoResize"
-        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}">
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}" FontFamily="{StaticResource UiFont}">
   <StackPanel Margin="18,16,18,14">
     <TextBlock x:Name="HeaderText" Text="Add output" FontSize="20" FontWeight="Bold" Margin="3,0,0,8"/>
 

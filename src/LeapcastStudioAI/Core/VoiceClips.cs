@@ -119,7 +119,8 @@ public sealed class SpeechPcmConverter
     public const int OutRate = 16000;
     private double _pos;      // position of the next output sample, in input frames (relative to the packet)
     private float _last;      // last input frame of the previous packet (for interpolation across packets)
-    private float _env;       // level follower (fast up, slow down)
+    private float _env;       // speech level follower (fast up, slow down)
+    private float _noise;     // background level: follows the quiet moments down quickly, rises slowly
     private float _gain = 1f;
 
     /// <summary>
@@ -128,6 +129,9 @@ public sealed class SpeechPcmConverter
     /// </summary>
     public bool AutoGain { get; set; } = true;
     public const float TargetLevel = 0.3f, MaxGain = 8f;
+    /// <summary>Background noise is never boosted above this (RMS, about -36 dBFS): boosting a hissy mic into the
+    /// recognizer drowns the word (heard as "Phyllis set").</summary>
+    public const float NoiseCeiling = 0.015f;
     public float Gain => _gain;
 
     private float[]? _taps;
@@ -187,6 +191,15 @@ public sealed class SpeechPcmConverter
         if (n == 0 || rate <= 0) return Array.Empty<short>();
         double step = rate / (double)OutRate;
         var output = new List<short>((int)(n / step) + 2);
+        float maxGain = MaxGain;
+        if (AutoGain)
+        {
+            double sum = 0;
+            for (int k = 0; k < n; k++) sum += mono[k] * mono[k];
+            float rms = (float)Math.Sqrt(sum / n);
+            _noise = _noise <= 0 ? rms : rms < _noise ? _noise + (rms - _noise) * 0.3f : _noise + (rms - _noise) * 0.002f;
+            maxGain = Math.Clamp(NoiseCeiling / Math.Max(_noise, 1e-5f), 1f, MaxGain);
+        }
         // input frame -1 is the previous packet's last frame, so interpolation runs on across packets
         while (_pos < n - 1)
         {
@@ -198,8 +211,8 @@ public sealed class SpeechPcmConverter
             if (AutoGain)
             {
                 float lvl = Math.Abs(v);
-                _env = lvl > _env ? _env + (lvl - _env) * 0.02f : _env * 0.99996f;  // rises in ms, falls over ~1.5 s
-                float want = Math.Clamp(TargetLevel / Math.Max(_env, 1e-4f), 1f, MaxGain);
+                _env = lvl > _env ? _env + (lvl - _env) * 0.02f : _env * 0.99999f;  // rises in ms, holds for seconds between words
+                float want = Math.Clamp(TargetLevel / Math.Max(_env, 1e-4f), 1f, maxGain);
                 _gain += (want - _gain) * (want < _gain ? 0.02f : 0.0003f);          // turns down at once, up over ~0.2 s
                 v *= _gain;
             }

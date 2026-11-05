@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Icon="pack://application:,,,/Assets/leapcast.ico"
         Title="Studio settings" Height="760" Width="660" MinHeight="480"
-        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}">
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}" FontFamily="{StaticResource UiFont}">
   <DockPanel Margin="18,16,18,14">
     <TextBlock DockPanel.Dock="Top" Text="Studio settings" FontSize="22" FontWeight="Bold" Margin="3,0,0,6"/>
     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">

@@ -73,8 +73,15 @@ public sealed class MixerChannel : INotifyPropertyChanged
 public sealed class OutputRow : INotifyPropertyChanged
 {
     private static readonly Brush Grey = Frozen(0x5A, 0x60, 0x70), Amber = Frozen(0xFF, 0xC9, 0x78), Green = Frozen(0x6F, 0xDB, 0x9A),
-        Red = Frozen(0xFF, 0x7A, 0x7A), StartBg = Frozen(0x57, 0x48, 0xC7), StopBg = Frozen(0xB8, 0x36, 0x3B), Disabled = Frozen(0x2A, 0x2F, 0x3D);
+        Red = Frozen(0xFF, 0x6B, 0x7A), StartBg = Gradient(0x73, 0x56, 0xFF, 0x4A, 0x7B, 0xFF), StopBg = Gradient(0xD1, 0x3C, 0x4A, 0xA8, 0x2C, 0x5C),
+        Disabled = Frozen(0x1C, 0x21, 0x30);
     private static SolidColorBrush Frozen(byte r, byte g, byte b) { var x = new SolidColorBrush(Color.FromRgb(r, g, b)); x.Freeze(); return x; }
+    private static Brush Gradient(byte r1, byte g1, byte b1, byte r2, byte g2, byte b2)
+    {
+        var x = new LinearGradientBrush(Color.FromRgb(r1, g1, b1), Color.FromRgb(r2, g2, b2), new Point(0, 0), new Point(1, 1));
+        x.Freeze();
+        return x;
+    }
 
     private string _name = "", _detail = "", _action = "";
     private Brush _dot = Grey, _actionBrush = StartBg;
@@ -1960,7 +1967,7 @@ public static class TextPrompt
     {
         var box = new TextBox { Text = initial, MinWidth = 300 };
         var pw = new PasswordBox { MinWidth = 300, Password = initial };
-        var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 80, Background = new SolidColorBrush(Color.FromRgb(0x57, 0x48, 0xC7)) };
+        var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 80, Style = (Style)Application.Current.FindResource("PrimaryButton") };
         var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 80 };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
         buttons.Children.Add(cancel);
@@ -1975,6 +1982,7 @@ public static class TextPrompt
             ResizeMode = ResizeMode.NoResize, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Background = (Brush)Application.Current.FindResource("BgBrush"),
             Foreground = (Brush)Application.Current.FindResource("TextBrush"),
+            FontFamily = (FontFamily)Application.Current.FindResource("UiFont"),
         };
         ok.Click += (_, _) => w.DialogResult = true;
         w.Loaded += (_, _) => { if (secret) pw.Focus(); else { box.Focus(); box.SelectAll(); } };

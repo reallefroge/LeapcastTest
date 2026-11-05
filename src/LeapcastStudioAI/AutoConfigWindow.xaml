@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Icon="pack://application:,,,/Assets/leapcast.ico"
         Title="Auto-config wizard" Width="600" Height="640" MinHeight="520" ResizeMode="CanResize"
-        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}">
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}" FontFamily="{StaticResource UiFont}">
   <DockPanel Margin="20,16,20,14">
     <StackPanel DockPanel.Dock="Top">
       <TextBlock Text="Auto-config" FontSize="22" FontWeight="Bold" Margin="3,0,0,2"/>
