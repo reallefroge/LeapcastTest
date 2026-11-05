@@ -442,6 +442,9 @@ Console.WriteLine("Status bar: stream health, uptime, record time, bitrate, enco
     var slow = S(true, false, 0.82, 48, O(OutputState.Live, 0.1));
     Check(StatusSummary.Encoder(slow, 60) is { Text: "Encoder overloaded", Level: StatusLevel.Bad } && StatusSummary.Encoder(slow, 60).Tip.Contains("0.82×"),
         $"an overloaded encoder says so, with the numbers on hover ({StatusSummary.Encoder(slow, 60).Tip.Split('\n')[0]})");
+    var recOnly = S(false, true, 1.0, 60);
+    Check(StatusSummary.Bitrate(recOnly).Level == StatusLevel.Off && StatusSummary.Encoder(recOnly, 60).Level == StatusLevel.Off,
+        "recording alone doesn't light up the bitrate or encoder (they're for the live stream)");
     var idle = new EngineStatus(false, false, false, false, false, null, 0, 0, 0, 0, 0, 0, 0, TimeSpan.Zero, TimeSpan.Zero, "Idle", null);
     Check(StatusSummary.Live(idle).Level == StatusLevel.Off && StatusSummary.Encoder(idle, 60).Text == "Encoder: idle" && StatusSummary.StreamHealth(idle).Text == "Stream: offline",
         "idle: everything dimmed");
@@ -529,8 +532,33 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
         all.AddRange(conv.Convert(SpeechPcmConverter.Mono(st, 2), 48000));
     }
     int crossings = 0;
-    for (int k = 1; k < all.Count; k++) if (all[k - 1] < 0 && all[k] >= 0) crossings++;
-    Check(Math.Abs(all.Count - 16000) <= 2 && Math.Abs(crossings - 440) <= 2, $"48 kHz stereo → 16 kHz mono: {all.Count} samples per second, a 440 Hz tone stays 440 Hz ({crossings})");
+    // after the first 0.1 s (the filter starting from silence), 0.9 s of a 440 Hz tone = 396 cycles
+    for (int k = 1601; k < all.Count; k++) if (all[k - 1] < 0 && all[k] >= 0) crossings++;
+    Check(Math.Abs(all.Count - 16000) <= 2 && Math.Abs(crossings - 396) <= 2, $"48 kHz stereo → 16 kHz mono: {all.Count} samples per second, a 440 Hz tone stays 440 Hz ({crossings} cycles in 0.9 s)");
+    // downsampling filters out what 16 kHz can't hold, instead of folding it onto the speech band
+    double ToneRms(double hz)
+    {
+        var c = new SpeechPcmConverter { AutoGain = false };
+        var o = new List<short>();
+        for (int packet = 0; packet < 100; packet++)
+        {
+            var st = new float[480];
+            for (int f = 0; f < 480; f++) st[f] = (float)(0.5 * Math.Sin(2 * Math.PI * hz * (packet * 480 + f) / 48000.0));
+            o.AddRange(c.Convert(st, 48000));
+        }
+        return Math.Sqrt(o.Skip(1600).Average(v => (double)v * v)) / 32768.0;
+    }
+    double pass = ToneRms(1000), hiss = ToneRms(12000);
+    Check(pass > 0.33 && hiss < 0.01, $"48 → 16 kHz: speech passes ({pass:0.000} RMS at 1 kHz), 12 kHz hiss is filtered out ({hiss:0.0000}) instead of aliasing to 4 kHz");
+    Check(VoiceClips.NearMatch("klip", "clip") && VoiceClips.NearMatch("clap that", "clip") && VoiceClips.NearMatch("flips", "clip")
+          && !VoiceClips.NearMatch("but", "clip") && !VoiceClips.NearMatch("by the", "clip") && !VoiceClips.NearMatch("live", "clip") && !VoiceClips.NearMatch("click", "clip"),
+        "High also takes a word one letter off (\"klip\", \"clap\", \"flip\"), not \"but\", \"live\" or \"click\"");
+    Check(VoiceClips.NearMatch("click", "clip", 2) && VoiceClips.NearMatch("chip", "clip", 2) && !VoiceClips.NearMatch("but", "clip", 2) && !VoiceClips.NearMatch("the weather", "clip", 2),
+        "Maximum goes to two letters (\"click\", \"chip\"), still not \"but\"");
+    var nl = VoiceClips.Sensitivity("Normal"); var hl = VoiceClips.Sensitivity("High"); var ml = VoiceClips.Sensitivity("Max");
+    Check(nl.Alone > hl.Alone && hl.Alone > ml.Alone && nl.DictationWeight > hl.DictationWeight && ml.DictationWeight == 0
+          && nl.NearLetters == 0 && hl.NearLetters == 1 && ml.NearLetters == 2 && nl.Rejection > hl.Rejection && hl.Rejection > ml.Rejection,
+        $"the three levels really differ: confidence {nl.Alone}/{hl.Alone}/{ml.Alone}, dictation weight {nl.DictationWeight}/{hl.DictationWeight}/{ml.DictationWeight} (Maximum: none), near-misses 0/1/2 letters");
     // a quiet microphone is brought up for the recognizer (not the stream)
     var quiet = new SpeechPcmConverter();
     var qout = new List<short>();

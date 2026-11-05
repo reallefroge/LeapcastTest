@@ -171,7 +171,7 @@
             <TextBlock Text="VOICE CLIPS" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
             <CheckBox x:Name="VoiceClipBox" Content="Save a clip when I say the word"
                       Checked="VoiceClipBox_Changed" Unchecked="VoiceClipBox_Changed"/>
-            <TextBlock Text="Applies immediately. Works while live, recording or with the replay buffer on."
+            <TextBlock Text="Applies immediately. Clips are taken while you're live (or recording)."
                        Style="{StaticResource Hint}"/>
             <Grid Margin="0,2,0,0">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>

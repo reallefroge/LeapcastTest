@@ -22,7 +22,7 @@ public sealed class VoiceCommandListener : IDisposable
     private string _word = "clip";
 
     public static readonly TimeSpan Cooldown = TimeSpan.FromSeconds(6);
-    private (float Alone, float InSentence, int Rejection, bool UseRejected) _level = VoiceClips.Sensitivity("High");
+    private VoiceClips.SensitivityLevel _level = VoiceClips.Sensitivity("High");
 
     /// <summary>The word was heard: (what was recognized, confidence, when the word started being said, UTC).</summary>
     public event Action<string, float, DateTime>? Heard;
@@ -63,8 +63,19 @@ public sealed class VoiceCommandListener : IDisposable
             var forms = new[] { _word, _word + "s", _word + " it", _word + " that", _word + " this", _word + " it now", _word + " that now" };
             var command = new Grammar(new GrammarBuilder(new Choices(forms))) { Name = "command", Priority = 10, Weight = 1f };
             engine.LoadGrammar(command);
-            try { engine.LoadGrammar(new DictationGrammar { Name = "dictation", Priority = 0 }); }
-            catch { /* some recognizers have no dictation: the word alone still works */ }
+            // the word with other speech around it ("okay let's clip that"): any words, the word, any words
+            var around = new GrammarBuilder();
+            around.AppendWildcard();
+            around.Append(new Choices(_word, _word + "s", _word + " it", _word + " that"));
+            var before = new GrammarBuilder();
+            before.AppendWildcard();
+            before.Append(new Choices(_word, _word + "s"));
+            engine.LoadGrammar(new Grammar(new GrammarBuilder(new Choices(around, before))) { Name = "sentence", Priority = 8, Weight = 0.9f });
+            // free dictation, weighted down: it recognizes other speech as what it is (so it doesn't trigger), but
+            // shouldn't out-vote the word ("clip" heard as "but", "by", "let")
+            if (_level.DictationWeight > 0)
+                try { engine.LoadGrammar(new DictationGrammar { Name = "dictation", Priority = 0, Weight = _level.DictationWeight }); }
+                catch { /* some recognizers have no dictation: the word alone still works */ }
             if (feed is not null) engine.SetInputToAudioStream(feed, new SpeechAudioFormatInfo(SpeechPcmConverter.OutRate, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
             else engine.SetInputToDefaultAudioDevice();
             // the recognizer drops results below its own confidence bar before we see them: lower it
@@ -112,30 +123,38 @@ public sealed class VoiceCommandListener : IDisposable
     private DateTime SpokenAt(RecognizedPhrase p, RecognitionResult result)
     {
         var now = DateTime.UtcNow;
+        DateTime estimate = now - TimeSpan.FromSeconds(1.2); // the word took at least this long to say and recognize
         try
         {
-            TimeSpan? pos = null;
+            if (result.Audio is not { } phrase) return estimate;
+            // A word's audio (GetAudioForWordRange) is positioned relative to the phrase on some recognizers and to
+            // the whole stream on others: take whichever reading lands inside the phrase.
+            var offset = TimeSpan.Zero;
             if (ReferenceEquals(p, result))
             {
-                var unit = result.Words.FirstOrDefault(w => VoiceClips.Matches(w.Text, _word));
-                if (unit is not null) pos = result.GetAudioForWordRange(unit, unit)?.AudioPosition;
+                var unit = result.Words.FirstOrDefault(w => VoiceClips.Matches(w.Text, _word))
+                           ?? (_level.Near ? result.Words.FirstOrDefault(w => VoiceClips.NearMatch(w.Text, _word, _level.NearLetters)) : null);
+                if (unit is not null && result.GetAudioForWordRange(unit, unit) is { } word)
+                {
+                    var wp = word.AudioPosition;
+                    offset = wp >= phrase.AudioPosition && wp - phrase.AudioPosition <= phrase.Duration ? wp - phrase.AudioPosition : wp;
+                    if (offset < TimeSpan.Zero || offset > phrase.Duration) offset = TimeSpan.Zero;
+                }
             }
-            pos ??= result.Audio?.AudioPosition;
-            if (pos is { } at && _stream?.WallTimeAt(at) is { } wall && wall <= now && now - wall < TimeSpan.FromSeconds(15)) return wall;
-            if (result.Audio is { } audio)
-            {
-                var offset = (pos ?? audio.AudioPosition) - audio.AudioPosition;
-                return now - audio.Duration + offset - TimeSpan.FromSeconds(0.4);
-            }
+            // counted back from now: the phrase ended a moment ago (the recognizer waits for a short silence)
+            var fromNow = now - phrase.Duration + offset - TimeSpan.FromSeconds(0.4);
+            if (_stream?.WallTimeAt(phrase.AudioPosition + offset) is { } wall && Math.Abs((wall - fromNow).TotalSeconds) < 3) return wall;
+            return fromNow;
         }
         catch (Exception ex) { Debug?.Invoke("word timing: " + ex.Message); }
-        return now - TimeSpan.FromSeconds(1.2); // the word took at least this long to say and recognize
+        return estimate;
     }
 
     private bool Accept(RecognizedPhrase p, RecognitionResult result)
     {
-        if (!VoiceClips.Matches(p.Text, _word)) return false;
-        bool alone = p.Grammar?.Name == "command";
+        if (!(_level.Near ? VoiceClips.NearMatch(p.Text, _word, _level.NearLetters) : VoiceClips.Matches(p.Text, _word))) return false;
+        // the word on its own, or in a sentence (the sentence grammar is held to the stricter bar: it hunts for the word)
+        bool alone = p.Grammar?.Name is "command" or "sentence";
         if (p.Confidence < (alone ? _level.Alone : _level.InSentence)) return false;
         var now = DateTime.UtcNow;
         if (now - _last < Cooldown) return true; // heard, but a clip was just saved

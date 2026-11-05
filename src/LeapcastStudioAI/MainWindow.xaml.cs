@@ -591,8 +591,8 @@ public partial class MainWindow : Window
         StartAllButton.Content = allLive ? "Stop all" : "Start all";
         RecordButton.Content = st.Recording ? "■  Stop rec" : "●  Record";
         PreviewButton.Content = _engine.PreviewOn ? "■  Preview" : "▶  Preview";
-        ReplayBufferButton.Content = st.ReplayBuffer ? "Replay buffer: on" : "Replay buffer";
-        SaveReplayButton.IsEnabled = !_busy && encoding && st.Running;
+        VoiceClipsButton.Content = _state.Settings.VoiceClipEnabled ? "🎙  Voice clips: on" : "🎙  Voice clips: off";
+        VoiceClipsButton.Opacity = _state.Settings.VoiceClipEnabled ? 1 : 0.6;
 
         LiveTag.Visibility = st.Live ? Visibility.Visible : Visibility.Collapsed;
         int liveCount = st.Outputs.Count(o => o.State == OutputState.Live);
@@ -1127,7 +1127,7 @@ public partial class MainWindow : Window
     private void SetButtonsEnabled(bool on)
     {
         GoLiveButton.IsEnabled = AutoConfigMenu.IsEnabled = StartAllButton.IsEnabled = RecordButton.IsEnabled = PreviewButton.IsEnabled = PreviewButtonCenter.IsEnabled =
-            ReplayBufferButton.IsEnabled = SaveReplayButton.IsEnabled = HorizontalOutputs.IsEnabled = VerticalOutputs.IsEnabled = on;
+            HorizontalOutputs.IsEnabled = VerticalOutputs.IsEnabled = on;
     }
 
     // ------------------------------------------------------------------ multistream outputs
@@ -1335,11 +1335,12 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void ReplayBuffer_Click(object sender, RoutedEventArgs e)
+    /// <summary>The one switch for clipping: recent footage is always kept while live, so there's no buffer to start.</summary>
+    private async void VoiceClipsButton_Click(object sender, RoutedEventArgs e)
     {
-        bool on = !_engine.ReplayBuffer;
-        await Guarded(on ? "Starting replay buffer…" : "Stopping replay buffer…", () => _engine.SetReplayBufferAsync(on),
-            on ? $"Replay buffer on: the last {_state.Settings.ReplaySeconds}s can be saved any time." : "Replay buffer off.");
+        await SetVoiceClipsAsync(!_state.Settings.VoiceClipEnabled);
+        VoiceClipsButton.Content = _state.Settings.VoiceClipEnabled ? "🎙  Voice clips: on" : "🎙  Voice clips: off";
+        VoiceClipsButton.Opacity = _state.Settings.VoiceClipEnabled ? 1 : 0.6;
     }
 
     private async void Replay_Click(object sender, RoutedEventArgs e)

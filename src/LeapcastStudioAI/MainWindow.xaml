@@ -265,9 +265,9 @@
           <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
             <Button x:Name="PreviewButton" Content="▶  Preview" Click="Preview_Click" MinWidth="104"/>
             <Button x:Name="RecordButton" Content="●  Record" Click="Record_Click" MinWidth="104"/>
-            <Button x:Name="ReplayBufferButton" Content="Replay buffer" Click="ReplayBuffer_Click"
-                    ToolTip="Keep recent footage ready to save"/>
-            <Button x:Name="SaveReplayButton" Content="Save replay" Click="Replay_Click" ToolTip="Save the last seconds as a clip"/>
+            <Button x:Name="VoiceClipsButton" Content="🎙  Voice clips: on" Click="VoiceClipsButton_Click" MinWidth="128"
+                    ToolTip="Say the word while live to save a clip. Recent footage is always kept while live."/>
+            <Button x:Name="SettingsButton" Content="⚙  Settings" Click="Settings_Click" MinWidth="104"/>
           </StackPanel>
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
             <Border Style="{StaticResource Chip}" ToolTip="Frames per second (actual / target)">

@@ -33,7 +33,7 @@ public static class StatusSummary
              : new("Stream: good", StatusLevel.Good, tip);
     }
 
-    /// <summary>What's being sent (live) or written (recording only), and whether the upload keeps up with it.</summary>
+    /// <summary>What's being sent while live, and whether the upload keeps up with it (off when not live).</summary>
     public static StatusItem Bitrate(EngineStatus st)
     {
         if (st.Live && st.Outputs.Count > 0)
@@ -44,16 +44,14 @@ public static class StatusSummary
             if (level != StatusLevel.Good) tip += "\nData is queuing up: the connection is slower than the bitrate.";
             return new($"{st.UploadKbps:N0} kbps", level, tip);
         }
-        if ((st.Recording || st.ReplayBuffer) && st.RecentKbps > 0)
-            return new($"{st.RecentKbps:N0} kbps", StatusLevel.Good, "Encoded bitrate (recording / replay buffer)");
-        return new("0 kbps", StatusLevel.Off, "Not encoding");
+        return new("0 kbps", StatusLevel.Off, "Not live");
     }
 
     /// <summary>Encoding speed against real time: below 1× the PC can't keep up and frames are skipped.</summary>
     public static StatusItem Encoder(EngineStatus st, int targetFps)
     {
-        bool encoding = st.Running && (st.Live || st.Recording || st.ReplayBuffer);
-        if (!encoding) return new("Encoder: idle", StatusLevel.Off, "Not encoding");
+        // the stream's encoder: shown while live (recording alone doesn't light it up)
+        if (!st.Running || !st.Live) return new("Encoder: idle", StatusLevel.Off, "Not live");
         string tip = $"Encoding at {st.Speed:0.00}× real time, {st.Fps:0.0} of {targetFps} FPS. Frames skipped: {st.Dropped:N0}.";
         if (st.Speed > 0 && st.Speed < 0.9)
             return new("Encoder overloaded", StatusLevel.Bad, tip + "\nLower the resolution or frame rate, or use a GPU encoder (Tools → Auto-config).");

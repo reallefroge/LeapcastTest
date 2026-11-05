@@ -40,15 +40,62 @@ public static class VoiceClips
                && v >= MinSeconds && v <= MaxSeconds ? v : null;
     }
 
-    /// <summary>How readily the word counts, by the Settings choice.</summary>
-    /// <returns>Lowest confidence for the word said alone / inside a sentence, the recognizer's own rejection
-    /// threshold (0–100, -1 = leave it), and whether results the recognizer rejected are still checked.</returns>
-    public static (float Alone, float InSentence, int Rejection, bool UseRejected) Sensitivity(string? level) => level switch
+    /// <summary>One sensitivity level: what the listener accepts.</summary>
+    /// <param name="Alone">Lowest confidence for the word said on its own (or found by the sentence grammar).</param>
+    /// <param name="InSentence">Lowest confidence for the word inside free dictation.</param>
+    /// <param name="Rejection">The recognizer's own rejection bar (0–100; it drops results below it before we see them).</param>
+    /// <param name="UseRejected">Also check what the recognizer rejected, and its runner-up guesses.</param>
+    /// <param name="NearLetters">Accept words this many letters away from the word ("klip", "clap"); 0 = exact only.</param>
+    /// <param name="DictationWeight">How much free dictation competes with the word (0 = not loaded: everything is heard
+    /// as a possible "clip"). Lower = the word wins more often; dictation is what keeps other speech from triggering.</param>
+    public sealed record SensitivityLevel(float Alone, float InSentence, int Rejection, bool UseRejected, int NearLetters, float DictationWeight)
     {
-        "Normal" => (0.55f, 0.35f, -1, false),
-        "Max" => (0.12f, 0.08f, 5, true),
-        _ => (0.30f, 0.18f, 20, true), // High
+        public bool Near => NearLetters > 0;
+    }
+
+    /// <summary>How readily the word counts, by the Settings choice.</summary>
+    public static SensitivityLevel Sensitivity(string? level) => level switch
+    {
+        // cautious: clear "clip"s, rarely a false one
+        "Normal" => new(0.40f, 0.30f, 30, true, 0, 0.6f),
+        // the word wins over dictation more often, and a one-letter mishearing counts
+        "High" => new(0.20f, 0.15f, 10, true, 1, 0.3f),
+        // no dictation at all: every utterance is matched against the word; two-letter mishearings count
+        "Max" => new(0.05f, 0.05f, 0, true, 2, 0f),
+        _ => Sensitivity("High"),
     };
+
+    /// <summary>
+    /// Maximum sensitivity: also a word one letter away from the trigger ("klip", "clap", "flip", "clit"), which is
+    /// how a recognizer often mishears a short word in a noisy room.
+    /// </summary>
+    public static bool NearMatch(string? heard, string word, int letters = 1)
+    {
+        if (Matches(heard, word)) return true;
+        if (string.IsNullOrWhiteSpace(heard) || string.IsNullOrWhiteSpace(word)) return false;
+        string w = word.Trim().ToLowerInvariant();
+        if (w.Length < 3) return false;
+        foreach (Match m in Regex.Matches(heard.ToLowerInvariant(), @"[\p{L}]+"))
+        {
+            string t = m.Value;
+            // two letters off only for words that still share the word's first or last letter ("click", "chip", "lip")
+            int allowed = letters >= 2 && (t[0] == w[0] || t[^1] == w[^1] || t[0] == 'k' && w[0] == 'c') ? 2 : Math.Min(letters, 1);
+            if (allowed == 0) continue;
+            if (t.Length >= 3 && (Distance(t, w) <= allowed || t.EndsWith('s') && Distance(t[..^1], w) <= allowed)) return true;
+        }
+        return false;
+    }
+
+    private static int Distance(string a, string b)
+    {
+        var d = new int[a.Length + 1, b.Length + 1];
+        for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
+        for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+        for (int i = 1; i <= a.Length; i++)
+            for (int j = 1; j <= b.Length; j++)
+                d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+        return d[a.Length, b.Length];
+    }
 
     /// <summary>
     /// The clip's file: the day, then the time it was saved, e.g. "2026-11-04 15-57-32.mp4" (sorts in order;
@@ -83,9 +130,59 @@ public sealed class SpeechPcmConverter
     public const float TargetLevel = 0.3f, MaxGain = 8f;
     public float Gain => _gain;
 
-    /// <param name="mono">Mono input frames (already mixed down), at <paramref name="rate"/>.</param>
-    public short[] Convert(ReadOnlySpan<float> mono, int rate)
+    private float[]? _taps;
+    private int _tapsRate;
+    private float[] _history = Array.Empty<float>();
+
+    /// <summary>
+    /// Low-pass below 16 kHz's limit (about 7 kHz) before downsampling. Without it, everything between 8 and 24 kHz
+    /// (hiss, sibilance, fan noise) folds back onto the speech band and the recognizer mishears words ("clip" as "but").
+    /// </summary>
+    private float[] AntiAlias(ReadOnlySpan<float> x, int rate)
     {
+        if (rate <= OutRate * 1.05) return x.ToArray();
+        if (_taps is null || _tapsRate != rate)
+        {
+            _taps = Design(rate, 7000, 63);
+            _tapsRate = rate;
+            _history = new float[_taps.Length - 1];
+        }
+        int n = x.Length, m = _taps.Length;
+        var buf = new float[_history.Length + n];
+        _history.CopyTo(buf, 0);
+        x.CopyTo(buf.AsSpan(_history.Length));
+        var y = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            float acc = 0;
+            for (int k = 0; k < m; k++) acc += _taps[k] * buf[i + k];
+            y[i] = acc;
+        }
+        Array.Copy(buf, n, _history, 0, _history.Length);
+        return y;
+    }
+
+    /// <summary>Windowed-sinc (Blackman) low-pass, unity gain at 0 Hz.</summary>
+    private static float[] Design(int rate, double cutoffHz, int taps)
+    {
+        var h = new double[taps];
+        double fc = cutoffHz / rate, c = (taps - 1) / 2.0, sum = 0;
+        for (int k = 0; k < taps; k++)
+        {
+            double t = k - c;
+            double sinc = t == 0 ? 2 * fc : Math.Sin(2 * Math.PI * fc * t) / (Math.PI * t);
+            double w = 0.42 - 0.5 * Math.Cos(2 * Math.PI * k / (taps - 1)) + 0.08 * Math.Cos(4 * Math.PI * k / (taps - 1));
+            h[k] = sinc * w;
+            sum += h[k];
+        }
+        return h.Select(v => (float)(v / sum)).ToArray();
+    }
+
+    /// <param name="mono">Mono input frames (already mixed down), at <paramref name="rate"/>.</param>
+    public short[] Convert(ReadOnlySpan<float> input, int rate)
+    {
+        if (input.Length == 0 || rate <= 0) return Array.Empty<short>();
+        ReadOnlySpan<float> mono = AntiAlias(input, rate);
         int n = mono.Length;
         if (n == 0 || rate <= 0) return Array.Empty<short>();
         double step = rate / (double)OutRate;
