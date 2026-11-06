@@ -394,6 +394,10 @@
       <DockPanel>
         <TextBlock x:Name="VersionLabel" DockPanel.Dock="Right" Text="v" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center" Margin="18,0,0,0"/>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <StackPanel x:Name="SbRes" Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center" Background="Transparent">
+            <TextBlock Text="&#xE950;" FontFamily="{StaticResource IconFont}" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="SbResText" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Text="—"/>
+          </StackPanel>
           <StackPanel x:Name="SbHealth" Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center" Background="Transparent">
             <Ellipse x:Name="SbHealthDot" Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource MutedBrush}"/>
             <TextBlock x:Name="SbHealthText" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>

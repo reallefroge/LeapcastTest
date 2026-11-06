@@ -55,6 +55,11 @@ public sealed class WebViewFrameSource : IFrameSource
 
     private static Task<CoreWebView2Environment> SharedEnvironment()
     {
+        if (_environment is null)
+            // the status bar's CPU/RAM breakdown counts the browser engine's processes (asked on the UI thread)
+            ResourceMonitor.BrowserProcessIds = () => _environment is { IsCompletedSuccessfully: true } t
+                ? t.Result.GetProcessInfos().Select(p => p.ProcessId).ToList()
+                : Array.Empty<int>();
         return _environment ??= CoreWebView2Environment.CreateAsync(null, Path.Combine(StateStore.Folder, "webview2"),
             new CoreWebView2EnvironmentOptions(
                 // keep rendering while the window is off-screen/unfocused (it's never "visible" to Chromium)

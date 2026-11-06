@@ -656,6 +656,133 @@ var slowCam = CameraModes.Best(CameraModes.Parse("vcodec=mjpeg  min s=1280x720 f
 Check(slowCam is { Width: 640, MaxFps: 30 }, $"a camera that only does 24 FPS at 720p runs at 30 FPS in a smaller mode instead ({slowCam})");
 
 // ---------------------------------------------------------------- dshow parsing
+Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip from chat, stream recap, CPU/RAM readout");
+{
+    // ---- 9:16: camera top-right on a 960×540 canvas, game full screen ----
+    var lay = new ClipLayout(960, 540, new LayoutRect(0, 0, 960, 540), new LayoutRect(700, 20, 240, 135));
+    var tplan = VerticalClip.PlanFor(lay);
+    Check(tplan.OutW == 720 && tplan.OutH == 1280 && tplan.CamBox is { } cb0 && tplan.GameBox.W == 720 && tplan.GameBox.H is 404 or 405
+          && cb0.Y + cb0.H < tplan.GameBox.Y && tplan.CoverInGame is not null,
+        $"9:16 layout: camera on top ({tplan.CamBox}), the whole game below at full width ({tplan.GameBox}), nothing cropped");
+    string wideClip = Path.Combine(work, "wide.mp4"), tall = Path.Combine(work, "wide (9x16).mp4");
+    await RunAsync(new[] { "-y", "-f", "lavfi", "-i", "color=c=blue:s=960x540:r=30:d=4", "-f", "lavfi", "-i", "sine=d=4",
+        "-filter_complex", "[0:v]drawbox=x=700:y=20:w=240:h=135:color=red:t=fill[v]", "-map", "[v]", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", wideClip });
+    await VerticalClip.RenderAsync(ffmpeg, wideClip, tall, lay, new[] { "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23" }, "@leapcast");
+    async Task<(int r, int g, int b)> At(string file, int x, int y)
+    {
+        var px = await RawAsync(new[] { "-v", "error", "-ss", "1", "-i", file, "-frames:v", "1", "-vf", $"crop=4:4:{x - 2}:{y - 2},scale=1:1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-" });
+        return px.Length >= 3 ? (px[0], px[1], px[2]) : (-1, -1, -1);
+    }
+    var size = await Recap.SizeOfAsync(ffmpeg, tall, CancellationToken.None);
+    var cb = tplan.CamBox!.Value;
+    var camPx = await At(tall, cb.X + cb.W / 2, cb.Y + cb.H / 2);
+    var gamePx = await At(tall, tplan.GameBox.X + 100, tplan.GameBox.Y + tplan.GameBox.H - 60);
+    var coverPx = await At(tall, tplan.GameBox.X + (int)(tplan.CoverInGame!.Value.X * 0.75) + 30, tplan.GameBox.Y + (int)(tplan.CoverInGame!.Value.Y * 0.75) + 30);
+    var bgPx = await At(tall, 6, 6);
+    Check(size == (720, 1280) && camPx.r > 180 && camPx.b < 80 && gamePx.b > 180 && gamePx.r < 60 && coverPx.r < 170 && bgPx.b is > 30 and < 200,
+        $"rendered 9:16 {size}: camera red {camPx}, game blue {gamePx}, the camera's spot in the game blurred {coverPx}, background dimmed {bgPx}");
+
+    // ---- Wizard101 death: the red health globe empties to a gray globe with a yellow 0 ----
+    const int FW = 768, FH = 432;
+    byte[] Frame(double fill, bool empty, bool loading)
+    {
+        var f = new byte[FW * FH * 4];
+        for (int i = 0; i < f.Length; i += 4) { f[i] = 60; f[i + 1] = 40; f[i + 2] = 30; f[i + 3] = 255; }
+        double cx = 0.07 * FW, cy = 0.88 * FH, rad = 0.045 * FW;
+        for (int y = 0; y < FH; y++)
+            for (int x = 0; x < FW; x++)
+            {
+                int i = (y * FW + x) * 4;
+                if (loading && x < FW * 0.3 && y > FH * 0.6) { f[i] = 30; f[i + 1] = (byte)(60 + x % 40); f[i + 2] = (byte)(90 + y % 50); continue; }
+                double d = Math.Sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+                if (loading || d > rad) continue;
+                bool red = !empty && y >= cy + rad - 2 * rad * fill;
+                bool digit = empty && Math.Abs(x - cx) < rad * 0.25 && Math.Abs(y - cy) < rad * 0.4;
+                (byte r, byte g, byte b) c = digit ? ((byte)230, (byte)240, (byte)3) : red ? ((byte)200, (byte)30, (byte)30) : ((byte)180, (byte)190, (byte)200);
+                f[i] = c.b; f[i + 1] = c.g; f[i + 2] = c.r;
+            }
+        return f;
+    }
+    var det = new DeathDetector();
+    var deaths = new List<(DateTime Start, DateTime At)>();
+    det.Died += (s0, d0) => deaths.Add((s0, d0));
+    var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    var gameRect = new LayoutRect(0, 0, FW, FH);
+    var full = Frame(1, false, false); var gone = Frame(0, true, false); var loadingScreen = Frame(0, false, true);
+    for (double t = 0; t < 70; t += 0.25)
+    {
+        byte[] gframe = t < 20 ? full : t < 35 ? Frame(1 - 0.8 * (t - 20) / 15, false, false) : t < 37 ? gone : t < 60 ? full : loadingScreen;
+        det.Feed(gframe, FW, FH, gameRect, t0 + TimeSpan.FromSeconds(t));
+    }
+    double fightFrom = deaths.Count == 1 ? (deaths[0].Start - t0).TotalSeconds : double.NaN, diedAt = deaths.Count == 1 ? (deaths[0].At - t0).TotalSeconds : double.NaN;
+    Check(deaths.Count == 1 && fightFrom is > 9 and < 14.5 && diedAt is > 35 and < 36,
+        $"HP 0 is spotted once ({deaths.Count} death at {diedAt:0.0}s); the clip starts before the fight began (from {fightFrom:0.0}s; HP started dropping at 20s); a loading screen isn't a death");
+
+    // ---- !clip from Twitch chatReader ----
+    var modLine = "@badge-info=;badges=moderator/1;display-name=ModGuy;mod=1 :modguy!modguy@modguy.tmi.twitch.tv PRIVMSG #reallefroge :!clip that was insane";
+    var viewerLine = "@badges=;display-name=Viewer :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #reallefroge :!clip";
+    var vipLine = "@badges=vip/1;display-name=Vippy :vippy!vippy@vippy.tmi.twitch.tv PRIVMSG #reallefroge :!CLIP";
+    var mm = TwitchChat.Parse(modLine, DateTime.UtcNow)!; var vm = TwitchChat.Parse(viewerLine, DateTime.UtcNow)!; var pm = TwitchChat.Parse(vipLine, DateTime.UtcNow)!;
+    Check(mm.Moderator && mm.User == "ModGuy" && TwitchChat.IsCommand(mm.Text, "!clip") && TwitchChat.IsCommand(pm.Text, "!clip") && !TwitchChat.IsCommand("!clipboard", "!clip")
+          && TwitchChat.Allowed(mm, ChatClipWho.Mods) && !TwitchChat.Allowed(vm, ChatClipWho.Mods) && !TwitchChat.Allowed(pm, ChatClipWho.Mods)
+          && TwitchChat.Allowed(pm, ChatClipWho.ModsAndVips) && TwitchChat.Allowed(vm, ChatClipWho.Everyone),
+        "chat: \"!clip\" from a mod counts, a viewer's doesn't (unless set to everyone), VIPs optional; \"!clipboard\" isn't the command");
+    Check(TwitchChat.ChannelFrom("https://www.twitch.tv/popout/reallefroge/chat?popout=") == "reallefroge" && TwitchChat.ChannelFrom("#ReAllefroge") == "reallefroge"
+          && TwitchChat.ChannelFrom("http://127.0.0.1:8081") is null,
+        "the channel comes from the Twitch chat source's link (or what you type)");
+    var irc = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+    irc.Start();
+    int ircPort = ((System.Net.IPEndPoint)irc.LocalEndpoint).Port;
+    var heardCmd = new List<string>();
+    var chatLog = new List<string>();
+    using (var chatReader = new TwitchChat { Host = "127.0.0.1", Port = ircPort, UseTls = false })
+    {
+        chatReader.Command += m => { lock (heardCmd) heardCmd.Add(m.User); };
+        chatReader.Debug += d => { lock (chatLog) chatLog.Add(d); };
+        chatReader.Start("reallefroge", "!clip", ChatClipWho.Mods);
+        using var client = await irc.AcceptTcpClientAsync();
+        var ns = client.GetStream();
+        var rd = new StreamReader(ns); var wr = new StreamWriter(ns) { NewLine = "\r\n", AutoFlush = true };
+        var sent = new List<string>();
+        for (int i = 0; i < 4; i++) sent.Add(await rd.ReadLineAsync() ?? "");
+        await wr.WriteLineAsync("PING :tmi.twitch.tv");
+        string pong = await rd.ReadLineAsync() ?? "";
+        await wr.WriteLineAsync(viewerLine);
+        await wr.WriteLineAsync(modLine);
+        await Task.Delay(800);
+        Check(sent.Any(l => l == "JOIN #reallefroge") && sent.Any(l => l.StartsWith("NICK justinfan")) && pong == "PONG :tmi.twitch.tv" && heardCmd.SequenceEqual(new[] { "ModGuy" }),
+            $"reads chat anonymously (sent: {string.Join(" | ", sent)}; answered {pong}); clipped for: {string.Join(", ", heardCmd)}");
+    }
+    irc.Stop();
+
+    // ---- recap after the stream ----
+    string recapSrc = Path.Combine(work, "recap-src");
+    Directory.CreateDirectory(recapSrc);
+    var rclips = new List<string>();
+    foreach (var (name, color) in new[] { ("2026-11-06 20-00-00", "red"), ("2026-11-06 20-10-00 death", "green") })
+    {
+        string c = Path.Combine(recapSrc, name + ".mp4");
+        await RunAsync(new[] { "-y", "-f", "lavfi", "-i", $"color=c={color}:s=640x360:r=30:d=6", "-f", "lavfi", "-i", "sine=d=6",
+            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", c });
+        rclips.Add(c);
+    }
+    File.Copy(wideClip, Path.Combine(recapSrc, "2026-11-06 20-00-00 (9x16).mp4"), true);
+    string recapDir = Recap.FolderFor(recapSrc, new DateTime(2026, 11, 6, 19, 58, 0));
+    var recap = await Recap.BuildAsync(ffmpeg, rclips, recapDir, "Stream highlights", "twitch.tv/reallefroge\n@reallefroge");
+    var reelProbe = await ProbeAsync(recap.Reel!);
+    double expect = Recap.IntroSeconds + 6 + 6 + Recap.OutroSeconds;
+    Check(reelProbe.ok && Math.Abs(reelProbe.duration - expect) < 1.2 && recap.Thumbnails.Count == 2 && recap.Clips.All(File.Exists) && rclips.All(c => !File.Exists(c))
+          && File.Exists(Path.Combine(recapDir, "2026-11-06 20-00-00 (9x16).mp4")),
+        $"recap: clips (and their 9:16 copies) moved into \"{Path.GetFileName(recapDir)}\", a {reelProbe.duration:0.0}s highlight reel (title, clips, outro), {recap.Thumbnails.Count} thumbnails");
+
+    // ---- CPU/RAM readout ----
+    ResourceMonitor.Sample();
+    await Task.Delay(300);
+    var usage = ResourceMonitor.Sample();
+    Check(usage.Any(u => u.Role == ResourceMonitor.App && u.MemoryBytes > 10_000_000), "CPU/RAM readout: " + ResourceMonitor.Describe(usage).Replace("\n", " · "));
+}
+
 Console.WriteLine("Device list parsing");
 var dshow = DeviceDiscovery.ParseDshowList("""
 [dshow @ 0000024c] "Logitech BRIO" (video)
@@ -735,7 +862,8 @@ Directory.CreateDirectory(liveDir);
 // Adaptation is off for the timing-sensitive tests (a rung change would rebuild the pipeline mid-test);
 // it gets its own end-to-end test below.
 var settings = new StudioSettings { QualityProfile = "Custom", Resolution = "640 × 360", FrameRate = 30, MaxBitrateKbps = 1500, Encoder = "libx264", RecordingFolder = Path.Combine(work, "videos"),
-    ReplaySeconds = 6, Outputs = new() { outA, outB, outV }, AdaptivePerformance = false };
+    ReplaySeconds = 6, Outputs = new() { outA, outB, outV }, AdaptivePerformance = false,
+    InstantSwitching = true }; // live show/hide and seamless scene switches (light mode is tested on its own)
 await engine.UpdateAsync(scene, settings, false);
 async Task AdaptSection(StudioScene light)
 {
@@ -1464,6 +1592,25 @@ async Task LiveSwitchSection(StudioScene light)
     var hp = await ProbeAsync(Path.Combine(liveDir, "handover.flv"));
     Check(hp.ok && hp.duration > 12, $"the destination received one continuous stream across the rebuild ({hp.duration:0.0}s)");
     card.CropLeft = 0;
+
+    Console.WriteLine("Light mode: hidden sources aren't captured at all; showing one rebuilds");
+    var lset = WithEncoder(settings, "libx264"); lset.InstantSwitching = false;
+    engine.FrameReady += Take;
+    card.Visible = false;
+    await engine.UpdateAsync(new[] { hs }, hs, lset, false);
+    await engine.SetReplayBufferAsync(true);
+    await Task.Delay(3500);
+    string graph = ReadShared(Path.Combine(work, "data", "logs", "ffmpeg-last.log"));
+    bool hiddenCaptured = graph.Contains(Path.GetFileName(redPng));
+    int lStarts = engine.PipelineStarts;
+    card.Visible = true;
+    await engine.UpdateAsync(new[] { hs }, hs, lset, false);
+    await Task.Delay(3500);
+    var shownNow = Program(0.15, (0.05 * 360 + 36) / 360);
+    Check(!hiddenCaptured && engine.PipelineStarts == lStarts + 1 && shownNow.r > 150 && shownNow.g < 80,
+        $"the hidden card wasn't in the pipeline ({(hiddenCaptured ? "it was" : "not opened")}); showing it rebuilt once and it's on screen ({shownNow})");
+    engine.FrameReady -= Take;
+    await engine.SetReplayBufferAsync(false);
     await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
 }
 

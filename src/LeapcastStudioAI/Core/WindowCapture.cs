@@ -210,6 +210,7 @@ public sealed class WindowCaptureBridge : IDisposable
         Process p;
         try { p = Process.Start(psi)!; }
         catch (Exception ex) { Wait(r, "couldn't start: " + ex.Message); return; }
+        ResourceMonitor.Track(p, ResourceMonitor.Capture);
         try { p.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
         r.Proc = p;
         r.Running = true;

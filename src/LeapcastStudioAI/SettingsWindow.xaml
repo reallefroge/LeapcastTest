@@ -198,6 +198,58 @@
             </DockPanel>
             <TextBlock Text="Named by date and time (2026-11-04 15-57-32.mp4). Speech recognition runs on this PC."
                        Style="{StaticResource Hint}"/>
+
+            <TextBlock Text="9:16 CLIPS (TIKTOK, SHORTS)" Style="{StaticResource SectionHeader}" Margin="3,16,3,8"/>
+            <CheckBox x:Name="VerticalClipsBox" Content="Also save every clip as 9:16"/>
+            <TextBlock Text="Camera on top, the whole game below (nothing cropped), blurred game behind. Saved next to the clip as &quot;(9x16)&quot;."
+                       Style="{StaticResource Hint}"/>
+            <TextBlock Text="Text at the bottom (optional)" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="ClipHandleBox"/>
+
+            <TextBlock Text="WIZARD101" Style="{StaticResource SectionHeader}" Margin="3,16,3,8"/>
+            <CheckBox x:Name="DeathClipsBox" Content="Save the fight when my HP hits 0"/>
+            <TextBlock Text="Watches the red health globe. When it empties, saves from the start of the fight (up to 5 minutes) to just after the death, named &quot;… death.mp4&quot;."
+                       Style="{StaticResource Hint}"/>
+
+            <TextBlock Text="CHAT CLIPS (TWITCH)" Style="{StaticResource SectionHeader}" Margin="3,16,3,8"/>
+            <CheckBox x:Name="ChatClipsBox" Content="Clip when someone types the command in chat"/>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="Command" Style="{StaticResource FieldLabel}"/>
+                <TextBox x:Name="ChatCommandBox"/>
+              </StackPanel>
+              <StackPanel Grid.Column="2">
+                <TextBlock Text="Who can use it" Style="{StaticResource FieldLabel}"/>
+                <ComboBox x:Name="ChatWhoBox">
+                  <ComboBoxItem Content="Me and mods" Tag="Mods"/>
+                  <ComboBoxItem Content="Me, mods and VIPs" Tag="ModsAndVips"/>
+                  <ComboBoxItem Content="Everyone" Tag="Everyone"/>
+                </ComboBox>
+              </StackPanel>
+            </Grid>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="Twitch channel (empty = from your chat source)" Style="{StaticResource FieldLabel}"/>
+                <TextBox x:Name="ChatChannelBox"/>
+              </StackPanel>
+              <StackPanel Grid.Column="2">
+                <TextBlock Text="Viewer delay (seconds)" Style="{StaticResource FieldLabel}"/>
+                <TextBox x:Name="ChatDelayBox"/>
+              </StackPanel>
+            </Grid>
+            <TextBlock Text="Reads chat anonymously (no login). Viewers see the stream a few seconds late, so the clip ends that much before their message."
+                       Style="{StaticResource Hint}"/>
+
+            <TextBlock Text="STREAM RECAP" Style="{StaticResource SectionHeader}" Margin="3,16,3,8"/>
+            <CheckBox x:Name="RecapBox" Content="When a stream ends, build a recap of its clips"/>
+            <TextBlock Text="A &quot;Recap&quot; folder in your clips folder: the stream's clips, a highlight reel with title and outro cards, and a thumbnail from each clip."
+                       Style="{StaticResource Hint}"/>
+            <TextBlock Text="Title card" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="RecapTitleBox"/>
+            <TextBlock Text="Outro card: your socials, one per line" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="RecapSocialsBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" VerticalContentAlignment="Top"/>
           
             </StackPanel>
           </Border>
@@ -207,6 +259,11 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">
             <StackPanel>
+            <TextBlock Text="PERFORMANCE" Style="{StaticResource SectionHeader}"/>
+            <CheckBox x:Name="InstantSwitchBox" Content="Instant scene switching"/>
+            <TextBlock Style="{StaticResource Hint}"
+                       Text="Keeps every scene and hidden source running, so switching and showing are instant. Uses more CPU and RAM. Off (light mode): only what's on screen is captured; a switch takes about a second, and destinations stay connected."/>
+            <TextBlock Text="FFMPEG" Style="{StaticResource SectionHeader}" Margin="3,14,3,8"/>
             <TextBlock Text="FFmpeg path (empty = bundled)" Style="{StaticResource FieldLabel}"/>
             <DockPanel>
               <Button DockPanel.Dock="Right" Content="Browse…" Click="BrowseFfmpeg_Click"/>

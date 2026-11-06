@@ -24,7 +24,7 @@ if (Test-Path $PublishDir) { Remove-Item $PublishDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $PublishDir | Out-Null
 
 dotnet publish $Project -c Release -r $Runtime --self-contained true `
-    -p:PublishSingleFile=false -p:IncludeNativeLibrariesForSelfExtract=false `
+    -p:PublishSingleFile=false -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishReadyToRun=true `
     -o $PublishDir
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
 

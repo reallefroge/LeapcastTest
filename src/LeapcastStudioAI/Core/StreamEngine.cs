@@ -394,7 +394,8 @@ public sealed class StreamEngine : IDisposable
             .Any(sc => PipelineBuilder.CompositedLayers(sc.Sources).Any(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))));
 
     /// <summary>The performance governor has put the pipeline in "active scene only" mode.</summary>
-    private bool ActiveSceneOnly => Performance.ActiveSceneOnly && _scenes.Count > 1;
+    /// <remarks>Also in light mode (Settings → Advanced), except in studio mode, whose Preview needs the next scene running.</remarks>
+    private bool ActiveSceneOnly => (Performance.ActiveSceneOnly || !Settings.InstantSwitching && !StudioMode) && _scenes.Count > 1;
 
     /// <summary>The scenes the pipeline composites: all of them (instant switching), or only the one on air.</summary>
     private List<StudioScene> Composited() =>
@@ -418,6 +419,7 @@ public sealed class StreamEngine : IDisposable
         _scenes = list;
         Scene = active;
         Settings = settings.Clone();
+        PipelineBuilder.HiddenSourcesLive = Settings.InstantSwitching;
         _outputs.AutoReconnect = Settings.AutoReconnect;
 
         // new settings from the user: give them a fair try from this PC's starting rung
@@ -807,14 +809,43 @@ public sealed class StreamEngine : IDisposable
     /// Saves the last <paramref name="seconds"/> of the stream to <paramref name="folder"/>, named by the day and
     /// time (voice clips: "Clip"). Cut from the already-encoded stream: no extra encoding, nothing interrupted.
     /// </summary>
+    /// <summary>Where the camera and the game are on the program canvas right now (for 9:16 clips).</summary>
+    public ClipLayout? CurrentClipLayout()
+    {
+        var plan = CurrentPlan;
+        if (plan is null || _scenes.Count == 0) return null;
+        var scene = _scenes[Math.Clamp(_activeIndex, 0, _scenes.Count - 1)];
+        var layers = PipelineBuilder.VisibleLayers(scene.Sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
+        LayoutRect Rect(StudioSource s) => LayoutMath.IsBaseLayer(s, layers)
+            ? LayoutMath.FillRect(s, plan.Width, plan.Height, SourceAspect(s))
+            : LayoutMath.Horizontal(s, plan.Width, plan.Height, SourceAspect(s), SourceSize(s));
+        var game = layers.FirstOrDefault(x => LayoutMath.IsGame(SourceTypes.KindOf(x.Type)));
+        var cam = layers.LastOrDefault(x => SourceTypes.KindOf(x.Type) == SourceKind.Camera && !LayoutMath.IsBaseLayer(x, layers));
+        return new ClipLayout(plan.Width, plan.Height, game is null ? null : Rect(game), cam is null ? null : Rect(cam));
+    }
+
+    /// <summary>
+    /// Saves a 9:16 copy of a saved clip next to it ("… (9x16).mp4"), with the GPU encoder when there is one, at low
+    /// priority (the stream comes first).
+    /// </summary>
+    public async Task<string> SaveVerticalAsync(string clipPath, ClipLayout layout, CancellationToken ct = default)
+    {
+        var (w, h) = VerticalClip.OutputSize(layout.CanvasH);
+        var basePlan = CurrentPlan ?? new EncodePlan(w, h, 30, 4500, 22, "libx264", EncoderTier.Rich, false, false, "veryfast", "", Array.Empty<string>());
+        var plan = basePlan with { Width = w, Height = h, Fps = 30, CapKbps = w >= 1080 ? 8000 : 5000, LowLatency = false };
+        string output = Path.Combine(Path.GetDirectoryName(clipPath)!, Path.GetFileNameWithoutExtension(clipPath) + " (9x16).mp4");
+        await VerticalClip.RenderAsync(RequireFfmpeg(), clipPath, output, layout, EncoderCatalog.BuildVideoArgs(plan), Settings.ClipHandle, ct);
+        return output;
+    }
+
     /// <param name="endUtc">End the clip here (just before the word was said); null = the last seconds up to now.</param>
-    public async Task<string> SaveClipAsync(int seconds, string folder, CancellationToken ct = default, DateTime? endUtc = null)
+    public async Task<string> SaveClipAsync(int seconds, string folder, CancellationToken ct = default, DateTime? endUtc = null, string? label = null)
     {
         if (!CanClip) throw new InvalidOperationException("Nothing to clip. Start streaming, recording or the replay buffer.");
         Directory.CreateDirectory(folder);
         var now = DateTime.UtcNow;
         var end = endUtc is { } e && e <= now && now - e < TimeSpan.FromSeconds(20) ? e : (DateTime?)null;
-        string file = VoiceClips.PathFor(folder, (end ?? now).ToLocalTime());
+        string file = VoiceClips.PathFor(folder, (end ?? now).ToLocalTime(), label);
         seconds = Math.Clamp(seconds, 5, 600);
         return end is { } at
             ? await _cache.SaveEndingAtAsync(RequireFfmpeg(), seconds, at, file, ct)
@@ -1344,7 +1375,10 @@ public sealed class StreamEngine : IDisposable
             try
             {
                 // keep enough history for a voice clip too
-                _cache.Housekeep(Math.Clamp(Math.Max(Settings.ReplaySeconds, Settings.VoiceClipEnabled ? Settings.VoiceClipSeconds : 0), 5, 600));
+                // keep enough for the longest clip that can be asked for (a death clip covers the whole fight)
+                int keep = Math.Max(Settings.ReplaySeconds, Settings.VoiceClipEnabled ? Settings.VoiceClipSeconds : 0);
+                if (Settings.DeathClips) keep = Math.Max(keep, (int)(DeathDetector.MaxFight + DeathDetector.BeforeFight).TotalSeconds + 10);
+                _cache.Housekeep(Math.Clamp(keep, 5, 600));
                 if (!_stuckWarned && _cache.SegmentsStuck())
                 {
                     _stuckWarned = true;

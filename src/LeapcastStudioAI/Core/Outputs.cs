@@ -365,6 +365,7 @@ public sealed class OutputManager : IDisposable
         Process proc;
         try { proc = Process.Start(psi)!; }
         catch (Exception ex) { p.State = OutputState.Error; p.Message = ex.Message; return; }
+        ResourceMonitor.Track(proc, ResourceMonitor.Destinations);
         try { proc.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
         p.Proc = proc;
         p.Bus = bus;

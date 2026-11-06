@@ -164,6 +164,19 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _death.Died += (start, at) => Dispatcher.BeginInvoke(() => SaveDeathClip(start, at));
+        _chat.Command += m => Dispatcher.BeginInvoke(() => SaveChatClip(m));
+        _chat.Debug += VoiceLog;
+        _death.Debug += VoiceLog;
+        // CPU/RAM of Leapcast and everything it runs (encoder, capture, destinations, browser sources), every 2 s
+        var resTimer = new System.Windows.Threading.DispatcherTimer(System.Windows.Threading.DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
+        resTimer.Tick += (_, _) =>
+        {
+            var usage = ResourceMonitor.Sample();
+            SbResText.Text = $"CPU {usage.Sum(u => u.CpuPercent):0}% · RAM {usage.Sum(u => u.MemoryBytes) / 1048576.0:N0} MB";
+            SbRes.ToolTip = ResourceMonitor.Describe(usage);
+        };
+        resTimer.Start();
         var ver = typeof(MainWindow).Assembly.GetName().Version;
         VersionLabel.Text = ver is null ? "" : $"v{ver.Major}.{ver.Minor}.{ver.Build}";
         _state = StateStore.Load();
@@ -402,6 +415,7 @@ public partial class MainWindow : Window
 
     private void OnFrame(byte[] frame)
     {
+        WatchForDeath(frame);
         lock (_frameLock)
         {
             if (_frame is null || _frame.Length != frame.Length) _frame = new byte[frame.Length];
@@ -571,20 +585,148 @@ public partial class MainWindow : Window
         {
             int seconds = VoiceClips.ClampSeconds(s.VoiceClipSeconds);
             Status($"Saving clip ({seconds} s)…");
-            string path = await _engine.SaveClipAsync(seconds, string.IsNullOrWhiteSpace(s.VoiceClipFolder) ? VoiceClips.DefaultFolder : s.VoiceClipFolder,
-                endUtc: spokenUtc - BeforeWord);
-            VoiceLog("saved " + path);
-            Log($"Clip saved: {Path.GetFileName(path)}", false);
-            Status($"Clip saved: {Path.GetFileName(path)}");
+            var layout = _engine.CurrentClipLayout();
+            string path = await _engine.SaveClipAsync(seconds, ClipFolder(), endUtc: spokenUtc - BeforeWord);
+            ClipSaved(path, layout);
         }
         catch (Exception ex) { Log("Clip: " + ex.Message, true); }
         finally { _voiceSaving = false; }
+    }
+
+    private string ClipFolder() =>
+        string.IsNullOrWhiteSpace(_state.Settings.VoiceClipFolder) ? VoiceClips.DefaultFolder : _state.Settings.VoiceClipFolder;
+
+    /// <summary>Every clip: logged, added to this session's recap, and (Settings) a 9:16 copy for TikTok / Shorts.</summary>
+    private async void ClipSaved(string path, ClipLayout? layout)
+    {
+        VoiceLog("saved " + path);
+        Log($"Clip saved: {Path.GetFileName(path)}", false);
+        Status($"Clip saved: {Path.GetFileName(path)}");
+        _sessionClips.Add(path);
+        if (!_state.Settings.VerticalClips || layout is null) return;
+        try
+        {
+            string vertical = await _engine.SaveVerticalAsync(path, layout);
+            VoiceLog("saved " + vertical);
+            Log($"9:16 clip saved: {Path.GetFileName(vertical)}", false);
+        }
+        catch (Exception ex) { Log("9:16 clip: " + ex.Message, true); VoiceLog("9:16 failed: " + ex.Message); }
+    }
+
+    private readonly List<string> _sessionClips = new();
+
+    // ------------------------------------------------------------------ !clip from Twitch chat
+
+    private readonly TwitchChat _chat = new();
+    private string _chatKey = "";
+    private DateTime _lastChatClip = DateTime.MinValue;
+
+    /// <summary>The Twitch channel to read: the setting, or the one a Twitch chat browser source shows.</summary>
+    private string? ChatChannel() =>
+        TwitchChat.ChannelFrom(_state.Settings.ChatClipChannel)
+        ?? _state.Scenes.SelectMany(sc => sc.Sources)
+            .Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && (x.Url ?? "").Contains("twitch.tv", StringComparison.OrdinalIgnoreCase))
+            .Select(x => TwitchChat.ChannelFrom(x.Url)).FirstOrDefault(c => c is not null);
+
+    /// <summary>Reads chat while clips can be taken (live or recording) and chat clips are on.</summary>
+    private void UpdateChatClips()
+    {
+        var s = _state.Settings;
+        string? channel = s.ChatClips && _engine.CanClip ? ChatChannel() : null;
+        string key = channel is null ? "" : $"{channel}|{s.ChatClipCommand}|{s.ChatClipWho}";
+        if (key == _chatKey) return;
+        _chatKey = key;
+        if (channel is null) { _chat.Stop(); return; }
+        _chat.Start(channel, s.ChatClipCommand, s.ChatClipWho);
+    }
+
+    private async void SaveChatClip(ChatMessage msg)
+    {
+        if (DateTime.UtcNow - _lastChatClip < TimeSpan.FromSeconds(10) || !_engine.CanClip) return;
+        _lastChatClip = DateTime.UtcNow;
+        try
+        {
+            var s = _state.Settings;
+            int seconds = VoiceClips.ClampSeconds(s.VoiceClipSeconds);
+            Status($"{msg.User} clipped it: saving {seconds} s…");
+            var layout = _engine.CurrentClipLayout();
+            // they reacted to what they saw a few seconds ago (viewers watch with a delay)
+            var end = msg.ReceivedUtc - TimeSpan.FromSeconds(Math.Clamp(s.ChatClipDelaySeconds, 0, 20));
+            string path = await _engine.SaveClipAsync(seconds, ClipFolder(), endUtc: end, label: "chat");
+            ClipSaved(path, layout);
+        }
+        catch (Exception ex) { Log("Chat clip: " + ex.Message, true); }
+    }
+
+    // ------------------------------------------------------------------ post-stream recap
+
+    private bool _wasLive;
+    private DateTime _liveSinceLocal;
+
+    /// <summary>When a stream ends with clips taken: the recap pack, built in the background.</summary>
+    private async void UpdateRecap(EngineStatus st)
+    {
+        if (st.Live && !_wasLive) { _liveSinceLocal = DateTime.Now; _sessionClips.Clear(); }
+        bool ended = _wasLive && !st.Live;
+        _wasLive = st.Live;
+        if (!ended || !_state.Settings.RecapEnabled || _sessionClips.Count == 0) return;
+        var clips = _sessionClips.ToList();
+        _sessionClips.Clear();
+        var s = _state.Settings;
+        string folder = Recap.FolderFor(ClipFolder(), _liveSinceLocal);
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(15)); // let any clip still saving finish
+            Status($"Building the stream recap ({clips.Count} clip{(clips.Count == 1 ? "" : "s")})…");
+            var result = await Task.Run(() => Recap.BuildAsync(_engine.FfmpegPath ?? throw new InvalidOperationException("FFmpeg not found"), clips, folder, s.RecapTitle, s.RecapSocials));
+            Log($"Recap ready: {result.Folder}", false);
+            Status($"Recap ready: {Path.GetFileName(result.Folder)}");
+        }
+        catch (Exception ex) { Log("Recap: " + ex.Message, true); }
+    }
+
+    // ------------------------------------------------------------------ Wizard101 death clips
+
+    private readonly DeathDetector _death = new();
+    private volatile ClipLayout? _deathLayout;
+    private bool _deathSaving;
+
+    /// <summary>Program frames (reader thread): the detector reads the game's health globe a few times a second.</summary>
+    private void WatchForDeath(byte[] frame)
+    {
+        if (!_state.Settings.DeathClips || _deathLayout is not { Game: { } g } layout) return;
+        var pf = _engine.PreviewFrame;
+        if (frame.Length != pf.Width * pf.Height * 4 || layout.CanvasW <= 0) return;
+        double sx = pf.HorizontalWidth / (double)layout.CanvasW, sy = pf.Height / (double)layout.CanvasH;
+        var rect = new LayoutRect(pf.StagedWidth + g.X * sx, g.Y * sy, g.W * sx, g.H * sy);
+        _death.Feed(frame, pf.Width, pf.Height, rect, DateTime.UtcNow);
+    }
+
+    private async void SaveDeathClip(DateTime fightStartUtc, DateTime deathUtc)
+    {
+        if (_deathSaving || !_engine.CanClip) return;
+        _deathSaving = true;
+        try
+        {
+            Status("You died: saving the fight…");
+            await Task.Delay(TimeSpan.FromSeconds(3)); // a moment after the globe empties
+            var end = deathUtc + TimeSpan.FromSeconds(3);
+            int seconds = (int)Math.Ceiling((end - fightStartUtc).TotalSeconds);
+            var layout = _engine.CurrentClipLayout();
+            string path = await _engine.SaveClipAsync(seconds, ClipFolder(), endUtc: end, label: "death");
+            ClipSaved(path, layout);
+        }
+        catch (Exception ex) { Log("Death clip: " + ex.Message, true); }
+        finally { _deathSaving = false; }
     }
 
     private void ApplyStatus(EngineStatus st)
     {
         _status = st;
         UpdateVoiceClips();
+        _deathLayout = _state.Settings.DeathClips && _engine.CanClip ? _engine.CurrentClipLayout() : null;
+        UpdateChatClips();
+        UpdateRecap(st);
         bool encoding = st.Live || st.Recording || st.ReplayBuffer;
         PreviewPlaceholder.Visibility = st.Running ? Visibility.Collapsed : Visibility.Visible;
         HPreviewImage.Visibility = st.Running ? Visibility.Visible : Visibility.Hidden;

@@ -55,6 +55,7 @@ public sealed class FfmpegRunner : IDisposable
         _process.Exited += (_, _) => { };
         _process.Start();
         try { ProcessId = _process.Id; } catch { }
+        ResourceMonitor.Track(_process, ResourceMonitor.Encoder);
         // Above-normal priority keeps the stream smooth when the game hogs the CPU (like OBS's process priority option).
         if (Environment.GetEnvironmentVariable("LEAPCAST_NO_PRIORITY_BOOST") != "1")
         {

@@ -123,9 +123,10 @@ public static class VoiceClips
     /// The clip's file: the day, then the time it was saved, e.g. "2026-11-04 15-57-32.mp4" (sorts in order;
     /// colons aren't allowed in Windows file names). Two clips in the same second get " (2)", " (3)"…
     /// </summary>
-    public static string PathFor(string folder, DateTime when)
+    public static string PathFor(string folder, DateTime when, string? label = null)
     {
-        string stem = when.ToString("yyyy-MM-dd HH-mm-ss", System.Globalization.CultureInfo.InvariantCulture);
+        string stem = when.ToString("yyyy-MM-dd HH-mm-ss", System.Globalization.CultureInfo.InvariantCulture)
+                      + (string.IsNullOrWhiteSpace(label) ? "" : " " + label.Trim());
         string path = Path.Combine(folder, stem + ".mp4");
         for (int i = 2; File.Exists(path); i++) path = Path.Combine(folder, $"{stem} ({i}).mp4");
         return path;

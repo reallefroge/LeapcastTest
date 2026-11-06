@@ -464,6 +464,31 @@ public sealed class StudioSettings
     public string VoiceClipWord { get; set; } = "clip";
     public int VoiceClipSeconds { get; set; } = 50;
     public string VoiceClipFolder { get; set; } = VoiceClips.DefaultFolder;
+    /// <summary>
+    /// Keep every scene and hidden source running so switching and showing are instant (more CPU/RAM). Off = light
+    /// mode: only what's on screen is captured; showing a source or switching scenes rebuilds (about a second's pause,
+    /// destinations stay connected).
+    /// </summary>
+    public bool InstantSwitching { get; set; }
+    /// <summary>Every clip is also saved as 9:16 (TikTok / Shorts): camera on top, the whole game below.</summary>
+    public bool VerticalClips { get; set; } = true;
+    /// <summary>Wizard101: when the health globe empties (HP 0), save the fight that led to it.</summary>
+    public bool DeathClips { get; set; } = true;
+    /// <summary>Clip from Twitch chat: someone allowed types the command.</summary>
+    public bool ChatClips { get; set; } = true;
+    /// <summary>The Twitch channel to read; empty = taken from a Twitch chat browser source.</summary>
+    public string ChatClipChannel { get; set; } = "";
+    public string ChatClipCommand { get; set; } = "!clip";
+    public ChatClipWho ChatClipWho { get; set; } = ChatClipWho.Mods;
+    /// <summary>Viewers see the stream this many seconds late: a chat clip ends this long before the message.</summary>
+    public int ChatClipDelaySeconds { get; set; } = 4;
+    /// <summary>When a stream ends: its clips in one folder, a highlight reel and thumbnails.</summary>
+    public bool RecapEnabled { get; set; } = true;
+    public string RecapTitle { get; set; } = "Stream highlights";
+    /// <summary>Lines for the reel's outro card (e.g. your handles), one per line.</summary>
+    public string RecapSocials { get; set; } = "";
+    /// <summary>Text at the bottom of 9:16 clips (e.g. your handle); empty = none.</summary>
+    public string ClipHandle { get; set; } = "";
     /// <summary>How readily the word counts: "Normal", "High" (default) or "Max" (<see cref="VoiceClips.Sensitivity"/>).</summary>
     public string VoiceClipSensitivity { get; set; } = "High";
 

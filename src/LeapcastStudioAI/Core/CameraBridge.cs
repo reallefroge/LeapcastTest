@@ -295,6 +295,7 @@ public sealed class CameraBridge : IDisposable
         try
         {
             var p = Process.Start(psi)!;
+            ResourceMonitor.Track(p, ResourceMonitor.Capture);
             // A starved reader falls behind and every frame it queues becomes camera delay: keep it ahead of the game.
             try { p.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
             reader.Proc = p;

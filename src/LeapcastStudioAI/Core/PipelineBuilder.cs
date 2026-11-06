@@ -159,9 +159,15 @@ public static class PipelineBuilder
     /// in the graph, so showing or hiding one is instant and never interrupts the stream), minus sources under a
     /// visible full-screen capture (never seen, so never captured).
     /// </summary>
+    /// <summary>
+    /// Hidden sources stay in the graph (instant show/hide). Off in light mode: a hidden source isn't captured at all
+    /// (a hidden 60 FPS desktop or window capture costs as much as a shown one), so showing it rebuilds.
+    /// </summary>
+    public static bool HiddenSourcesLive { get; set; } = true;
+
     public static IEnumerable<StudioSource> CompositedLayers(IEnumerable<StudioSource> sources)
     {
-        var list = sources.ToList();
+        var list = HiddenSourcesLive ? sources.ToList() : sources.Where(s => s.Shown || !SourceTypes.IsVideo(SourceTypes.KindOf(s.Type))).ToList();
         int cover = list.FindLastIndex(s => s.Shown && SourceTypes.KindOf(s.Type) is SourceKind.Display or SourceKind.Window or SourceKind.Camera
                                             && Anchors.Resolve(s) == Anchors.Fill);
         for (int i = 0; i < list.Count; i++)
