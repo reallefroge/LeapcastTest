@@ -537,6 +537,11 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
             "Normal takes the word when it's the best reading; High also a close second (\"lived\" vs \"clip\", 0.4 apart) but not a distant one (\"flip the card\")");
         Check(VoiceClips.FindWord(lipOnly, "clip", hl)?.Start == 2.0 && VoiceClips.FindWord(lipOnly, "clip", nl) is null && VoiceClips.FindWord(sentence, "clip", ml) is null,
             "High also takes a word one letter off said entirely on its own (\"lip\"), never inside a sentence (\"flip the card\", not even on Maximum)");
+        var club = VoskApi.Parse("{\"alternatives\":[{\"confidence\":90.0,\"result\":[{\"start\":3.0,\"end\":3.3,\"word\":\"clubs\"}]}]}");
+        var clubSentence = VoskApi.Parse("{\"alternatives\":[{\"confidence\":200.0,\"result\":[{\"start\":3.0,\"end\":3.3,\"word\":\"the\"},{\"start\":3.3,\"end\":3.6,\"word\":\"club\"},{\"start\":3.6,\"end\":3.9,\"word\":\"tonight\"}]}]}");
+        Check(VoiceClips.FindWord(club, "clip", hl)?.Start == 3.0 && VoiceClips.FindWord(club, "clip", nl) is null && VoiceClips.FindWord(clubSentence, "clip", ml) is null
+              && !VoiceClips.SameStart("close", "clip") && !VoiceClips.SameStart("chip", "clip") && VoiceClips.SameStart("clap", "clip"),
+            "said on its own, \"club\" / \"clubs\" (how some voices' short \"clip\" is heard) counts on High; \"the club tonight\" never does");
         Check(VoiceClips.IsWord("clip", "clip") && VoiceClips.IsWord("Clips", "clip") && VoiceClips.IsWord("klip", "clip")
               && !VoiceClips.IsWord("clipping", "clip") && !VoiceClips.IsWord("clipped", "clip") && !VoiceClips.IsWord("flip", "clip"),
             "a transcribed \"clip\" / \"clips\" counts; \"clipping\" (a mic clipping) and \"clipped\" don't");

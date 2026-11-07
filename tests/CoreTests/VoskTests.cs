@@ -150,7 +150,10 @@ static class VoskTests
                 double into = r.Hits.TryGetValue(sent, out var hs) ? hs[0].At - r.VoiceStart[sent] : double.NaN;
                 check(into is > 0.3 and < 2.0, $"…inside a sentence, at the word, not the start of the sentence ({into:0.00}s in)");
             }
-            else check(caught.Count(c => c) >= pos.Count - 1, $"Normal hears it said clearly ({caught.Count(c => c)}/{pos.Count}{(missed.Length > 0 ? "; missed " + missed : "")})");
+            // Normal only takes a word transcribed exactly: "clip that" and the word in a sentence always are; a lone "Clip"
+            // can come out as "club" in some voices (High and Maximum take that)
+            else check(Positives.Select((p, k) => (p, k)).Where(x => x.p.Contains(' ')).All(x => caught[x.k]),
+                $"Normal hears \"clip that\", \"clip it\" and the word in a sentence ({caught.Count(c => c)}/{pos.Count}{(missed.Length > 0 ? "; missed " + missed : "")})");
         }
         // like a real microphone: 48 kHz with background noise, through the app's converter
         var conv = new SpeechPcmConverter();

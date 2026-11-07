@@ -93,7 +93,7 @@ public static class VoiceClips
             if (i > 0 && !(double.IsNaN(best) || best - r.Score <= level.Margin)) break;
             foreach (var w in r.Words) if (IsWord(w.Text, word)) return w;
             if (level.Near && r.Words.Count <= level.NearMaxWords)
-                foreach (var w in r.Words) if (NearMatch(w.Text, word, level.NearLetters)) return w;
+                foreach (var w in r.Words) if (NearMatch(w.Text, word, level.NearLetters) || SameStart(w.Text, word)) return w;
         }
         return null;
     }
@@ -117,6 +117,18 @@ public static class VoiceClips
             if (t.Length >= 3 && (Distance(t, w) <= allowed || t.EndsWith('s') && Distance(t[..^1], w) <= allowed)) return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// A word said on its own that starts like the trigger and is at most two letters off: "club" / "clubs" for
+    /// "clip" (how the recognizer hears a short, clipped "clip" in some voices).
+    /// </summary>
+    public static bool SameStart(string? heard, string word)
+    {
+        if (string.IsNullOrWhiteSpace(heard) || string.IsNullOrWhiteSpace(word)) return false;
+        string h = heard.Trim().ToLowerInvariant(), w = word.Trim().ToLowerInvariant();
+        if (h.Length > 3 && h.EndsWith('s') && !w.EndsWith('s')) h = h[..^1];
+        return w.Length >= 3 && h.Length >= 3 && h[..2] == w[..2] && Math.Abs(h.Length - w.Length) <= 1 && Distance(h, w) <= 2;
     }
 
     private static int Distance(string a, string b)
