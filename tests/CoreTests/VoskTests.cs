@@ -155,6 +155,31 @@ static class VoskTests
             else check(Positives.Select((p, k) => (p, k)).Where(x => x.p.Contains(' ')).All(x => caught[x.k]),
                 $"Normal hears \"clip that\", \"clip it\" and the word in a sentence ({caught.Count(c => c)}/{pos.Count}{(missed.Length > 0 ? "; missed " + missed : "")})");
         }
+        // captions only (voice clips off): everything said is transcribed with its time; "clip" doesn't trigger
+        {
+            var feed = new BlockingAudioStream(maxSeconds: 600);
+            var words = new List<CaptionWord>();
+            int heard = 0;
+            using var tl = new VoiceListener { TranscribeOnly = true };
+            tl.Transcribed += ws => { lock (words) words.AddRange(ws); };
+            tl.Heard += (_, _, _) => heard++;
+            tl.Start("clip", feed, "High");
+            var t0 = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            long n = 0;
+            foreach (var part in new[] { new short[Rate], say("That boss hits so hard.", 0), new short[Rate * 2], say("Clip that", 0), new short[Rate * 2] })
+                for (int i = 0; i < part.Length; i += 1600)
+                {
+                    var chunk = part.AsSpan(i, Math.Min(1600, part.Length - i)).ToArray();
+                    n += chunk.Length;
+                    feed.Write(chunk, t0 + TimeSpan.FromSeconds(n / (double)Rate));
+                }
+            feed.Complete();
+            tl.WaitUntilDone(TimeSpan.FromMinutes(1));
+            var boss = words.FirstOrDefault(w => w.Text == "boss");
+            double bossAt = (boss.StartUtc - t0).TotalSeconds;
+            check(heard == 0 && boss.Text == "boss" && bossAt is > 1.0 and < 2.5 && words.Any(w => w.Text == "hard"),
+                $"captions: what's said is transcribed with its time (\"{string.Join(' ', words.Select(w => w.Text))}\", \"boss\" at {bossAt:0.00}s), and transcribing alone never clips ({who})");
+        }
         // like a real microphone: 48 kHz with background noise, through the app's converter
         var conv = new SpeechPcmConverter();
         var nrnd = new Random(7);

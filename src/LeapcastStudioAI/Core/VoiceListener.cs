@@ -28,6 +28,10 @@ public sealed class VoiceListener : IDisposable
 
     /// <summary>The word was heard: (what was said, the recognizer's score, when the word started being said, UTC).</summary>
     public event Action<string, float, DateTime>? Heard;
+    /// <summary>Every finished utterance's words (best reading), with when each was said: for clip captions.</summary>
+    public event Action<IReadOnlyList<CaptionWord>>? Transcribed;
+    /// <summary>Only transcribe (captions): never fire <see cref="Heard"/>.</summary>
+    public bool TranscribeOnly { get; set; }
     /// <summary>What the recognizer transcribed (diagnostics).</summary>
     public event Action<string>? Debug;
 
@@ -104,6 +108,13 @@ public sealed class VoiceListener : IDisposable
         double top = readings[0].Score;
         Debug?.Invoke("heard: " + string.Join("  |  ", readings.Take(3).Select(r =>
             (r.Words.Count == 0 ? "(nothing)" : r.Text) + (double.IsNaN(r.Score) ? "" : $" ({r.Score - top:+0.0;-0.0;0})"))));
+        if (Transcribed is { } tr && readings[0].Words.Count > 0)
+        {
+            DateTime At(double sec) => feed.WallTimeAt(TimeSpan.FromSeconds(sec))
+                                       ?? DateTime.UtcNow - TimeSpan.FromSeconds(Math.Max(0, _fed / (double)SpeechPcmConverter.OutRate - sec));
+            try { tr(readings[0].Words.Select(x => new CaptionWord(x.Text, At(x.Start), At(x.End))).ToList()); } catch { }
+        }
+        if (TranscribeOnly) return;
         var hit = VoiceClips.FindWord(readings, _word, _level);
         if (hit is null)
         {

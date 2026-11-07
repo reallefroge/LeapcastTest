@@ -470,8 +470,10 @@ public sealed class StudioSettings
     /// destinations stay connected).
     /// </summary>
     public bool InstantSwitching { get; set; }
-    /// <summary>Every clip is also saved as 9:16 (TikTok / Shorts): camera on top, the whole game below.</summary>
+    /// <summary>Clips are saved as 9:16 (TikTok / Shorts): small camera on top, the game big below.</summary>
     public bool VerticalClips { get; set; } = true;
+    /// <summary>Captions on clips: what you said (transcribed from your mic, on this PC) burned into the clip.</summary>
+    public bool ClipCaptions { get; set; } = true;
     /// <summary>Wizard101: when the health globe empties (HP 0), save the fight that led to it.</summary>
     public bool DeathClips { get; set; } = true;
     /// <summary>Clip from Twitch chat: someone allowed types the command.</summary>

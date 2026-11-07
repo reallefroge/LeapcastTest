@@ -721,6 +721,43 @@ Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip 
     Check(size == (720, 1280) && camPx.r > 180 && camPx.b < 80 && gamePx.b > 180 && gamePx.r < 60 && coverPx.r < 170 && bgPx.b is > 30 and < 200,
         $"rendered 9:16 {size}: camera red {camPx}, game blue {gamePx}, the camera's spot in the game blurred {coverPx}, background dimmed {bgPx}");
 
+    // ---- captions: what was said during the clip, burned in ----
+    {
+        var c0 = new DateTime(2026, 11, 7, 1, 0, 0, DateTimeKind.Utc);
+        CaptionWord Wd(string t, double a, double b) => new(t, c0 + TimeSpan.FromSeconds(a), c0 + TimeSpan.FromSeconds(b));
+        var words = new[] { Wd("before", -2, -1.5), Wd("that", 1.0, 1.2), Wd("was", 1.2, 1.4), Wd("so", 1.4, 1.5), Wd("close", 1.5, 1.9),
+                            Wd("i", 3.0, 3.1), Wd("almost", 3.1, 3.5), Wd("died", 3.5, 3.9) };
+        var tr = new Transcript();
+        tr.Add(words.Select(w => w with { StartUtc = DateTime.UtcNow + (w.StartUtc - c0), EndUtc = DateTime.UtcNow + (w.EndUtc - c0) }));
+        var during = tr.Between(DateTime.UtcNow, DateTime.UtcNow + TimeSpan.FromSeconds(4));
+        var caps = Captions.Build(words, c0, 4.0);
+        Check(during.Count == 7 && caps.Count == 2 && caps[0].Text == "That was so close" && caps[1].Text == "I almost died"
+              && Math.Abs(caps[0].Start - 1.0) < 0.01 && Math.Abs(caps[0].End - 2.5) < 0.01 && Math.Abs(caps[1].End - 4.0) < 0.01,
+            $"captions: the words said during the clip, a few at a time, timed to it ({string.Join(" | ", caps.Select(c => $"{c.Text} {c.Start:0.0}-{c.End:0.0}"))})");
+        var many = Captions.Build(Enumerable.Range(0, 9).Select(i => Wd("word" + i, i * 0.3, i * 0.3 + 0.25)).ToList(), c0, 10);
+        Check(many.All(c => c.Text.Split(' ').Length <= Captions.MaxWords && c.Text.Length <= Captions.MaxChars) && many.Count >= 3,
+            $"long sentences are split into short lines ({string.Join(" | ", many.Select(c => c.Text))})");
+        if (Recap.FontFile() is not null)
+        {
+            string capped = Path.Combine(work, "tall-captions.mp4");
+            var info = await Captions.ProbeAsync(ffmpeg, tall);
+            await Captions.BurnAsync(ffmpeg, tall, capped, caps, 720, 1280, new[] { "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20" }, info?.Start ?? 0);
+            var (fs, cy) = Captions.Placement(720, 1280);
+            async Task<int> Whitest(double at)
+            {
+                var px = await RawAsync(new[] { "-v", "error", "-ss", at.ToString(CultureInfo.InvariantCulture), "-i", capped, "-frames:v", "1",
+                    "-vf", $"crop=440:{fs}:140:{cy}", "-pix_fmt", "rgb24", "-f", "rawvideo", "-" });
+                int best = 0;
+                for (int i = 0; i + 2 < px.Length; i += 3) best = Math.Max(best, Math.Min(px[i], Math.Min(px[i + 1], px[i + 2])));
+                return best;
+            }
+            int on = await Whitest(1.6), off = await Whitest(0.4);
+            var cp2 = await ProbeAsync(capped);
+            Check(on > 220 && off < 150 && cp2.ok && cp2.streams.Contains("aac"),
+                $"captions are burned in under the game while the words are said (white {on} at 1.6 s, {off} at 0.4 s), sound kept (y {cy}, {fs}px)");
+        }
+    }
+
     // ---- Wizard101 death: the red health globe empties to a gray globe with a yellow 0 ----
     const int FW = 768, FH = 432;
     byte[] Frame(double fill, bool empty, bool loading)

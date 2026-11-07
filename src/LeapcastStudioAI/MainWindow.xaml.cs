@@ -491,7 +491,8 @@ public partial class MainWindow : Window
     private void UpdateVoiceClips()
     {
         var s = _state.Settings;
-        bool want = s.VoiceClipEnabled && _engine.CanClip;
+        // the mic is transcribed for voice clips ("Clip") and for captions on clips
+        bool want = (s.VoiceClipEnabled || s.ClipCaptions) && _engine.CanClip;
         // the mic in the scene on air; its capture is shared by every copy of it, keyed by the first one
         var scene = (_studio ? _programScene : SelectedScene) ?? SelectedScene;
         var mic = scene?.Sources.FirstOrDefault(x => SourceTypes.KindOf(x.Type) == SourceKind.Microphone && x.Shown);
@@ -502,14 +503,19 @@ public partial class MainWindow : Window
             var rep = PipelineBuilder.AudioRepresentatives(_state.Scenes).FirstOrDefault(r => PipelineBuilder.InputKey(r) == key);
             if (rep is not null && _audio.IsCapturing(rep.Id)) micId = rep.Id;
         }
-        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}|{s.VoiceClipSensitivity}" : "";
-        if (wantKey == _voiceKey) { VoiceTag.Visibility = _voice?.Running == true ? Visibility.Visible : Visibility.Collapsed; return; }
+        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}|{s.VoiceClipSensitivity}|{s.VoiceClipEnabled}" : "";
+        if (wantKey == _voiceKey) { VoiceTag.Visibility = _voice?.Running == true && s.VoiceClipEnabled ? Visibility.Visible : Visibility.Collapsed; return; }
         StopVoice();
         if (!want) return;
         if (DateTime.UtcNow < _voiceRetryAfter) return;
         try
         {
-            var listener = new VoiceListener { RecordingsFolder = Path.Combine(StateStore.Folder, "logs", "voice-audio") };
+            var listener = new VoiceListener
+            {
+                RecordingsFolder = Path.Combine(StateStore.Folder, "logs", "voice-audio"),
+                TranscribeOnly = !s.VoiceClipEnabled,
+            };
+            listener.Transcribed += _transcript.Add;
             var feed = new BlockingAudioStream();
             if (micId is not null) _audio.SetSpeechTap(micId, feed.Write);
             listener.Heard += (text, conf, spokenUtc) =>
@@ -518,13 +524,15 @@ public partial class MainWindow : Window
                 Dispatcher.BeginInvoke(() => SaveVoiceClip(text, spokenUtc));
             };
             listener.Debug += VoiceLog;
-            VoiceLog($"listening for “{s.VoiceClipWord}” on {(micId is null ? "Windows' default microphone" : "the scene's microphone")}, sensitivity {s.VoiceClipSensitivity}");
+            VoiceLog(s.VoiceClipEnabled
+                ? $"listening for “{s.VoiceClipWord}” on {(micId is null ? "Windows' default microphone" : "the scene's microphone")}, sensitivity {s.VoiceClipSensitivity}"
+                : $"transcribing {(micId is null ? "Windows' default microphone" : "the scene's microphone")} for clip captions");
             listener.Start(s.VoiceClipWord, feed, s.VoiceClipSensitivity);
             if (micId is null) _voiceMic = WasapiAudioBridge.CaptureDefaultMicForSpeech(feed.Write);
             _voice = listener;
             _voiceKey = wantKey;
             VoiceTagText.Text = $"🎙 Say “{CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s.VoiceClipWord.Trim())}”";
-            VoiceTag.Visibility = Visibility.Visible;
+            VoiceTag.Visibility = s.VoiceClipEnabled ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
         {
@@ -591,7 +599,7 @@ public partial class MainWindow : Window
             Status($"Saving clip ({seconds} s)…");
             var layout = _engine.CurrentClipLayout();
             var (path, vertical) = await _engine.SaveClipAsync(seconds, ClipFolder(), s.VerticalClips, spokenUtc - BeforeWord);
-            ClipSaved(path, vertical ? null : layout);
+            ClipSaved(path, vertical ? null : layout, spokenUtc - BeforeWord);
         }
         catch (Exception ex) { Log("Clip: " + ex.Message, true); }
         finally { _voiceSaving = false; }
@@ -604,8 +612,11 @@ public partial class MainWindow : Window
     /// Every clip: turned into 9:16 for TikTok / Shorts when that's on (only the 9:16 file is kept, under the clip's
     /// name), logged, and added to this session's recap.
     /// </summary>
-    private async void ClipSaved(string path, ClipLayout? layout)
+    private readonly Transcript _transcript = new();
+
+    private async void ClipSaved(string path, ClipLayout? layout, DateTime? endUtc = null)
     {
+        var savedUtc = DateTime.UtcNow;
         if (_state.Settings.VerticalClips && layout is not null)
         {
             Status($"Making the 9:16 clip…");
@@ -623,10 +634,32 @@ public partial class MainWindow : Window
                 VoiceLog("9:16 failed: " + ex.Message);
             }
         }
+        if (_state.Settings.ClipCaptions) await AddCaptionsAsync(path, endUtc ?? savedUtc);
         VoiceLog("saved " + path);
         Log($"Clip saved: {Path.GetFileName(path)}", false);
         Status($"Clip saved: {Path.GetFileName(path)}");
         _sessionClips.Add(path);
+    }
+
+    /// <summary>Burns what was said during the clip into it (the clip ends at <paramref name="endUtc"/>).</summary>
+    private async Task AddCaptionsAsync(string path, DateTime endUtc)
+    {
+        try
+        {
+            if (_engine.FfmpegPath is not { } ffmpeg) return;
+            await Task.Delay(TimeSpan.FromSeconds(1.5)); // the recognizer finishes the sentence in progress
+            if (await Captions.ProbeAsync(ffmpeg, path) is not { } info) return;
+            var start = endUtc - TimeSpan.FromSeconds(info.Duration);
+            var captions = Captions.Build(_transcript.Between(start, endUtc), start, info.Duration);
+            VoiceLog($"captions: {captions.Count} line{(captions.Count == 1 ? "" : "s")} for {Path.GetFileName(path)}");
+            if (captions.Count == 0) return;
+            Status("Adding captions…");
+            string temp = Path.Combine(Path.GetDirectoryName(path)!, Path.GetFileNameWithoutExtension(path) + " (captions).mp4");
+            await Captions.BurnAsync(ffmpeg, path, temp, captions, info.W, info.H, _engine.ClipVideoArgs(info.W, info.H), info.Start);
+            File.Delete(path);
+            File.Move(temp, path);
+        }
+        catch (Exception ex) { Log("Captions: " + ex.Message + " (the clip was kept without them)", true); VoiceLog("captions failed: " + ex.Message); }
     }
 
     private readonly List<string> _sessionClips = new();
@@ -669,7 +702,7 @@ public partial class MainWindow : Window
             // they reacted to what they saw a few seconds ago (viewers watch with a delay)
             var end = msg.ReceivedUtc - TimeSpan.FromSeconds(Math.Clamp(s.ChatClipDelaySeconds, 0, 20));
             var (path, vertical) = await _engine.SaveClipAsync(seconds, ClipFolder(), s.VerticalClips, end, "chat");
-            ClipSaved(path, vertical ? null : layout);
+            ClipSaved(path, vertical ? null : layout, end);
         }
         catch (Exception ex) { Log("Chat clip: " + ex.Message, true); }
     }
@@ -730,7 +763,7 @@ public partial class MainWindow : Window
             int seconds = (int)Math.Ceiling((end - fightStartUtc).TotalSeconds);
             var layout = _engine.CurrentClipLayout();
             var (path, vertical) = await _engine.SaveClipAsync(seconds, ClipFolder(), _state.Settings.VerticalClips, end, "death");
-            ClipSaved(path, vertical ? null : layout);
+            ClipSaved(path, vertical ? null : layout, end);
         }
         catch (Exception ex) { Log("Death clip: " + ex.Message, true); }
         finally { _deathSaving = false; }

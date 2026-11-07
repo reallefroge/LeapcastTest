@@ -71,6 +71,7 @@ public partial class SettingsWindow : Window
         VoiceFolderBox.Text = current.VoiceClipFolder;
         InstantSwitchBox.IsChecked = current.InstantSwitching;
         VerticalClipsBox.IsChecked = current.VerticalClips;
+        ClipCaptionsBox.IsChecked = current.ClipCaptions;
         ClipHandleBox.Text = current.ClipHandle;
         DeathClipsBox.IsChecked = current.DeathClips;
         ChatClipsBox.IsChecked = current.ChatClips;
@@ -156,6 +157,7 @@ public partial class SettingsWindow : Window
         s.VoiceClipSensitivity = TagOf(VoiceSensitivityBox, "High");
         s.InstantSwitching = InstantSwitchBox.IsChecked == true;
         s.VerticalClips = VerticalClipsBox.IsChecked == true;
+        s.ClipCaptions = ClipCaptionsBox.IsChecked == true;
         s.ClipHandle = ClipHandleBox.Text.Trim();
         s.DeathClips = DeathClipsBox.IsChecked == true;
         s.ChatClips = ChatClipsBox.IsChecked == true;

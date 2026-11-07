@@ -831,6 +831,15 @@ public sealed class StreamEngine : IDisposable
     /// Saves a 9:16 copy of a saved clip next to it ("… (9x16).mp4"), with the GPU encoder when there is one, at low
     /// priority (the stream comes first).
     /// </summary>
+    /// <summary>Encoder settings for re-encoding a saved clip of w×h (captions): the stream's encoder, a clip's bitrate.</summary>
+    public IReadOnlyList<string> ClipVideoArgs(int w, int h)
+    {
+        var basePlan = CurrentPlan ?? new EncodePlan(w, h, 30, 4500, 22, "libx264", EncoderTier.Rich, false, false, "veryfast", "", Array.Empty<string>());
+        int big = Math.Max(w, h);
+        var plan = basePlan with { Width = w, Height = h, CapKbps = big >= 1900 ? 8000 : big >= 1270 ? 5000 : 3000, LowLatency = false, Light = false };
+        return EncoderCatalog.BuildVideoArgs(plan);
+    }
+
     public async Task<string> SaveVerticalAsync(string clipPath, ClipLayout layout, CancellationToken ct = default)
     {
         var (w, h) = VerticalClip.OutputSize(layout.CanvasH);
