@@ -1,0 +1,32 @@
+name: Fetch speech model (Vosk)
+
+# Downloads the official small English Vosk model once and keeps it as a release asset, so builds and local tests
+# use the same file (and don't depend on the model site being up during every build).
+on:
+  workflow_dispatch:
+  push:
+    branches: [leapcast-studio-ai]
+    paths: [.github/workflows/fetch-vosk-model.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download from alphacephei.com
+        run: |
+          curl -fL --retry 4 -o vosk-model-small-en-us-0.15.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+          ls -la vosk-model-small-en-us-0.15.zip
+          sha256sum vosk-model-small-en-us-0.15.zip | tee vosk-model-small-en-us-0.15.zip.sha256
+          unzip -l vosk-model-small-en-us-0.15.zip | tail -3
+      - name: Publish as release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view speech-model-vosk-small-en-us-0.15 -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create speech-model-vosk-small-en-us-0.15 -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Speech model: Vosk small English 0.15" --notes "Official model from https://alphacephei.com/vosk/models (Apache 2.0)." --prerelease
+          gh release upload speech-model-vosk-small-en-us-0.15 -R "$GITHUB_REPOSITORY" --clobber \
+            vosk-model-small-en-us-0.15.zip vosk-model-small-en-us-0.15.zip.sha256
