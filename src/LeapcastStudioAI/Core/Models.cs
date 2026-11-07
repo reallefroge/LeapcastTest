@@ -470,6 +470,15 @@ public sealed class StudioSettings
     /// destinations stay connected).
     /// </summary>
     public bool InstantSwitching { get; set; }
+    /// <summary>YouTube: pick the broadcast (scheduled or new) when going live, instead of only using the stream key.</summary>
+    public bool YouTubePickBroadcast { get; set; } = true;
+    /// <summary>Google OAuth "Desktop app" client (Google Cloud console) for the YouTube Data API.</summary>
+    public string YouTubeClientId { get; set; } = "";
+    public string YouTubeClientSecretProtected { get; set; } = "";
+    /// <summary>The Google sign-in (refresh token), DPAPI-encrypted.</summary>
+    public string YouTubeRefreshProtected { get; set; } = "";
+    /// <summary>Leave Leapcast's own windows out of display captures (they show what's behind them).</summary>
+    public bool HideFromCapture { get; set; }
     /// <summary>Clips are saved as 9:16 (TikTok / Shorts): small camera on top, the game big below.</summary>
     public bool VerticalClips { get; set; } = true;
     /// <summary>Captions on clips: what you said (transcribed from your mic, on this PC) burned into the clip.</summary>

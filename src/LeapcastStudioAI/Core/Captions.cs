@@ -41,6 +41,60 @@ public sealed class Transcript
     public void Clear() { lock (_words) _words.Clear(); }
 }
 
+/// <summary>
+/// Game sound (or a friend on Discord) coming out of the speakers leaks into the mic. The desktop audio is
+/// transcribed too, and a word the mic heard that the desktop said at the same moment is the leak, not you.
+/// </summary>
+public static class Echo
+{
+    /// <summary>How far apart the same word may be in the two transcripts (speaker → room → mic, plus recognizer timing).</summary>
+    public static readonly TimeSpan Window = TimeSpan.FromSeconds(1.2);
+
+    public static bool Similar(string a, string b)
+    {
+        a = a.ToLowerInvariant(); b = b.ToLowerInvariant();
+        if (a == b) return true;
+        if (a.Length < 3 || b.Length < 3) return false;
+        // the mic hears the leak muffled: a letter off ("hits" / "hit") is the same word
+        int[,] d = new int[a.Length + 1, b.Length + 1];
+        for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
+        for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+        for (int i = 1; i <= a.Length; i++)
+            for (int j = 1; j <= b.Length; j++)
+                d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+        return d[a.Length, b.Length] <= 1;
+    }
+
+    private static bool Matches(CaptionWord w, IReadOnlyList<CaptionWord> desktop) =>
+        desktop.Any(d => (d.StartUtc - w.StartUtc).Duration() <= Window && Similar(d.Text, w.Text));
+
+    /// <summary>
+    /// The mic's words without the ones that came from the speakers. A short word ("the", "a") only counts as a
+    /// leak next to another leaked word, so you saying "the" while the game talks isn't dropped by chance.
+    /// </summary>
+    public static List<CaptionWord> Remove(IReadOnlyList<CaptionWord> mic, IReadOnlyList<CaptionWord> desktop)
+    {
+        if (desktop.Count == 0) return mic.ToList();
+        var leaked = mic.Select(w => Matches(w, desktop)).ToArray();
+        var keep = new List<CaptionWord>();
+        for (int i = 0; i < mic.Count; i++)
+        {
+            bool neighbour = i > 0 && leaked[i - 1] || i + 1 < mic.Count && leaked[i + 1];
+            bool echo = leaked[i] && (mic[i].Text.Length >= 4 || neighbour);
+            if (!echo) keep.Add(mic[i]);
+        }
+        return keep;
+    }
+
+    /// <summary>Did the desktop audio say the trigger word around <paramref name="spokenUtc"/> (finished, or being said now)?</summary>
+    public static bool FromDesktop(string word, DateTime spokenUtc, IReadOnlyList<CaptionWord> desktop, string desktopPartial = "")
+    {
+        bool Is(string t) => VoiceClips.IsWord(t, word) || VoiceClips.SameStart(t, word);
+        if (desktop.Any(d => (d.StartUtc - spokenUtc).Duration() <= Window && Is(d.Text))) return true;
+        return desktopPartial.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(Is);
+    }
+}
+
 /// <summary>Turns transcribed words into short TikTok-style captions and burns them into a clip.</summary>
 public static class Captions
 {

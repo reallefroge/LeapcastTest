@@ -734,6 +734,15 @@ Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip 
         Check(during.Count == 7 && caps.Count == 2 && caps[0].Text == "That was so close" && caps[1].Text == "I almost died"
               && Math.Abs(caps[0].Start - 1.0) < 0.01 && Math.Abs(caps[0].End - 2.5) < 0.01 && Math.Abs(caps[1].End - 4.0) < 0.01,
             $"captions: the words said during the clip, a few at a time, timed to it ({string.Join(" | ", caps.Select(c => $"{c.Text} {c.Start:0.0}-{c.End:0.0}"))})");
+        // game sound leaking into the mic: the desktop audio said the same words at the same moment
+        var mic = new[] { Wd("nice", 0.5, 0.8), Wd("the", 1.0, 1.1), Wd("boss", 1.1, 1.4), Wd("hit", 1.4, 1.6), Wd("hard", 1.6, 1.9), Wd("lets", 3.0, 3.2), Wd("go", 3.2, 3.4), Wd("the", 3.4, 3.5), Wd("other", 3.5, 3.8), Wd("way", 3.8, 4.0) };
+        var desk = new[] { Wd("the", 1.3, 1.4), Wd("boss", 1.4, 1.7), Wd("hits", 1.7, 1.9), Wd("hard", 1.9, 2.2), Wd("the", 3.9, 4.0) };
+        var mineOnly = Echo.Remove(mic, desk);
+        Check(string.Join(" ", mineOnly.Select(w => w.Text)) == "nice lets go the other way",
+            $"captions leave out what leaked in from the speakers (\"the boss hit hard\" said by the game) but keep yours, even a lone \"the\" ({string.Join(" ", mineOnly.Select(w => w.Text))})");
+        Check(Echo.FromDesktop("clip", c0 + TimeSpan.FromSeconds(5), new[] { Wd("clip", 5.3, 5.6) }) && !Echo.FromDesktop("clip", c0 + TimeSpan.FromSeconds(5), new[] { Wd("clip", 9, 9.3) })
+              && Echo.FromDesktop("clip", c0, Array.Empty<CaptionWord>(), "nice clip that") && !Echo.FromDesktop("clip", c0, Array.Empty<CaptionWord>(), "nice one"),
+            "a \"clip\" the game or Discord said (leaking into the mic) doesn't trigger a clip");
         var many = Captions.Build(Enumerable.Range(0, 9).Select(i => Wd("word" + i, i * 0.3, i * 0.3 + 0.25)).ToList(), c0, 10);
         Check(many.All(c => c.Text.Split(' ').Length <= Captions.MaxWords && c.Text.Length <= Captions.MaxChars) && many.Count >= 3,
             $"long sentences are split into short lines ({string.Join(" | ", many.Select(c => c.Text))})");
@@ -756,6 +765,88 @@ Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip 
             Check(on > 220 && off < 150 && cp2.ok && cp2.streams.Contains("aac"),
                 $"captions are burned in under the game while the words are said (white {on} at 1.6 s, {off} at 0.4 s), sound kept (y {cy}, {fs}px)");
         }
+    }
+
+    // ---- YouTube: sign in (PKCE, loopback), list broadcasts, bind a stream, switch to live (a fake Google) ----
+    {
+        int ytPort = RtmpServer.FreePort();
+        var ytLog = new List<string>();
+        string? challenge = null;
+        bool transitioned = false, bound = false, created = false;
+        var http = new HttpListener();
+        http.Prefixes.Add($"http://127.0.0.1:{ytPort}/");
+        http.Start();
+        var serve = Task.Run(async () =>
+        {
+            while (http.IsListening)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await http.GetContextAsync(); } catch { break; }
+                string path = ctx.Request.Url!.AbsolutePath, q = ctx.Request.Url.Query, body = new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                lock (ytLog) ytLog.Add($"{ctx.Request.HttpMethod} {path}{q}");
+                string resp = "{}";
+                if (path == "/token")
+                {
+                    var f = YouTubeApi.ParseQuery(body);
+                    if (f["grant_type"] == "authorization_code")
+                    {
+                        string expect = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(f["code_verifier"]))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+                        resp = f["code"] == "the-code" && expect == challenge ? "{\"access_token\":\"A1\",\"expires_in\":3600,\"refresh_token\":\"R1\"}" : "{\"error\":\"invalid_grant\"}";
+                        if (resp.Contains("invalid")) ctx.Response.StatusCode = 400;
+                    }
+                    else resp = "{\"access_token\":\"A2\",\"expires_in\":3600}";
+                }
+                else if (ctx.Request.Headers["Authorization"] is not ("Bearer A1" or "Bearer A2")) { ctx.Response.StatusCode = 401; resp = "{\"error\":{\"message\":\"no token\"}}"; }
+                else if (path == "/yt/liveBroadcasts" && ctx.Request.HttpMethod == "GET" && q.Contains("broadcastStatus=upcoming"))
+                    resp = "{\"items\":[{\"id\":\"B2\",\"snippet\":{\"title\":\"Later\",\"scheduledStartTime\":\"2030-01-02T03:00:00Z\"},\"status\":{\"lifeCycleStatus\":\"ready\",\"privacyStatus\":\"public\"},\"contentDetails\":{\"enableAutoStart\":false}}," +
+                           "{\"id\":\"B1\",\"snippet\":{\"title\":\"Tonight: Wizard101\",\"scheduledStartTime\":\"2030-01-01T03:00:00Z\"},\"status\":{\"lifeCycleStatus\":\"ready\",\"privacyStatus\":\"unlisted\"},\"contentDetails\":{\"enableAutoStart\":false}}]}";
+                else if (path == "/yt/liveBroadcasts" && ctx.Request.HttpMethod == "GET" && q.Contains("id=B1"))
+                    resp = "{\"items\":[{\"id\":\"B1\",\"status\":{\"lifeCycleStatus\":\"ready\"},\"contentDetails\":{\"enableAutoStart\":false}}]}";
+                else if (path == "/yt/liveBroadcasts" && ctx.Request.HttpMethod == "GET") resp = "{\"items\":[]}";
+                else if (path == "/yt/liveStreams" && ctx.Request.HttpMethod == "GET" && q.Contains("mine=true")) resp = "{\"items\":[]}";
+                else if (path == "/yt/liveStreams" && ctx.Request.HttpMethod == "POST")
+                {
+                    created = body.Contains("\"isReusable\":true");
+                    resp = "{\"id\":\"S1\",\"cdn\":{\"ingestionInfo\":{\"ingestionAddress\":\"rtmp://a.rtmp.youtube.com/live2\",\"streamName\":\"abcd-1234\"}}}";
+                }
+                else if (path == "/yt/liveStreams" && q.Contains("id=S1")) resp = "{\"items\":[{\"id\":\"S1\",\"status\":{\"streamStatus\":\"active\"}}]}";
+                else if (path == "/yt/liveBroadcasts/bind") bound = q.Contains("id=B1") && q.Contains("streamId=S1");
+                else if (path == "/yt/liveBroadcasts/transition") transitioned = q.Contains("broadcastStatus=live") && q.Contains("id=B1");
+                var bytes = System.Text.Encoding.UTF8.GetBytes(resp);
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.OutputStream.WriteAsync(bytes);
+                ctx.Response.Close();
+            }
+        });
+        string? savedRefresh = null;
+        using var hc = new HttpClient();
+        var yt = new YouTubeApi(hc, "client-1", "secret-1", null)
+        {
+            AuthUrl = $"http://127.0.0.1:{ytPort}/auth", TokenUrl = $"http://127.0.0.1:{ytPort}/token", ApiBase = $"http://127.0.0.1:{ytPort}/yt",
+            RefreshTokenChanged = r => savedRefresh = r,
+        };
+        // the "browser": Google redirects back to the loopback address with a code
+        await yt.SignInAsync(url =>
+        {
+            var aq = YouTubeApi.ParseQuery(new Uri(url).Query.TrimStart('?'));
+            challenge = aq["code_challenge"];
+            _ = Task.Run(async () =>
+            {
+                using var browser = new HttpClient();
+                await browser.GetStringAsync($"{aq["redirect_uri"]}?state={Uri.EscapeDataString(aq["state"])}&code=the-code&scope=x");
+            });
+        }, new CancellationTokenSource(TimeSpan.FromSeconds(20)).Token);
+        var broadcasts = await yt.ListBroadcastsAsync(CancellationToken.None);
+        Check(yt.SignedIn && savedRefresh == "R1" && broadcasts.Count == 2 && broadcasts[0].Title == "Tonight: Wizard101" && broadcasts[0].When.StartsWith("Scheduled"),
+            $"YouTube: signs in through the browser (PKCE) and lists the scheduled broadcasts, soonest first ({string.Join(" | ", broadcasts.Select(b => b.Title + ", " + b.When))})");
+        var ingest = await yt.IngestForAsync(broadcasts[0], CancellationToken.None);
+        Check(ingest is { StreamKey: "abcd-1234", StreamId: "S1" } && ingest.ServerUrl.StartsWith("rtmp://") && bound && created,
+            $"…a broadcast with no stream gets Leapcast's reusable stream bound to it, and its key is used ({ingest.ServerUrl}, key {ingest.StreamKey})");
+        string went = await yt.GoLiveWhenReadyAsync(broadcasts[0], ingest.StreamId, TimeSpan.FromSeconds(10), CancellationToken.None, TimeSpan.FromMilliseconds(200));
+        Check(transitioned && went == "switched to live", $"…and once YouTube receives the video, a broadcast that doesn't start itself is switched to live ({went})");
+        var fresh = new YouTubeApi(hc, "client-1", "secret-1", "R1") { TokenUrl = $"http://127.0.0.1:{ytPort}/token", ApiBase = $"http://127.0.0.1:{ytPort}/yt" };
+        Check((await fresh.ListBroadcastsAsync(CancellationToken.None)).Count == 2, "…and the next time, the saved sign-in is used without asking again");
+        http.Stop();
     }
 
     // ---- Wizard101 death: the red health globe empties to a gray globe with a yellow 0 ----

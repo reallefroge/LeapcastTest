@@ -1,6 +1,9 @@
 <Window x:Class="LeapcastStudioAI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:LeapcastStudioAI"
+        xmlns:ad="https://github.com/Dirkster99/AvalonDock"
+        xmlns:adt="clr-namespace:AvalonDock.Themes;assembly=AvalonDock.Themes.VS2013"
         Icon="pack://application:,,,/Assets/leapcast.ico"
         Title="Leapcast Studio AI" Height="900" Width="1520" MinHeight="600" MinWidth="980"
         Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}" FontFamily="{StaticResource UiFont}"
@@ -48,10 +51,12 @@
         <MenuItem Header="Multistream" IsCheckable="True" Click="DockToggle_Click" Tag="Multistream"/>
         <MenuItem Header="Stats" IsCheckable="True" Click="DockToggle_Click" Tag="SmartStream"/>
         <MenuItem Header="Activity" IsCheckable="True" Click="DockToggle_Click" Tag="Activity"/>
+        <MenuItem Header="Stream info (Twitch / YouTube)" IsCheckable="True" Click="DockToggle_Click" Tag="StreamInfo"/>
         <MenuItem Header="Go live button" IsCheckable="True" Click="DockToggle_Click" Tag="GoLive"/>
         <MenuItem Header="Studio mode button" IsCheckable="True" Click="DockToggle_Click" Tag="StudioButton"/>
         <Separator/>
         <MenuItem Header="Show all docks" Click="ResetDocks_Click"/>
+        <MenuItem Header="Reset layout" Click="ResetLayout_Click" ToolTip="Put every panel back where it started"/>
       </MenuItem>
       <MenuItem x:Name="ProfileMenu" Header="_Profile" SubmenuOpened="ProfileMenu_SubmenuOpened">
         <MenuItem Header="(profiles)"/>
@@ -99,295 +104,358 @@
     </Border>
     </StackPanel>
 
-    <!-- ===================== Body ===================== -->
-    <Grid Grid.Row="1" Margin="10">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition x:Name="LeftColumn" Width="244"/>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition x:Name="RightColumn" Width="310"/>
-      </Grid.ColumnDefinitions>
-
-      <!-- Left: scenes + sources -->
-      <Grid x:Name="LeftPanel" Grid.Column="0" Margin="0,0,10,0">
-        <Grid.RowDefinitions><RowDefinition x:Name="ScenesRow" Height="2*"/><RowDefinition x:Name="SourcesRow" Height="3*"/></Grid.RowDefinitions>
-        <Border x:Name="ScenesDock" Grid.Row="0" Style="{StaticResource Card}" Margin="0,0,0,10">
-          <DockPanel>
-            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
-              <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                <Button Style="{StaticResource IconButton}" Content="&#xE710;" Click="AddScene_Click" ToolTip="Add scene (copies the current one)"/>
-                <Button Style="{StaticResource IconButton}" Content="&#xE8AC;" Click="RenameScene_Click" ToolTip="Rename scene"/>
-                <Button Style="{StaticResource IconButton}" Content="&#xE74D;" Click="DeleteScene_Click" ToolTip="Delete scene"/>
-              </StackPanel>
-              <TextBlock Text="SCENES" Style="{StaticResource SectionHeader}" Margin="2,0" VerticalAlignment="Center"/>
-            </DockPanel>
-            <TextBlock DockPanel.Dock="Bottom" Text="Click a scene to switch." Style="{StaticResource Hint}"/>
-            <ListBox x:Name="ScenesList" SelectionChanged="ScenesList_SelectionChanged" Background="Transparent" BorderThickness="0"
-                     Foreground="{StaticResource TextBrush}" DisplayMemberPath="Name"/>
-          </DockPanel>
-        </Border>
-        <Border x:Name="SourcesDock" Grid.Row="1" Style="{StaticResource Card}">
-          <DockPanel>
-            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
-              <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                <StackPanel.Resources>
-                  <!-- six buttons: compact, so the title still fits in a narrow column -->
-                  <Style x:Key="CompactIcon" TargetType="Button" BasedOn="{StaticResource IconButton}">
-                    <Setter Property="Padding" Value="3,6"/>
-                    <Setter Property="Margin" Value="0"/>
-                    <Setter Property="MinWidth" Value="22"/>
-                  </Style>
-                </StackPanel.Resources>
-                <Button Style="{StaticResource CompactIcon}" Content="&#xE710;" Click="AddSource_Click" ToolTip="Add source"/>
-                <Button Style="{StaticResource CompactIcon}" Content="&#xE713;" Click="SourceProperties_Click" ToolTip="Properties"/>
-                <Button Style="{StaticResource CompactIcon}" Content="&#xE8B7;" Click="AddFolder_Click" ToolTip="New folder"/>
-                <Button Style="{StaticResource CompactIcon}" Content="&#xE70E;" Click="MoveSourceUp_Click" ToolTip="Move up"/>
-                <Button Style="{StaticResource CompactIcon}" Content="&#xE70D;" Click="MoveSourceDown_Click" ToolTip="Move down"/>
-                <Button Style="{StaticResource CompactIcon}" Content="&#xE74D;" Click="RemoveSource_Click" ToolTip="Remove source"/>
-              </StackPanel>
-              <TextBlock Text="SOURCES" Style="{StaticResource SectionHeader}" Margin="2,0" VerticalAlignment="Center"/>
-            </DockPanel>
-            <TextBlock DockPanel.Dock="Bottom" Text="Top of the list is in front. Drag to reorder." Style="{StaticResource Hint}"/>
-            <ListBox x:Name="SourcesList" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}" AllowDrop="True"
-                     MouseDoubleClick="SourcesList_MouseDoubleClick" SelectionChanged="SourcesList_SelectionChanged"
-                     PreviewMouseLeftButtonDown="SourcesList_PreviewMouseLeftButtonDown" PreviewMouseMove="SourcesList_PreviewMouseMove"
-                     DragOver="SourcesList_DragOver" Drop="SourcesList_Drop" MouseRightButtonUp="SourcesList_MouseRightButtonUp">
-              <ListBox.ItemTemplate>
-                <DataTemplate>
-                  <DockPanel>
-                    <Border DockPanel.Dock="Left" Width="{Binding ListIndent}"/>
-                    <ToggleButton DockPanel.Dock="Left" IsChecked="{Binding Visible}" Click="SourceVisible_Click" Style="{StaticResource EyeToggle}"
-                                  VerticalAlignment="Center" Margin="0,0,4,0" ToolTip="Show / hide"/>
-                    <ToggleButton DockPanel.Dock="Right" IsChecked="{Binding Locked}" Click="SourceLock_Click" Style="{StaticResource LockToggle}"
-                                  VerticalAlignment="Center" Margin="6,0,0,0" ToolTip="Lock position and size"/>
-                    <ToggleButton DockPanel.Dock="Left" IsChecked="{Binding Collapsed}" Click="FolderCollapse_Click" VerticalAlignment="Center"
-                                  ToolTip="Show / hide contents">
-                      <ToggleButton.Style>
-                        <Style TargetType="ToggleButton" BasedOn="{StaticResource ChevronToggle}">
-                          <Setter Property="Visibility" Value="Collapsed"/>
-                          <Style.Triggers>
-                            <DataTrigger Binding="{Binding IsFolder}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-                          </Style.Triggers>
-                        </Style>
-                      </ToggleButton.Style>
-                    </ToggleButton>
-                    <TextBlock DockPanel.Dock="Left" Text="&#xE8B7;" FontFamily="{StaticResource IconFont}" FontSize="15" VerticalAlignment="Center"
-                               Foreground="{StaticResource TextBrush}" Margin="2,0,7,0" Style="{StaticResource FolderOnly}"/>
-                    <StackPanel>
-                      <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                      <TextBlock Text="{Binding ListDetail}" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+    <!-- ===================== Body: dockable panels (drag a title to move, pop out, or dock elsewhere) ===================== -->
+    <ad:DockingManager x:Name="DockManager" Grid.Row="1" Margin="6,6,6,4" AllowMixedOrientation="True">
+      <ad:DockingManager.Theme><adt:Vs2013DarkTheme/></ad:DockingManager.Theme>
+      <ad:LayoutRoot>
+        <ad:LayoutPanel Orientation="Horizontal">
+          <ad:LayoutAnchorablePaneGroup Orientation="Vertical" DockWidth="250">
+            <ad:LayoutAnchorablePane DockHeight="2*">
+              <ad:LayoutAnchorable ContentId="Scenes" Title="Scenes" CanClose="False" CanHide="True">
+                  <Border x:Name="ScenesDock" Style="{StaticResource Card}">
+                    <DockPanel>
+                      <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                          <Button Style="{StaticResource IconButton}" Content="&#xE710;" Click="AddScene_Click" ToolTip="Add scene (copies the current one)"/>
+                          <Button Style="{StaticResource IconButton}" Content="&#xE8AC;" Click="RenameScene_Click" ToolTip="Rename scene"/>
+                          <Button Style="{StaticResource IconButton}" Content="&#xE74D;" Click="DeleteScene_Click" ToolTip="Delete scene"/>
+                        </StackPanel>
+                      </DockPanel>
+                      <TextBlock DockPanel.Dock="Bottom" Text="Click a scene to switch." Style="{StaticResource Hint}"/>
+                      <ListBox x:Name="ScenesList" SelectionChanged="ScenesList_SelectionChanged" Background="Transparent" BorderThickness="0"
+                               Foreground="{StaticResource TextBrush}" DisplayMemberPath="Name"/>
+                    </DockPanel>
+                  </Border>
+              </ad:LayoutAnchorable>
+            </ad:LayoutAnchorablePane>
+            <ad:LayoutAnchorablePane DockHeight="3*">
+              <ad:LayoutAnchorable ContentId="Sources" Title="Sources" CanClose="False" CanHide="True">
+                  <Border x:Name="SourcesDock" Style="{StaticResource Card}">
+                    <DockPanel>
+                      <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                          <StackPanel.Resources>
+                            <!-- six buttons: compact, so the title still fits in a narrow column -->
+                            <Style x:Key="CompactIcon" TargetType="Button" BasedOn="{StaticResource IconButton}">
+                              <Setter Property="Padding" Value="3,6"/>
+                              <Setter Property="Margin" Value="0"/>
+                              <Setter Property="MinWidth" Value="22"/>
+                            </Style>
+                          </StackPanel.Resources>
+                          <Button Style="{StaticResource CompactIcon}" Content="&#xE710;" Click="AddSource_Click" ToolTip="Add source"/>
+                          <Button Style="{StaticResource CompactIcon}" Content="&#xE713;" Click="SourceProperties_Click" ToolTip="Properties"/>
+                          <Button Style="{StaticResource CompactIcon}" Content="&#xE8B7;" Click="AddFolder_Click" ToolTip="New folder"/>
+                          <Button Style="{StaticResource CompactIcon}" Content="&#xE70E;" Click="MoveSourceUp_Click" ToolTip="Move up"/>
+                          <Button Style="{StaticResource CompactIcon}" Content="&#xE70D;" Click="MoveSourceDown_Click" ToolTip="Move down"/>
+                          <Button Style="{StaticResource CompactIcon}" Content="&#xE74D;" Click="RemoveSource_Click" ToolTip="Remove source"/>
+                        </StackPanel>
+                      </DockPanel>
+                      <TextBlock DockPanel.Dock="Bottom" Text="Top of the list is in front. Drag to reorder." Style="{StaticResource Hint}"/>
+                      <ListBox x:Name="SourcesList" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}" AllowDrop="True"
+                               MouseDoubleClick="SourcesList_MouseDoubleClick" SelectionChanged="SourcesList_SelectionChanged"
+                               PreviewMouseLeftButtonDown="SourcesList_PreviewMouseLeftButtonDown" PreviewMouseMove="SourcesList_PreviewMouseMove"
+                               DragOver="SourcesList_DragOver" Drop="SourcesList_Drop" MouseRightButtonUp="SourcesList_MouseRightButtonUp">
+                        <ListBox.ItemTemplate>
+                          <DataTemplate>
+                            <DockPanel>
+                              <Border DockPanel.Dock="Left" Width="{Binding ListIndent}"/>
+                              <ToggleButton DockPanel.Dock="Left" IsChecked="{Binding Visible}" Click="SourceVisible_Click" Style="{StaticResource EyeToggle}"
+                                            VerticalAlignment="Center" Margin="0,0,4,0" ToolTip="Show / hide"/>
+                              <ToggleButton DockPanel.Dock="Right" IsChecked="{Binding Locked}" Click="SourceLock_Click" Style="{StaticResource LockToggle}"
+                                            VerticalAlignment="Center" Margin="6,0,0,0" ToolTip="Lock position and size"/>
+                              <ToggleButton DockPanel.Dock="Left" IsChecked="{Binding Collapsed}" Click="FolderCollapse_Click" VerticalAlignment="Center"
+                                            ToolTip="Show / hide contents">
+                                <ToggleButton.Style>
+                                  <Style TargetType="ToggleButton" BasedOn="{StaticResource ChevronToggle}">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                      <DataTrigger Binding="{Binding IsFolder}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                                    </Style.Triggers>
+                                  </Style>
+                                </ToggleButton.Style>
+                              </ToggleButton>
+                              <TextBlock DockPanel.Dock="Left" Text="&#xE8B7;" FontFamily="{StaticResource IconFont}" FontSize="15" VerticalAlignment="Center"
+                                         Foreground="{StaticResource TextBrush}" Margin="2,0,7,0" Style="{StaticResource FolderOnly}"/>
+                              <StackPanel>
+                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Text="{Binding ListDetail}" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+                              </StackPanel>
+                            </DockPanel>
+                          </DataTemplate>
+                        </ListBox.ItemTemplate>
+                      </ListBox>
+                    </DockPanel>
+                  </Border>
+              </ad:LayoutAnchorable>
+            </ad:LayoutAnchorablePane>
+          </ad:LayoutAnchorablePaneGroup>
+          <ad:LayoutPanel Orientation="Vertical">
+            <ad:LayoutDocumentPane>
+              <ad:LayoutDocument ContentId="Canvas" Title="Canvas" CanClose="False" CanFloat="False">
+                <Border Background="#05060A" BorderBrush="{StaticResource CardEdgeBrush}" BorderThickness="1" CornerRadius="16" Padding="12">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition x:Name="StageColumn" Width="0"/>
+                      <ColumnDefinition Width="Auto"/>
+                      <ColumnDefinition Width="3.2*"/>
+                      <ColumnDefinition x:Name="VerticalColumn" Width="0"/>
+                    </Grid.ColumnDefinitions>
+                    <!-- Studio mode: the staged scene (editable) -->
+                    <DockPanel x:Name="StagePanel" Grid.Column="0" Visibility="Collapsed">
+                      <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
+                        <TextBlock x:Name="StageSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#B9B0FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="PREVIEW" Style="{StaticResource SectionHeader}" Margin="0" ToolTip="Changes here go live when you click Transition"/>
+                      </DockPanel>
+                      <Viewbox x:Name="SViewbox" Stretch="Uniform">
+                        <Grid x:Name="SCanvasHost" Width="1600" Height="900" Background="#0E1016">
+                          <Image x:Name="SPreviewImage" Stretch="Fill" RenderOptions.BitmapScalingMode="Linear"/>
+                          <Canvas x:Name="SEditLayer" Background="Transparent" ClipToBounds="True"/>
+                        </Grid>
+                      </Viewbox>
+                    </DockPanel>
+                    <StackPanel x:Name="TransitionPanel" Grid.Column="1" VerticalAlignment="Center" Margin="10,0" Visibility="Collapsed" Width="118">
+                      <Button x:Name="TransitionButton" Content="Transition ➜" Style="{StaticResource PrimaryButton}" Click="Transition_Click"
+                              ToolTip="Send Preview to Program" Padding="8,9"/>
+                      <ComboBox x:Name="TransitionKindBox" Margin="0,8,0,0" SelectionChanged="TransitionKind_SelectionChanged" ToolTip="How the scene switch looks">
+                        <ComboBoxItem Content="Fade · 0.3 s" Tag="Fade|300"/>
+                        <ComboBoxItem Content="Fade · 0.6 s" Tag="Fade|600"/>
+                        <ComboBoxItem Content="Fade · 1 s" Tag="Fade|1000"/>
+                        <ComboBoxItem Content="Fade · 2 s" Tag="Fade|2000"/>
+                        <ComboBoxItem Content="Cut" Tag="Cut|0"/>
+                      </ComboBox>
+                    </StackPanel>
+                    <!-- Horizontal canvas (Program in studio mode) -->
+                    <DockPanel Grid.Column="2">
+                      <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
+                        <TextBlock x:Name="SelectedSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#BEB6FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock x:Name="HorizontalCaption" Text="HORIZONTAL · 16:9" Style="{StaticResource SectionHeader}" Margin="0" TextTrimming="CharacterEllipsis"/>
+                      </DockPanel>
+                      <Grid>
+                        <Viewbox x:Name="HViewbox" Stretch="Uniform">
+                          <Grid x:Name="HCanvasHost" Width="1600" Height="900" Background="#0E1016">
+                            <Image x:Name="HPreviewImage" Stretch="Fill" RenderOptions.BitmapScalingMode="Linear"/>
+                            <Canvas x:Name="HEditLayer" Background="Transparent" ClipToBounds="True"/>
+                          </Grid>
+                        </Viewbox>
+                        <StackPanel x:Name="PreviewPlaceholder" VerticalAlignment="Bottom" HorizontalAlignment="Center" MaxWidth="460" Margin="0,0,0,18">
+                          <TextBlock x:Name="PreviewHint" Text="Start the preview to see the output. Sources can be arranged while it's off."
+                                     TextWrapping="Wrap" TextAlignment="Center" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,8"/>
+                          <Button x:Name="PreviewButtonCenter" Content="▶  Start preview" HorizontalAlignment="Center" Style="{StaticResource PrimaryButton}" Click="Preview_Click"/>
+                        </StackPanel>
+                      </Grid>
+                    </DockPanel>
+                    <!-- Vertical canvas (TikTok / Shorts) -->
+                    <DockPanel x:Name="VerticalPanel" Grid.Column="3" Margin="12,0,0,0" Visibility="Collapsed">
+                      <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
+                        <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" FontSize="11" Padding="4,2"
+                                Click="ResetVertical_Click" ToolTip="Reset to automatic layout"/>
+                        <TextBlock x:Name="VerticalCaption" Text="VERTICAL · 9:16" Style="{StaticResource SectionHeader}" Margin="0" VerticalAlignment="Center"/>
+                      </DockPanel>
+                      <Viewbox x:Name="VViewbox" Stretch="Uniform">
+                        <Grid x:Name="VCanvasHost" Width="720" Height="1280" Background="#0E1016">
+                          <Image x:Name="VPreviewImage" Stretch="Fill" RenderOptions.BitmapScalingMode="Linear"/>
+                          <Canvas x:Name="VEditLayer" Background="Transparent" ClipToBounds="True"/>
+                        </Grid>
+                      </Viewbox>
+                    </DockPanel>
+                  </Grid>
+                </Border>
+              </ad:LayoutDocument>
+            </ad:LayoutDocumentPane>
+            <ad:LayoutAnchorablePane DockHeight="78">
+              <ad:LayoutAnchorable ContentId="Controls" Title="Controls" CanClose="False" CanHide="True">
+                  <DockPanel x:Name="ControlsDock">
+                    <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                      <Button x:Name="PreviewButton" Content="▶  Preview" Click="Preview_Click" MinWidth="104"/>
+                      <Button x:Name="RecordButton" Content="●  Record" Click="Record_Click" MinWidth="104"/>
+                      <Button x:Name="VoiceClipsButton" Content="🎙  Voice clips: on" Click="VoiceClipsButton_Click" MinWidth="128"
+                              ToolTip="Say the word while live to save a clip. Recent footage is always kept while live."/>
+                      <Button x:Name="SettingsButton" Content="⚙  Settings" Click="Settings_Click" MinWidth="104"/>
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                      <Border Style="{StaticResource Chip}" ToolTip="Frames per second (actual / target)">
+                        <TextBlock x:Name="StatFps" Text="— FPS" FontSize="12"/>
+                      </Border>
+                      <Border Style="{StaticResource Chip}" ToolTip="Total upload across live destinations">
+                        <TextBlock x:Name="StatNow" Text="↑ —" FontSize="12"/>
+                      </Border>
+                      <Border Style="{StaticResource Chip}">
+                        <TextBlock x:Name="StatHealth" Text="Idle" FontSize="12" MaxWidth="260" TextTrimming="CharacterEllipsis"/>
+                      </Border>
                     </StackPanel>
                   </DockPanel>
-                </DataTemplate>
-              </ListBox.ItemTemplate>
-            </ListBox>
-          </DockPanel>
-        </Border>
-      </Grid>
+              </ad:LayoutAnchorable>
+            </ad:LayoutAnchorablePane>
+            <ad:LayoutAnchorablePane DockHeight="300">
+              <ad:LayoutAnchorable ContentId="Mixer" Title="Audio mixer" CanClose="False" CanHide="True">
+                  <Border x:Name="MixerDock" Style="{StaticResource Card}" Padding="10,8">
+                    <DockPanel>
+                      <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
+                        <TextBlock x:Name="MixerHint" DockPanel.Dock="Right" Text="Double-click a fader for 0 dB" Style="{StaticResource Hint}" Margin="0"/>
+                      </DockPanel>
+                      <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                        <ItemsControl x:Name="MixerList">
+                          <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                          </ItemsControl.ItemsPanel>
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                              <Border x:Name="Strip" Width="84" Height="226" Margin="0,0,8,2" CornerRadius="10" Padding="6,8,6,6" BorderThickness="1"
+                                      BorderBrush="{StaticResource LineBrush}">
+                                <Border.Background>
+                                  <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                    <GradientStop Color="#141A2B" Offset="0"/>
+                                    <GradientStop Color="#090C15" Offset="1"/>
+                                  </LinearGradientBrush>
+                                </Border.Background>
+                                <DockPanel>
+                                  <TextBlock DockPanel.Dock="Top" Text="{Binding Name}" FontWeight="{Binding NameWeight}" FontSize="11" HorizontalAlignment="Center"
+                                             TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}" Margin="0,0,0,6"/>
+                                  <StackPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
+                                    <Border Background="#05070D" CornerRadius="4" Padding="2,2" Margin="0,0,0,4" BorderThickness="1" BorderBrush="#1A3DD6F5">
+                                      <TextBlock Text="{Binding GainText}" FontFamily="Consolas" FontSize="11" Foreground="#9CEBFF" HorizontalAlignment="Center"/>
+                                    </Border>
+                                    <DockPanel>
+                                      <ToggleButton DockPanel.Dock="Left" IsChecked="{Binding Muted}" Style="{StaticResource MuteToggle}" Click="MixerMute_Click" ToolTip="Mute / unmute"/>
+                                      <TextBlock Text="{Binding DbText}" FontFamily="Consolas" FontSize="9" Foreground="{StaticResource MutedBrush}"
+                                                 HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                    </DockPanel>
+                                  </StackPanel>
+                                  <Grid>
+                                    <Grid.ColumnDefinitions>
+                                      <ColumnDefinition Width="18"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <!-- dB scale for the meter (0 at the top, -60 at the bottom) -->
+                                    <Grid Grid.Column="0" Margin="0,0,3,0">
+                                      <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                                      <TextBlock Grid.Row="0" Text="0" Style="{StaticResource MeterScale}" VerticalAlignment="Top"/>
+                                      <TextBlock Grid.Row="1" Text="-12" Style="{StaticResource MeterScale}" VerticalAlignment="Top"/>
+                                      <TextBlock Grid.Row="2" Text="-24" Style="{StaticResource MeterScale}" VerticalAlignment="Top"/>
+                                      <TextBlock Grid.Row="3" Text="-36" Style="{StaticResource MeterScale}" VerticalAlignment="Top"/>
+                                      <TextBlock Grid.Row="4" Text="-48" Style="{StaticResource MeterScale}" VerticalAlignment="Top"/>
+                                      <TextBlock Grid.Row="4" Text="-60" Style="{StaticResource MeterScale}" VerticalAlignment="Bottom"/>
+                                    </Grid>
+                                    <local:LedMeter Grid.Column="1" Level="{Binding Meter, Mode=OneWay}" Peak="{Binding Peak, Mode=OneWay}"/>
+                                    <Slider Grid.Column="2" Style="{StaticResource FaderSlider}" Minimum="-60" Maximum="20" Value="{Binding Db}" TickFrequency="0.5"
+                                            IsSnapToTickEnabled="True" SmallChange="0.5" LargeChange="3" MouseDoubleClick="MixerFader_DoubleClick"
+                                            ToolTip="Level in dB (double-click for 0 dB)"/>
+                                  </Grid>
+                                </DockPanel>
+                              </Border>
+                              <DataTemplate.Triggers>
+                                <DataTrigger Binding="{Binding IsMaster}" Value="True">
+                                  <Setter TargetName="Strip" Property="BorderBrush" Value="#808B7CFF"/>
+                                </DataTrigger>
+                              </DataTemplate.Triggers>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </ScrollViewer>
+                    </DockPanel>
+                  </Border>
+              </ad:LayoutAnchorable>
+            </ad:LayoutAnchorablePane>
+          </ad:LayoutPanel>
+          <ad:LayoutAnchorablePaneGroup Orientation="Vertical" DockWidth="320">
+            <ad:LayoutAnchorablePane DockHeight="3*">
+              <ad:LayoutAnchorable ContentId="Multistream" Title="Multistream" CanClose="False" CanHide="True">
+                  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <Border x:Name="MultistreamDock" Style="{StaticResource Card}">
+                      <StackPanel>
+                        <DockPanel Margin="0,0,0,6">
+                          <Button x:Name="StartAllButton" DockPanel.Dock="Right" Content="Start all" Click="StartAll_Click" Padding="10,5" FontSize="12"/>
+                        </DockPanel>
 
-      <!-- Centre: canvases + controls + mixer -->
-      <Grid Grid.Column="1" Margin="0,0,10,0">
-        <Grid.RowDefinitions>
-          <RowDefinition Height="*"/>
-          <RowDefinition Height="Auto"/>
-          <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
-        <Border Grid.Row="0" Background="#05060A" BorderBrush="{StaticResource CardEdgeBrush}" BorderThickness="1" CornerRadius="16" Padding="12">
-          <Grid>
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition x:Name="StageColumn" Width="0"/>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="3.2*"/>
-              <ColumnDefinition x:Name="VerticalColumn" Width="0"/>
-            </Grid.ColumnDefinitions>
-            <!-- Studio mode: the staged scene (editable) -->
-            <DockPanel x:Name="StagePanel" Grid.Column="0" Visibility="Collapsed">
-              <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
-                <TextBlock x:Name="StageSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#B9B0FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
-                <TextBlock Text="PREVIEW" Style="{StaticResource SectionHeader}" Margin="0" ToolTip="Changes here go live when you click Transition"/>
-              </DockPanel>
-              <Viewbox x:Name="SViewbox" Stretch="Uniform">
-                <Grid x:Name="SCanvasHost" Width="1600" Height="900" Background="#0E1016">
-                  <Image x:Name="SPreviewImage" Stretch="Fill" RenderOptions.BitmapScalingMode="Linear"/>
-                  <Canvas x:Name="SEditLayer" Background="Transparent" ClipToBounds="True"/>
-                </Grid>
-              </Viewbox>
-            </DockPanel>
-            <StackPanel x:Name="TransitionPanel" Grid.Column="1" VerticalAlignment="Center" Margin="10,0" Visibility="Collapsed" Width="118">
-              <Button x:Name="TransitionButton" Content="Transition ➜" Style="{StaticResource PrimaryButton}" Click="Transition_Click"
-                      ToolTip="Send Preview to Program" Padding="8,9"/>
-              <ComboBox x:Name="TransitionKindBox" Margin="0,8,0,0" SelectionChanged="TransitionKind_SelectionChanged" ToolTip="How the scene switch looks">
-                <ComboBoxItem Content="Fade · 0.3 s" Tag="Fade|300"/>
-                <ComboBoxItem Content="Fade · 0.6 s" Tag="Fade|600"/>
-                <ComboBoxItem Content="Fade · 1 s" Tag="Fade|1000"/>
-                <ComboBoxItem Content="Fade · 2 s" Tag="Fade|2000"/>
-                <ComboBoxItem Content="Cut" Tag="Cut|0"/>
-              </ComboBox>
-            </StackPanel>
-            <!-- Horizontal canvas (Program in studio mode) -->
-            <DockPanel Grid.Column="2">
-              <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
-                <TextBlock x:Name="SelectedSceneLabel" DockPanel.Dock="Right" Text="" Foreground="#BEB6FF" FontSize="12" Margin="8,0,0,0" MaxWidth="160" TextTrimming="CharacterEllipsis"/>
-                <TextBlock x:Name="HorizontalCaption" Text="HORIZONTAL · 16:9" Style="{StaticResource SectionHeader}" Margin="0" TextTrimming="CharacterEllipsis"/>
-              </DockPanel>
-              <Grid>
-                <Viewbox x:Name="HViewbox" Stretch="Uniform">
-                  <Grid x:Name="HCanvasHost" Width="1600" Height="900" Background="#0E1016">
-                    <Image x:Name="HPreviewImage" Stretch="Fill" RenderOptions.BitmapScalingMode="Linear"/>
-                    <Canvas x:Name="HEditLayer" Background="Transparent" ClipToBounds="True"/>
-                  </Grid>
-                </Viewbox>
-                <StackPanel x:Name="PreviewPlaceholder" VerticalAlignment="Bottom" HorizontalAlignment="Center" MaxWidth="460" Margin="0,0,0,18">
-                  <TextBlock x:Name="PreviewHint" Text="Start the preview to see the output. Sources can be arranged while it's off."
-                             TextWrapping="Wrap" TextAlignment="Center" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,8"/>
-                  <Button x:Name="PreviewButtonCenter" Content="▶  Start preview" HorizontalAlignment="Center" Style="{StaticResource PrimaryButton}" Click="Preview_Click"/>
-                </StackPanel>
-              </Grid>
-            </DockPanel>
-            <!-- Vertical canvas (TikTok / Shorts) -->
-            <DockPanel x:Name="VerticalPanel" Grid.Column="3" Margin="12,0,0,0" Visibility="Collapsed">
-              <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
-                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" FontSize="11" Padding="4,2"
-                        Click="ResetVertical_Click" ToolTip="Reset to automatic layout"/>
-                <TextBlock x:Name="VerticalCaption" Text="VERTICAL · 9:16" Style="{StaticResource SectionHeader}" Margin="0" VerticalAlignment="Center"/>
-              </DockPanel>
-              <Viewbox x:Name="VViewbox" Stretch="Uniform">
-                <Grid x:Name="VCanvasHost" Width="720" Height="1280" Background="#0E1016">
-                  <Image x:Name="VPreviewImage" Stretch="Fill" RenderOptions.BitmapScalingMode="Linear"/>
-                  <Canvas x:Name="VEditLayer" Background="Transparent" ClipToBounds="True"/>
-                </Grid>
-              </Viewbox>
-            </DockPanel>
-          </Grid>
-        </Border>
+                        <TextBlock Text="HORIZONTAL · 16:9" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="SemiBold" Margin="2,6,2,2"/>
+                        <ItemsControl x:Name="HorizontalOutputs" ItemTemplate="{StaticResource OutputRowTemplate}"/>
+                        <TextBlock x:Name="NoHorizontalHint" Text="No horizontal outputs yet." Style="{StaticResource Hint}"/>
 
-        <!-- control strip -->
-        <DockPanel x:Name="ControlsDock" Grid.Row="1" Margin="0,8,0,0">
-          <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-            <Button x:Name="PreviewButton" Content="▶  Preview" Click="Preview_Click" MinWidth="104"/>
-            <Button x:Name="RecordButton" Content="●  Record" Click="Record_Click" MinWidth="104"/>
-            <Button x:Name="VoiceClipsButton" Content="🎙  Voice clips: on" Click="VoiceClipsButton_Click" MinWidth="128"
-                    ToolTip="Say the word while live to save a clip. Recent footage is always kept while live."/>
-            <Button x:Name="SettingsButton" Content="⚙  Settings" Click="Settings_Click" MinWidth="104"/>
-          </StackPanel>
-          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <Border Style="{StaticResource Chip}" ToolTip="Frames per second (actual / target)">
-              <TextBlock x:Name="StatFps" Text="— FPS" FontSize="12"/>
-            </Border>
-            <Border Style="{StaticResource Chip}" ToolTip="Total upload across live destinations">
-              <TextBlock x:Name="StatNow" Text="↑ —" FontSize="12"/>
-            </Border>
-            <Border Style="{StaticResource Chip}">
-              <TextBlock x:Name="StatHealth" Text="Idle" FontSize="12" MaxWidth="260" TextTrimming="CharacterEllipsis"/>
-            </Border>
-          </StackPanel>
-        </DockPanel>
+                        <DockPanel Margin="2,12,2,2">
+                          <CheckBox x:Name="VerticalToggle" DockPanel.Dock="Right" Content="Canvas on" Click="VerticalToggle_Click" Margin="0" FontSize="11"
+                                    ToolTip="9:16 canvas for TikTok, Shorts and Reels"/>
+                          <TextBlock Text="VERTICAL · 9:16" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        </DockPanel>
+                        <ItemsControl x:Name="VerticalOutputs" ItemTemplate="{StaticResource OutputRowTemplate}"/>
+                        <TextBlock x:Name="NoVerticalHint" Text="Add a vertical destination to stream this canvas." Style="{StaticResource Hint}"/>
 
-        <!-- mixer -->
-        <Border x:Name="MixerDock" Grid.Row="2" Style="{StaticResource Card}" Margin="0,8,0,0" Padding="10,6">
-          <DockPanel>
-            <TextBlock DockPanel.Dock="Left" Text="AUDIO" Style="{StaticResource SectionHeader}" Margin="2,4,12,0" VerticalAlignment="Top"/>
-            <TextBlock DockPanel.Dock="Bottom" x:Name="MixerHint" Text="Double-click a fader to reset it to 0 dB." Style="{StaticResource Hint}"/>
-            <ItemsControl x:Name="MixerList">
-              <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate><UniformGrid Columns="2"/></ItemsPanelTemplate>
-              </ItemsControl.ItemsPanel>
-              <ItemsControl.ItemTemplate>
-                <DataTemplate>
-                  <Grid Margin="3,2,14,4">
-                    <Grid.ColumnDefinitions>
-                      <ColumnDefinition Width="112"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="58"/>
-                    </Grid.ColumnDefinitions>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock Text="{Binding Name}" FontWeight="{Binding NameWeight}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}"/>
-                    <ToggleButton Grid.Column="1" IsChecked="{Binding Muted}" Style="{StaticResource MuteToggle}" Click="MixerMute_Click" Margin="4,0,4,0"
-                                  ToolTip="Mute / unmute"/>
-                    <Slider Grid.Column="2" Minimum="-60" Maximum="20" Value="{Binding Db}" TickFrequency="0.5" IsSnapToTickEnabled="True"
-                            SmallChange="0.5" LargeChange="3" VerticalAlignment="Center" MouseDoubleClick="MixerFader_DoubleClick"
-                            ToolTip="Level in dB (double-click for 0 dB)"/>
-                    <TextBlock Grid.Column="3" Text="{Binding GainText}" Foreground="{StaticResource TextBrush}" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Right"/>
-                    <ProgressBar Grid.Row="1" Grid.Column="2" Height="4" Minimum="0" Maximum="60" Value="{Binding Meter, Mode=OneWay}" Margin="5,1,5,0"/>
-                    <TextBlock Grid.Row="1" Grid.Column="3" Text="{Binding DbText}" Foreground="{StaticResource MutedBrush}" FontSize="10" HorizontalAlignment="Right"/>
-                  </Grid>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-          </DockPanel>
-        </Border>
-      </Grid>
-
-      <!-- Right: multistream dock (Aitum-style) + smart stats -->
-      <ScrollViewer x:Name="RightPanel" Grid.Column="2" VerticalScrollBarVisibility="Auto">
-        <StackPanel>
-          <Border x:Name="MultistreamDock" Style="{StaticResource Card}" Margin="0,0,0,10">
-            <StackPanel>
-              <DockPanel Margin="0,0,0,6">
-                <Button x:Name="StartAllButton" DockPanel.Dock="Right" Content="Start all" Click="StartAll_Click" Padding="10,5" FontSize="12"/>
-                <TextBlock Text="MULTISTREAM" Style="{StaticResource SectionHeader}" Margin="2,0" VerticalAlignment="Center"/>
-              </DockPanel>
-
-              <TextBlock Text="HORIZONTAL · 16:9" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="SemiBold" Margin="2,6,2,2"/>
-              <ItemsControl x:Name="HorizontalOutputs" ItemTemplate="{StaticResource OutputRowTemplate}"/>
-              <TextBlock x:Name="NoHorizontalHint" Text="No horizontal outputs yet." Style="{StaticResource Hint}"/>
-
-              <DockPanel Margin="2,12,2,2">
-                <CheckBox x:Name="VerticalToggle" DockPanel.Dock="Right" Content="Canvas on" Click="VerticalToggle_Click" Margin="0" FontSize="11"
-                          ToolTip="9:16 canvas for TikTok, Shorts and Reels"/>
-                <TextBlock Text="VERTICAL · 9:16" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
-              </DockPanel>
-              <ItemsControl x:Name="VerticalOutputs" ItemTemplate="{StaticResource OutputRowTemplate}"/>
-              <TextBlock x:Name="NoVerticalHint" Text="Add a vertical destination to stream this canvas." Style="{StaticResource Hint}"/>
-
-              <Button Content="+  Add output" Click="AddOutput_Click" Margin="0,10,0,2" HorizontalAlignment="Stretch"
-                      ToolTip="Twitch, YouTube, TikTok, Kick or any RTMP server"/>
-              <TextBlock x:Name="UploadPlanText" Text="" Style="{StaticResource Hint}" Margin="2,6,2,0"/>
-            </StackPanel>
-          </Border>
-
-          <Border x:Name="SmartStreamDock" Style="{StaticResource Card}" Margin="0,0,0,10">
-            <StackPanel>
-              <TextBlock Text="SMART STREAM" Style="{StaticResource SectionHeader}" Margin="2,0,0,6"/>
-              <TextBlock x:Name="PlanTitle" Text="—" FontSize="14" FontWeight="SemiBold" Margin="2" TextWrapping="Wrap"/>
-              <TextBlock x:Name="PlanSubtitle" Text="" Style="{StaticResource Hint}"/>
-              <TextBlock x:Name="VerticalPlanText" Text="" Style="{StaticResource Hint}" Visibility="Collapsed"/>
-              <TextBlock x:Name="PerformanceText" Text="" Style="{StaticResource Hint}" Foreground="{StaticResource AccentBrush}"
-                         ToolTip="Lighter settings when the PC falls behind (Settings → Connection)"/>
-              <Grid Margin="2,6,2,0">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" Text="Average per destination" Foreground="{StaticResource MutedBrush}" Margin="0,3"/>
-                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="StatAvg" Text="—" FontWeight="SemiBold" Margin="0,3"/>
-                <TextBlock Grid.Row="1" Text="Data saved vs. constant bitrate" Foreground="{StaticResource MutedBrush}" Margin="0,3"/>
-                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="StatSaved" Text="—" FontWeight="SemiBold" Foreground="{StaticResource GoodBrush}" Margin="0,3"/>
-                <TextBlock Grid.Row="2" Text="Live time" Foreground="{StaticResource MutedBrush}" Margin="0,3"/>
-                <TextBlock Grid.Row="2" Grid.Column="1" x:Name="StatTime" Text="—" FontWeight="SemiBold" Margin="0,3"/>
-              </Grid>
-              <Button x:Name="ReasonsToggle" Content="Why these settings ▾" Click="ReasonsToggle_Click" HorizontalAlignment="Left"
-                      Background="Transparent" BorderBrush="Transparent" Padding="2,4" Foreground="{StaticResource AccentBrush}" FontSize="12"/>
-              <ItemsControl x:Name="ReasonsList" Visibility="Collapsed">
-                <ItemsControl.ItemTemplate>
-                  <DataTemplate>
-                    <TextBlock Text="{Binding StringFormat='•  {0}'}" Style="{StaticResource Hint}"/>
-                  </DataTemplate>
-                </ItemsControl.ItemTemplate>
-              </ItemsControl>
-            </StackPanel>
-          </Border>
-
-          <Border x:Name="ActivityDock" Style="{StaticResource Card}">
-            <StackPanel>
-              <TextBlock Text="ACTIVITY" Style="{StaticResource SectionHeader}" Margin="2,0,0,4"/>
-              <ItemsControl x:Name="ActivityList">
-                <ItemsControl.ItemTemplate>
-                  <DataTemplate>
-                    <TextBlock Text="{Binding}" Style="{StaticResource Hint}"/>
-                  </DataTemplate>
-                </ItemsControl.ItemTemplate>
-              </ItemsControl>
-            </StackPanel>
-          </Border>
-        </StackPanel>
-      </ScrollViewer>
-    </Grid>
+                        <Button Content="+  Add output" Click="AddOutput_Click" Margin="0,10,0,2" HorizontalAlignment="Stretch"
+                                ToolTip="Twitch, YouTube, TikTok, Kick or any RTMP server"/>
+                        <TextBlock x:Name="UploadPlanText" Text="" Style="{StaticResource Hint}" Margin="2,6,2,0"/>
+                      </StackPanel>
+                    </Border>
+                  </ScrollViewer>
+              </ad:LayoutAnchorable>
+              <ad:LayoutAnchorable ContentId="StreamInfo" Title="Stream info" CanClose="False" CanHide="True">
+                  <DockPanel x:Name="StreamInfoDock" Margin="4">
+                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button Style="{StaticResource IconButton}" Content="&#xE72C;" Click="StreamInfoReload_Click" ToolTip="Reload"/>
+                        <Button Style="{StaticResource IconButton}" Content="&#xE8A7;" Click="StreamInfoBrowser_Click" ToolTip="Open in your browser"/>
+                      </StackPanel>
+                      <StackPanel Orientation="Horizontal">
+                        <RadioButton x:Name="StreamInfoTwitch" Content="Twitch" GroupName="StreamInfo" IsChecked="True" Click="StreamInfoSite_Click" Margin="0,0,12,0"/>
+                        <RadioButton x:Name="StreamInfoYouTube" Content="YouTube" GroupName="StreamInfo" Click="StreamInfoSite_Click"/>
+                      </StackPanel>
+                    </DockPanel>
+                    <TextBlock DockPanel.Dock="Bottom" x:Name="StreamInfoHint" Style="{StaticResource Hint}" TextWrapping="Wrap"
+                               Text="Sign in once here: it stays signed in. Title, category and tags are saved by Twitch / YouTube."/>
+                    <Border x:Name="StreamInfoHost" Background="#05070D" CornerRadius="8"/>
+                  </DockPanel>
+              </ad:LayoutAnchorable>
+            </ad:LayoutAnchorablePane>
+            <ad:LayoutAnchorablePane DockHeight="2*">
+              <ad:LayoutAnchorable ContentId="SmartStream" Title="Smart stream" CanClose="False" CanHide="True">
+                  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <Border x:Name="SmartStreamDock" Style="{StaticResource Card}">
+                      <StackPanel>
+                        <TextBlock x:Name="PlanTitle" Text="—" FontSize="14" FontWeight="SemiBold" Margin="2" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="PlanSubtitle" Text="" Style="{StaticResource Hint}"/>
+                        <TextBlock x:Name="VerticalPlanText" Text="" Style="{StaticResource Hint}" Visibility="Collapsed"/>
+                        <TextBlock x:Name="PerformanceText" Text="" Style="{StaticResource Hint}" Foreground="{StaticResource AccentBrush}"
+                                   ToolTip="Lighter settings when the PC falls behind (Settings → Connection)"/>
+                        <Grid Margin="2,6,2,0">
+                          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                          <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                          <TextBlock Text="Average per destination" Foreground="{StaticResource MutedBrush}" Margin="0,3"/>
+                          <TextBlock Grid.Row="0" Grid.Column="1" x:Name="StatAvg" Text="—" FontWeight="SemiBold" Margin="0,3"/>
+                          <TextBlock Grid.Row="1" Text="Data saved vs. constant bitrate" Foreground="{StaticResource MutedBrush}" Margin="0,3"/>
+                          <TextBlock Grid.Row="1" Grid.Column="1" x:Name="StatSaved" Text="—" FontWeight="SemiBold" Foreground="{StaticResource GoodBrush}" Margin="0,3"/>
+                          <TextBlock Grid.Row="2" Text="Live time" Foreground="{StaticResource MutedBrush}" Margin="0,3"/>
+                          <TextBlock Grid.Row="2" Grid.Column="1" x:Name="StatTime" Text="—" FontWeight="SemiBold" Margin="0,3"/>
+                        </Grid>
+                        <Button x:Name="ReasonsToggle" Content="Why these settings ▾" Click="ReasonsToggle_Click" HorizontalAlignment="Left"
+                                Background="Transparent" BorderBrush="Transparent" Padding="2,4" Foreground="{StaticResource AccentBrush}" FontSize="12"/>
+                        <ItemsControl x:Name="ReasonsList" Visibility="Collapsed">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                              <TextBlock Text="{Binding StringFormat='•  {0}'}" Style="{StaticResource Hint}"/>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </StackPanel>
+                    </Border>
+                  </ScrollViewer>
+              </ad:LayoutAnchorable>
+              <ad:LayoutAnchorable ContentId="Activity" Title="Activity" CanClose="False" CanHide="True">
+                  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <Border x:Name="ActivityDock" Style="{StaticResource Card}">
+                      <StackPanel>
+                        <ItemsControl x:Name="ActivityList">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                              <TextBlock Text="{Binding}" Style="{StaticResource Hint}"/>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </StackPanel>
+                    </Border>
+                  </ScrollViewer>
+              </ad:LayoutAnchorable>
+            </ad:LayoutAnchorablePane>
+          </ad:LayoutAnchorablePaneGroup>
+        </ad:LayoutPanel>
+      </ad:LayoutRoot>
+    </ad:DockingManager>
 
     <!-- ===================== Status bar ===================== -->
     <Border Grid.Row="2" Background="#990E1220" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="16,6">

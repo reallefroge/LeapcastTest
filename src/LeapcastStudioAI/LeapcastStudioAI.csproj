@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>LeapcastStudioAI</RootNamespace>
     <AssemblyName>Leapcast Studio AI</AssemblyName>
-    <Version>0.9.9</Version>
+    <Version>0.10.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- exe / taskbar / Start menu icon (source art: Assets/leapcast.svg, leapcast-small.svg for 16–32 px) -->
     <ApplicationIcon>Assets\leapcast.ico</ApplicationIcon>
@@ -27,5 +27,8 @@
     <!-- Voice clips ("Clip"): Vosk offline speech recognition (libvosk.dll; Core/VoskApi.cs calls it directly, so the
          managed wrapper isn't referenced). The model is added to the app folder by scripts/build-installer.ps1. -->
     <PackageReference Include="Vosk" Version="0.3.38" ExcludeAssets="compile" />
+    <!-- Dockable panels: drag to rearrange, pop out into their own windows, layout saved (like OBS docks) -->
+    <PackageReference Include="Dirkster.AvalonDock" Version="4.72.1" />
+    <PackageReference Include="Dirkster.AvalonDock.Themes.VS2013" Version="4.72.1" />
   </ItemGroup>
 </Project>

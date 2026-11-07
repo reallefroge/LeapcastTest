@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace LeapcastStudioAI;
 
@@ -27,6 +28,51 @@ public partial class SettingsWindow : Window
 
     /// <param name="scenes">For the Hotkeys tab (scene switch and source show/hide hotkeys).</param>
     /// <param name="tab">Tab to open on: Stream, Hotkeys, Canvas, Connection, Recording or Advanced.</param>
+    public const string LiveLockText = "Unable to Change while Live";
+
+    private void UpdateYouTubeSignedIn(StudioSettings s)
+    {
+        bool signedIn = s.YouTubeRefreshProtected.Length > 0;
+        YouTubeSignOutButton.IsEnabled = signedIn;
+        YouTubeSignedInText.Text = signedIn ? "Signed in with Google." : "Not signed in yet.";
+    }
+
+    private void YouTubeSignOut_Click(object sender, RoutedEventArgs e)
+    {
+        Result.YouTubeRefreshProtected = "";
+        UpdateYouTubeSignedIn(Result);
+    }
+
+    /// <summary>
+    /// While live, everything that would restart the encoder (and so drop or pause the stream) is greyed out and
+    /// can't be clicked; everything else still applies at once, without touching the stream.
+    /// </summary>
+    private void LockWhileLive()
+    {
+        var locked = new FrameworkElement[]
+        {
+            ContentBox, ProfileBox, ResolutionBox, FrameRateBox, BitrateBox, EncoderBox, PresetBox, RateBox, AudioBox, LowLatencyBox,
+            VerticalBox, VerticalResBox, VerticalBitrateBox, UploadBox, TestButton, VerticalClipsBox, InstantSwitchBox,
+        };
+        var bannered = new HashSet<Panel>();
+        foreach (var c in locked)
+        {
+            c.IsEnabled = false;
+            c.ToolTip = LiveLockText;
+            ToolTipService.SetShowOnDisabled(c, true);
+            if (c.Parent is not Panel parent) continue;
+            int at = parent.Children.IndexOf(c);
+            // the field's label goes grey with it
+            if (at > 0 && parent.Children[at - 1] is TextBlock label && label.Style == (Style)FindResource("FieldLabel")) { label.Opacity = 0.45; at--; }
+            if (!bannered.Add(parent)) continue;
+            parent.Children.Insert(at, new TextBlock
+            {
+                Text = "🔒 " + LiveLockText, FontSize = 12, FontWeight = FontWeights.SemiBold, Margin = new Thickness(2, 6, 2, 4),
+                Foreground = (Brush)FindResource("WarnBrush"),
+            });
+        }
+    }
+
     public SettingsWindow(StudioSettings current, StreamEngine engine, IReadOnlyList<StudioScene>? scenes = null, string? tab = null)
     {
         InitializeComponent();
@@ -70,6 +116,11 @@ public partial class SettingsWindow : Window
         VoiceSecondsBox.Text = VoiceClips.ClampSeconds(current.VoiceClipSeconds).ToString(CultureInfo.InvariantCulture);
         VoiceFolderBox.Text = current.VoiceClipFolder;
         InstantSwitchBox.IsChecked = current.InstantSwitching;
+        YouTubePickBox.IsChecked = current.YouTubePickBroadcast;
+        YouTubeClientIdBox.Text = current.YouTubeClientId;
+        YouTubeSecretBox.Password = SecretStore.Unprotect(current.YouTubeClientSecretProtected);
+        UpdateYouTubeSignedIn(current);
+        HideFromCaptureBox.IsChecked = current.HideFromCapture;
         VerticalClipsBox.IsChecked = current.VerticalClips;
         ClipCaptionsBox.IsChecked = current.ClipCaptions;
         ClipHandleBox.Text = current.ClipHandle;
@@ -97,6 +148,7 @@ public partial class SettingsWindow : Window
         _loaded = true;
         UpdatePlan();
         Closed += (_, _) => _testCts?.Cancel();
+        if (engine.Live) LockWhileLive();
     }
 
     private void VoiceSecondsBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -156,6 +208,11 @@ public partial class SettingsWindow : Window
         s.VoiceClipFolder = string.IsNullOrWhiteSpace(VoiceFolderBox.Text) ? VoiceClips.DefaultFolder : VoiceFolderBox.Text.Trim();
         s.VoiceClipSensitivity = TagOf(VoiceSensitivityBox, "High");
         s.InstantSwitching = InstantSwitchBox.IsChecked == true;
+        s.YouTubePickBroadcast = YouTubePickBox.IsChecked == true;
+        if (s.YouTubeClientId != YouTubeClientIdBox.Text.Trim()) s.YouTubeRefreshProtected = ""; // a different app: sign in again
+        s.YouTubeClientId = YouTubeClientIdBox.Text.Trim();
+        s.YouTubeClientSecretProtected = SecretStore.Protect(YouTubeSecretBox.Password.Trim());
+        s.HideFromCapture = HideFromCaptureBox.IsChecked == true;
         s.VerticalClips = VerticalClipsBox.IsChecked == true;
         s.ClipCaptions = ClipCaptionsBox.IsChecked == true;
         s.ClipHandle = ClipHandleBox.Text.Trim();

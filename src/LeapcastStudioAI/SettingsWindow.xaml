@@ -139,6 +139,19 @@
               <TextBlock x:Name="TestResult" VerticalAlignment="Center" TextWrapping="Wrap" Margin="8,0,0,0"
                          Foreground="{StaticResource MutedBrush}" FontSize="11"/>
             </DockPanel>
+            <TextBlock Text="YOUTUBE LIVE" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
+            <CheckBox x:Name="YouTubePickBox" Content="Choose the broadcast when going live on YouTube"/>
+            <TextBlock Style="{StaticResource Hint}" Text="Lists your scheduled and live broadcasts so the stream lands on the one you pick, or makes a new one."/>
+            <TextBlock Text="Google client ID" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="YouTubeClientIdBox"/>
+            <TextBlock Text="Google client secret" Style="{StaticResource FieldLabel}"/>
+            <PasswordBox x:Name="YouTubeSecretBox"/>
+            <DockPanel Margin="0,6,0,0">
+              <Button x:Name="YouTubeSignOutButton" DockPanel.Dock="Left" Content="Sign out of Google" Click="YouTubeSignOut_Click"/>
+              <TextBlock x:Name="YouTubeSignedInText" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+            </DockPanel>
+            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="One-time setup (about 5 minutes): 1) console.cloud.google.com → create a project. 2) APIs &amp; Services → Library → enable &quot;YouTube Data API v3&quot;. 3) OAuth consent screen → External; add your Google account under Test users. 4) Credentials → Create credentials → OAuth client ID → Desktop app. 5) Paste the client ID and secret here. Leapcast opens Google's sign-in in your browser the first time."/>
             <TextBlock Text="RELIABILITY" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
             <CheckBox x:Name="ReconnectBox" Content="Reconnect automatically"/>
             <CheckBox x:Name="AdjustBox" Content="Lower bitrate when the connection struggles"/>
@@ -266,6 +279,10 @@
             <CheckBox x:Name="InstantSwitchBox" Content="Instant scene switching"/>
             <TextBlock Style="{StaticResource Hint}"
                        Text="Keeps every scene and hidden source running, so switching and showing are instant. Uses more CPU and RAM. Off (light mode): only what's on screen is captured; a switch takes about a second, and destinations stay connected."/>
+            <TextBlock Text="PRIVACY" Style="{StaticResource SectionHeader}" Margin="3,14,3,8"/>
+            <CheckBox x:Name="HideFromCaptureBox" Content="Hide Leapcast from display capture"/>
+            <TextBlock Style="{StaticResource Hint}"
+                       Text="The Leapcast window, its dialogs and popped-out panels don't appear in a display capture: viewers see what's behind them. Windows 10 2004 or newer."/>
             <TextBlock Text="FFMPEG" Style="{StaticResource SectionHeader}" Margin="3,14,3,8"/>
             <TextBlock Text="FFmpeg path (empty = bundled)" Style="{StaticResource FieldLabel}"/>
             <DockPanel>

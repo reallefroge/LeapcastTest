@@ -346,6 +346,7 @@ public sealed class BlockingAudioStream : Stream
         lock (_chunks)
         {
             if (_done) return;
+            _lastWrite = writtenUtc;
             _chunks.Enqueue((bytes, writtenUtc));
             _queued += bytes.Length;
             while (_queued > _maxBytes && _chunks.Count > 1) _queued -= _chunks.Dequeue().Data.Length;
@@ -354,6 +355,21 @@ public sealed class BlockingAudioStream : Stream
     }
 
     public void Complete() { lock (_chunks) { _done = true; Monitor.PulseAll(_chunks); } }
+
+    private DateTime _lastWrite;
+
+    /// <summary>
+    /// Desktop audio only arrives while something plays: fills the gaps with silence (call it a few times a second),
+    /// so the recognizer hears the pause that ends a sentence instead of waiting for the next sound.
+    /// </summary>
+    public void PadSilence(DateTime nowUtc)
+    {
+        DateTime last;
+        lock (_chunks) last = _lastWrite;
+        if (last == default || nowUtc - last < TimeSpan.FromMilliseconds(150)) return;
+        int n = (int)Math.Min(_bytesPerSecond, (nowUtc - last).TotalSeconds * _bytesPerSecond) / 2;
+        if (n > 0) WriteAt(new short[n], nowUtc);
+    }
 
     public override int Read(byte[] buffer, int offset, int count)
     {

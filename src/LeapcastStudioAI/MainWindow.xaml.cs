@@ -1,4 +1,8 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
+using AvalonDock;
+using AvalonDock.Layout;
+using AvalonDock.Layout.Serialization;
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
@@ -17,7 +21,8 @@ namespace LeapcastStudioAI;
 /// </summary>
 public sealed class MixerChannel : INotifyPropertyChanged
 {
-    private double _meter, _db;
+    private double _meter, _db, _peak;
+    private long _peakAt;
     private bool _muted;
     private string _dbText = "-∞ dB";
     /// <summary>The source (Guid.Empty for the master).</summary>
@@ -28,6 +33,8 @@ public sealed class MixerChannel : INotifyPropertyChanged
     public bool IsMaster => SourceId == Guid.Empty;
     public FontWeight NameWeight => IsMaster ? FontWeights.SemiBold : FontWeights.Normal;
     public double Meter { get => _meter; private set { _meter = value; OnChanged(); } }
+    /// <summary>The recent peak (same scale as <see cref="Meter"/>): held 1.5 s, then falls.</summary>
+    public double Peak { get => _peak; private set { if (Math.Abs(_peak - value) < 0.01) return; _peak = value; OnChanged(); } }
     public string DbText { get => _dbText; private set { _dbText = value; OnChanged(); } }
     public Action<MixerChannel>? Changed;
 
@@ -62,6 +69,9 @@ public sealed class MixerChannel : INotifyPropertyChanged
         double target = Math.Clamp(post + 60, 0, 60);
         // fast attack, slow release, like a real meter
         Meter = target > _meter ? target : Math.Max(target, _meter - 2.5);
+        long now = Environment.TickCount64;
+        if (target >= _peak) { Peak = target; _peakAt = now; }
+        else if (now - _peakAt > 1500) Peak = Math.Max(target, _peak - 1.0);
         DbText = post <= -59.5 ? "-∞ dB" : $"{post:0} dBFS";
     }
 
@@ -180,6 +190,7 @@ public partial class MainWindow : Window
         var ver = typeof(MainWindow).Assembly.GetName().Version;
         VersionLabel.Text = ver is null ? "" : $"v{ver.Major}.{ver.Minor}.{ver.Build}";
         _state = StateStore.Load();
+        CaptureExclusion.Enabled = _state.Settings.HideFromCapture;
         _engine = new StreamEngine(_audio, new WindowsPlatform(), StateStore.Folder)
         {
             KeyResolver = o => SecretStore.Unprotect(o.StreamKeyProtected),
@@ -326,6 +337,7 @@ public partial class MainWindow : Window
             RegisterHotkeys();
         }
         catch { /* hotkeys are a convenience */ }
+        LoadPanelLayout();
         RedrawEditors();
         var ffmpeg = FfmpegLocator.Find(_state.Settings.FfmpegPath);
         if (ffmpeg is null)
@@ -381,6 +393,7 @@ public partial class MainWindow : Window
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
         Save();
+        SavePanelLayout();
         if (_closeConfirmed) { _uiTimer.Stop(); _hotkeys?.Dispose(); StopVoice(); _engine.Dispose(); return; }
         if (_engine.Live)
         {
@@ -503,7 +516,16 @@ public partial class MainWindow : Window
             var rep = PipelineBuilder.AudioRepresentatives(_state.Scenes).FirstOrDefault(r => PipelineBuilder.InputKey(r) == key);
             if (rep is not null && _audio.IsCapturing(rep.Id)) micId = rep.Id;
         }
-        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}|{s.VoiceClipSensitivity}|{s.VoiceClipEnabled}" : "";
+        // the desktop audio (game, Discord) is transcribed too, so words leaking from the speakers into the mic are dropped
+        var desktop = scene?.Sources.FirstOrDefault(x => SourceTypes.KindOf(x.Type) == SourceKind.DesktopAudio);
+        Guid? deskId = null;
+        if (desktop is not null)
+        {
+            string key = PipelineBuilder.InputKey(desktop);
+            var rep = PipelineBuilder.AudioRepresentatives(_state.Scenes).FirstOrDefault(r => PipelineBuilder.InputKey(r) == key);
+            if (rep is not null && _audio.IsCapturing(rep.Id)) deskId = rep.Id;
+        }
+        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}|{deskId}|{s.VoiceClipSensitivity}|{s.VoiceClipEnabled}" : "";
         if (wantKey == _voiceKey) { VoiceTag.Visibility = _voice?.Running == true && s.VoiceClipEnabled ? Visibility.Visible : Visibility.Collapsed; return; }
         StopVoice();
         if (!want) return;
@@ -529,6 +551,7 @@ public partial class MainWindow : Window
                 : $"transcribing {(micId is null ? "Windows' default microphone" : "the scene's microphone")} for clip captions");
             listener.Start(s.VoiceClipWord, feed, s.VoiceClipSensitivity);
             if (micId is null) _voiceMic = WasapiAudioBridge.CaptureDefaultMicForSpeech(feed.Write);
+            StartDesktopTranscript(deskId);
             _voice = listener;
             _voiceKey = wantKey;
             VoiceTagText.Text = $"🎙 Say “{CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s.VoiceClipWord.Trim())}”";
@@ -574,8 +597,59 @@ public partial class MainWindow : Window
         catch { }
     }
 
+    // ------------------------------------------------------------------ desktop audio transcript (leak filter)
+
+    private VoiceListener? _deskVoice;
+    private IDisposable? _deskCapture;
+    private BlockingAudioStream? _deskFeed;
+    private System.Windows.Threading.DispatcherTimer? _deskPad;
+    private readonly Transcript _deskTranscript = new();
+
+    private void StartDesktopTranscript(Guid? deskId)
+    {
+        try
+        {
+            var feed = new BlockingAudioStream();
+            var listener = new VoiceListener { TranscribeOnly = true };
+            listener.Transcribed += _deskTranscript.Add;
+            listener.Start("clip", feed, "Normal");
+            if (deskId is not null) _audio.SetDesktopSpeechTap(deskId, feed.Write);
+            else _deskCapture = WasapiAudioBridge.CaptureDefaultOutputForSpeech(feed.Write);
+            // desktop audio only arrives while something plays: pad the gaps so sentences end on time
+            _deskPad = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            _deskPad.Tick += (_, _) => feed.PadSilence(DateTime.UtcNow);
+            _deskPad.Start();
+            feed.Write(new short[1600]); // starts the pad clock
+            _deskVoice = listener;
+            _deskFeed = feed;
+            VoiceLog($"transcribing {(deskId is null ? "Windows' default output" : "the scene's desktop audio")} to ignore speaker sound leaking into the mic");
+        }
+        catch (Exception ex) { VoiceLog("desktop audio transcript unavailable: " + ex.Message); StopDesktopTranscript(); }
+    }
+
+    private void StopDesktopTranscript()
+    {
+        _audio.SetDesktopSpeechTap(null, null);
+        _deskPad?.Stop();
+        _deskPad = null;
+        _deskCapture?.Dispose();
+        _deskCapture = null;
+        _deskVoice?.Dispose();
+        _deskVoice = null;
+        _deskFeed = null;
+    }
+
+    /// <summary>Waits (a few seconds at most) until the desktop transcript has caught up with <paramref name="utc"/>.</summary>
+    private async Task DesktopCaughtUpAsync(DateTime utc, TimeSpan max)
+    {
+        var until = DateTime.UtcNow + max;
+        while (_deskVoice is { } d && d.LastResultUtc < utc + Echo.Window && string.IsNullOrEmpty(d.Partial) is false && DateTime.UtcNow < until)
+            await Task.Delay(250);
+    }
+
     private void StopVoice()
     {
+        StopDesktopTranscript();
         _audio.SetSpeechTap(null, null);
         _voiceMic?.Dispose();
         _voiceMic = null;
@@ -595,6 +669,16 @@ public partial class MainWindow : Window
         var s = _state.Settings;
         try
         {
+            if (_deskVoice is { } desk)
+            {
+                // a "clip" from the game or a friend on Discord, leaking from the speakers into the mic, isn't yours
+                await DesktopCaughtUpAsync(spokenUtc, TimeSpan.FromSeconds(2));
+                if (Echo.FromDesktop(s.VoiceClipWord, spokenUtc, _deskTranscript.Between(spokenUtc - TimeSpan.FromSeconds(3), spokenUtc + TimeSpan.FromSeconds(3)), desk.Partial))
+                {
+                    VoiceLog($"ignored “{heard}”: the desktop audio said it too (speaker sound in the mic)");
+                    return;
+                }
+            }
             int seconds = VoiceClips.ClampSeconds(s.VoiceClipSeconds);
             Status($"Saving clip ({seconds} s)…");
             var layout = _engine.CurrentClipLayout();
@@ -648,9 +732,14 @@ public partial class MainWindow : Window
         {
             if (_engine.FfmpegPath is not { } ffmpeg) return;
             await Task.Delay(TimeSpan.FromSeconds(1.5)); // the recognizer finishes the sentence in progress
+            await DesktopCaughtUpAsync(endUtc, TimeSpan.FromSeconds(6));
             if (await Captions.ProbeAsync(ffmpeg, path) is not { } info) return;
             var start = endUtc - TimeSpan.FromSeconds(info.Duration);
-            var captions = Captions.Build(_transcript.Between(start, endUtc), start, info.Duration);
+            var mine = _transcript.Between(start, endUtc);
+            // only what you said: words the game / Discord said at the same moment leaked in through the speakers
+            var spoken = Echo.Remove(mine, _deskTranscript.Between(start - Echo.Window, endUtc + Echo.Window));
+            if (spoken.Count < mine.Count) VoiceLog($"captions: left out {mine.Count - spoken.Count} word(s) that came from the desktop audio");
+            var captions = Captions.Build(spoken, start, info.Duration);
             VoiceLog($"captions: {captions.Count} line{(captions.Count == 1 ? "" : "s")} for {Path.GetFileName(path)}");
             if (captions.Count == 0) return;
             Status("Adding captions…");
@@ -772,6 +861,9 @@ public partial class MainWindow : Window
     private void ApplyStatus(EngineStatus st)
     {
         _status = st;
+        // the wizard rebuilds the encoder: not while live
+        AutoConfigMenu.IsEnabled = !st.Live;
+        AutoConfigMenu.Header = st.Live ? "Auto-configuration wizard (" + SettingsWindow.LiveLockText + ")" : "Auto-configuration wizard…";
         UpdateVoiceClips();
         _deathLayout = _state.Settings.DeathClips && _engine.CanClip ? _engine.CurrentClipLayout() : null;
         UpdateChatClips();
@@ -965,10 +1057,135 @@ public partial class MainWindow : Window
 
     // ------------------------------------------------------------------ docks (show / hide panels)
 
+    // ------------------------------------------------------------------ dockable panels
+
+    /// <summary>The panels that can be moved, popped out, docked elsewhere or hidden.</summary>
+    private IEnumerable<LayoutAnchorable> Panels() => DockManager.Layout.Descendents().OfType<LayoutAnchorable>();
+    private LayoutAnchorable? Panel(string id) => Panels().FirstOrDefault(p => p.ContentId == id);
+
+    private string LayoutPath => Path.Combine(StateStore.Folder, "panels-layout.xml");
+    private string? _defaultLayout;
+
+    /// <summary>Each panel's content and title, as designed (so a saved layout can always be filled back in).</summary>
+    private readonly Dictionary<string, (object Content, string Title, bool Document)> _panelContents = new();
+
+    private XmlLayoutSerializer Serializer()
+    {
+        var ser = new XmlLayoutSerializer(DockManager);
+        ser.LayoutSerializationCallback += (_, e) =>
+        {
+            if (e.Model.ContentId is { } id && _panelContents.TryGetValue(id, out var c)) e.Content = c.Content;
+            else e.Cancel = true;
+        };
+        return ser;
+    }
+
+    /// <summary>Restores where the panels were (Window_Loaded); remembers the built-in layout for "Reset layout".</summary>
+    private void LoadPanelLayout()
+    {
+        DockStyle();
+        foreach (var c in DockManager.Layout.Descendents().OfType<LayoutContent>())
+            if (c.ContentId is { } id && c.Content is not null) _panelContents[id] = (c.Content, c.Title, c is LayoutDocument);
+        try
+        {
+            var sw = new StringWriter();
+            new XmlLayoutSerializer(DockManager).Serialize(sw);
+            _defaultLayout = sw.ToString();
+        }
+        catch { }
+        try
+        {
+            if (File.Exists(LayoutPath))
+            {
+                using var r = new StreamReader(LayoutPath);
+                Serializer().Deserialize(r);
+            }
+        }
+        catch (Exception ex) { Log("Panel layout couldn't be restored (using the default): " + ex.Message, true); RestoreDefaultLayout(); }
+        AfterLayout();
+        // panels hidden from the Docks menu before panels could move
+        foreach (var id in _state.Settings.HiddenDocks) if (Panel(id) is { IsHidden: false } p) p.Hide();
+    }
+
+    /// <summary>After a layout is loaded: panels new since it was saved are added back, and change tracking is hooked up.</summary>
+    private void AfterLayout()
+    {
+        foreach (var (id, c) in _panelContents)
+        {
+            if (c.Document || DockManager.Layout.Descendents().OfType<LayoutContent>().Any(x => x.ContentId == id)) continue;
+            var a = new LayoutAnchorable { ContentId = id, Title = c.Title, Content = c.Content, CanClose = false, CanHide = true };
+            a.AddToLayout(DockManager, AnchorableShowStrategy.Right);
+        }
+        foreach (var p in Panels())
+        {
+            p.PropertyChanged += (_, e) => { if (e.PropertyName is "IsVisible" or "IsHidden") SyncHiddenDocks(); };
+            if (p.ContentId == "StreamInfo")
+            {
+                var si = p;
+                si.IsSelectedChanged += (_, _) => { if (si.IsSelected) EnsureStreamInfo(); };
+                si.IsActiveChanged += (_, _) => { if (si.IsActive) EnsureStreamInfo(); };
+                if (si.IsSelected && !si.IsHidden) Dispatcher.InvokeAsync(EnsureStreamInfo, DispatcherPriority.Background);
+            }
+        }
+    }
+
+    private void SyncHiddenDocks()
+    {
+        var hidden = _state.Settings.HiddenDocks;
+        foreach (var p in Panels())
+        {
+            hidden.Remove(p.ContentId);
+            if (p.IsHidden) hidden.Add(p.ContentId);
+        }
+    }
+
+    private void SavePanelLayout()
+    {
+        try
+        {
+            using var w = new StreamWriter(LayoutPath);
+            new XmlLayoutSerializer(DockManager).Serialize(w);
+        }
+        catch { }
+    }
+
+
+    private void RestoreDefaultLayout()
+    {
+        if (_defaultLayout is null) return;
+        try { Serializer().Deserialize(new StringReader(_defaultLayout)); } catch { }
+    }
+
+    /// <summary>The dock frames in the studio's colours (the theme's own greys don't match the rest of the app).</summary>
+    private void DockStyle()
+    {
+        var keys = DockManager.Theme?.GetType().Assembly.GetTypes().FirstOrDefault(t => t.Name == "ResourceKeys");
+        if (keys is null) return;
+        SolidColorBrush B(uint argb) { var b = new SolidColorBrush(Color.FromArgb((byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb)); b.Freeze(); return b; }
+        var map = new Dictionary<string, Brush>
+        {
+            ["Background"] = B(0x00000000), ["PanelBorderBrush"] = B(0xFF1C2233), ["TabBackground"] = B(0xFF0E1220),
+            ["ToolWindowBackground"] = B(0xE6121623), ["ToolWindowCaptionInactiveBackground"] = B(0xFF0E1220),
+            ["ToolWindowCaptionActiveBackground"] = B(0xFF1D2340), ["ToolWindowCaptionActiveText"] = B(0xFFE9ECF8),
+            ["ToolWindowCaptionInactiveText"] = B(0xFF9AA2BC), ["DocumentWellTabSelectedActiveBackground"] = B(0xFF2A2F55),
+            ["DocumentWellTabSelectedInactiveBackground"] = B(0xFF1D2340), ["DocumentWellBackground"] = B(0x00000000),
+            ["FloatingDocumentWindowBackground"] = B(0xFF0B0E18), ["FloatingToolWindowBackground"] = B(0xFF0B0E18),
+            ["ToolWindowTabSelectedActiveBackground"] = B(0xFF1D2340), ["ToolWindowTabSelectedInactiveBackground"] = B(0xFF161B2E),
+            ["ToolWindowTabUnselectedHoveredBackground"] = B(0xFF161B2E), ["ToolWindowTabSelectedActiveText"] = B(0xFFE9ECF8),
+            ["ToolWindowTabSelectedInactiveText"] = B(0xFFC9CEE0), ["ToolWindowTabUnselectedText"] = B(0xFF8D95B0),
+        };
+        foreach (var (name, brush) in map)
+        {
+            object? key = keys.GetField(name)?.GetValue(null) ?? keys.GetProperty(name)?.GetValue(null);
+            if (key is not null) DockManager.Resources[key] = brush;
+        }
+    }
+
     private void DocksMenu_SubmenuOpened(object sender, RoutedEventArgs e)
     {
         foreach (var item in DocksMenu.Items.OfType<MenuItem>())
-            if (item.Tag is string tag) item.IsChecked = !_state.Settings.HiddenDocks.Contains(tag);
+            if (item.Tag is string tag)
+                item.IsChecked = Panel(tag) is { } p ? !p.IsHidden : !_state.Settings.HiddenDocks.Contains(tag);
     }
 
     private void DockToggle_Click(object sender, RoutedEventArgs e)
@@ -976,6 +1193,11 @@ public partial class MainWindow : Window
         if (sender is not MenuItem { Tag: string tag } item) return;
         _state.Settings.HiddenDocks.Remove(tag);
         if (!item.IsChecked) _state.Settings.HiddenDocks.Add(tag);
+        if (Panel(tag) is { } p)
+        {
+            if (item.IsChecked) { p.Show(); p.IsActive = true; if (tag == "StreamInfo") EnsureStreamInfo(); }
+            else p.Hide();
+        }
         ApplyDocks();
         Save();
     }
@@ -983,34 +1205,75 @@ public partial class MainWindow : Window
     private void ResetDocks_Click(object sender, RoutedEventArgs e)
     {
         _state.Settings.HiddenDocks.Clear();
+        foreach (var p in Panels().ToList()) if (p.IsHidden) p.Show();
         ApplyDocks();
         Save();
     }
 
-    /// <summary>Shows/hides every panel per the Docks menu; empty side columns collapse so the preview gets the room.</summary>
+    private void ResetLayout_Click(object sender, RoutedEventArgs e)
+    {
+        _state.Settings.HiddenDocks.Clear();
+        RestoreDefaultLayout();
+        AfterLayout();
+        try { File.Delete(LayoutPath); } catch { }
+        ApplyDocks();
+        Save();
+    }
+
+    /// <summary>The top bar's buttons follow the Docks menu (the panels hide and show themselves).</summary>
     private void ApplyDocks()
     {
         var hidden = _state.Settings.HiddenDocks;
         Visibility V(string name) => hidden.Contains(name) ? Visibility.Collapsed : Visibility.Visible;
-        ScenesDock.Visibility = V("Scenes");
-        SourcesDock.Visibility = V("Sources");
-        ControlsDock.Visibility = V("Controls");
-        MixerDock.Visibility = V("Mixer");
-        MultistreamDock.Visibility = V("Multistream");
-        SmartStreamDock.Visibility = V("SmartStream");
-        ActivityDock.Visibility = V("Activity");
         GoLiveButton.Visibility = V("GoLive");
         StudioModeButton.Visibility = V("StudioButton");
-        bool scenes = !hidden.Contains("Scenes"), sources = !hidden.Contains("Sources");
-        ScenesRow.Height = scenes ? new GridLength(2, GridUnitType.Star) : new GridLength(0);
-        SourcesRow.Height = sources ? new GridLength(3, GridUnitType.Star) : new GridLength(0);
-        ScenesDock.Margin = new Thickness(0, 0, 0, scenes && sources ? 10 : 0);
-        LeftColumn.Width = scenes || sources ? new GridLength(244) : new GridLength(0);
-        LeftPanel.Margin = new Thickness(0, 0, scenes || sources ? 10 : 0, 0);
-        bool right = new[] { "Multistream", "SmartStream", "Activity" }.Any(d => !hidden.Contains(d));
-        RightColumn.Width = right ? new GridLength(310) : new GridLength(0);
-        RightPanel.Visibility = right ? Visibility.Visible : Visibility.Collapsed;
         RedrawEditors();
+    }
+
+    // ------------------------------------------------------------------ stream info (Twitch / YouTube web panels)
+
+    private Microsoft.Web.WebView2.Wpf.WebView2? _infoView;
+    private bool _infoStarting;
+
+    private string StreamInfoUrl() => StreamInfoYouTube.IsChecked == true
+        ? "https://studio.youtube.com/channel/UC/livestreaming"
+        : ChatChannel() is { } ch ? $"https://dashboard.twitch.tv/popout/u/{ch}/stream-manager/edit-stream-info" : "https://dashboard.twitch.tv/stream-manager";
+
+    /// <summary>Opens the web panel the first time it's shown (no browser running until then). Sign-ins are kept.</summary>
+    private async void EnsureStreamInfo()
+    {
+        if (_infoView is not null || _infoStarting) return;
+        _infoStarting = true;
+        try
+        {
+            var env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, Path.Combine(StateStore.Folder, "webview2-panels"));
+            var view = new Microsoft.Web.WebView2.Wpf.WebView2 { DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 5, 7, 13) };
+            StreamInfoHost.Child = view;
+            await view.EnsureCoreWebView2Async(env);
+            view.CoreWebView2.NewWindowRequested += (_, e) => { e.Handled = true; view.CoreWebView2.Navigate(e.Uri); };
+            view.CoreWebView2.Navigate(StreamInfoUrl());
+            _infoView = view;
+        }
+        catch (Exception ex)
+        {
+            StreamInfoHint.Text = "The web panel couldn't start (" + ex.Message + "). Use \"Open in your browser\" instead.";
+        }
+        finally { _infoStarting = false; }
+    }
+
+    private void StreamInfoSite_Click(object sender, RoutedEventArgs e)
+    {
+        if (_infoView?.CoreWebView2 is { } w) w.Navigate(StreamInfoUrl()); else EnsureStreamInfo();
+    }
+
+    private void StreamInfoReload_Click(object sender, RoutedEventArgs e)
+    {
+        if (_infoView?.CoreWebView2 is { } w) w.Reload(); else EnsureStreamInfo();
+    }
+
+    private void StreamInfoBrowser_Click(object sender, RoutedEventArgs e)
+    {
+        try { Process.Start(new ProcessStartInfo(_infoView?.Source?.ToString() ?? StreamInfoUrl()) { UseShellExecute = true }); } catch { }
     }
 
     // ------------------------------------------------------------------ profiles
@@ -1358,6 +1621,33 @@ public partial class MainWindow : Window
         return KeyPrompt.Ask(this, o.Name, Platforms.Get(o.Service).KeyHint) ?? "";
     }
 
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+
+    /// <summary>The YouTube API when the broadcast picker is on and a Google client is set up (Settings → Connection).</summary>
+    private YouTubeApi? YouTube()
+    {
+        var s = _state.Settings;
+        if (!s.YouTubePickBroadcast || string.IsNullOrWhiteSpace(s.YouTubeClientId)) return null;
+        return new YouTubeApi(Http, s.YouTubeClientId, SecretStore.Unprotect(s.YouTubeClientSecretProtected), SecretStore.Unprotect(s.YouTubeRefreshProtected))
+        {
+            RefreshTokenChanged = r => Dispatcher.BeginInvoke(() => { _state.Settings.YouTubeRefreshProtected = SecretStore.Protect(r); Save(); }),
+        };
+    }
+
+    /// <summary>Once the video reaches YouTube, a broadcast that doesn't start by itself is switched to live.</summary>
+    private async Task MakeBroadcastLiveAsync(StreamOutput o, YouTubePick pick)
+    {
+        if (pick is not { Broadcast: { } b, Ingest: { } ing } || b.AutoStart || b.LifeCycle == "live") return;
+        try
+        {
+            var api = YouTube();
+            if (api is null) return;
+            string what = await api.GoLiveWhenReadyAsync(b, ing.StreamId, TimeSpan.FromSeconds(90), CancellationToken.None);
+            Log($"{o.Name}: \"{b.Title}\" {what}.", false);
+        }
+        catch (Exception ex) { Log($"{o.Name}: couldn't switch \"{b.Title}\" to live ({ex.Message}). Start it in YouTube Studio.", true); }
+    }
+
     private async Task StartOutputsAsync(IReadOnlyList<StreamOutput> outputs)
     {
         if (outputs.Count == 0) return;
@@ -1371,8 +1661,27 @@ public partial class MainWindow : Window
             Log("Turned on the vertical canvas for " + string.Join(", ", outputs.Where(o => o.IsVertical).Select(o => o.Name)) + ".", false);
         }
         var requests = new List<(Guid, string?)>();
+        var picks = new List<(StreamOutput Output, YouTubePick Pick)>();
         foreach (var o in outputs)
         {
+            if (o.Service == "YouTube" && YouTube() is { } api)
+            {
+                // which broadcast: a scheduled one, the one already live, or a new one
+                var pick = YouTubePicker.Show(this, api, o.Name);
+                if (pick is null) { Log($"{o.Name}: not started (no broadcast chosen).", false); continue; }
+                if (pick is { Ingest: { } ing, Broadcast: { } bc })
+                {
+                    if (!string.Equals(o.ServerUrl.Trim().TrimEnd('/'), ing.ServerUrl.Trim().TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                    {
+                        o.ServerUrl = ing.ServerUrl;
+                        Save();
+                    }
+                    requests.Add((o.Id, ing.StreamKey));
+                    picks.Add((o, pick));
+                    Log($"{o.Name}: streaming to \"{bc.Title}\" ({bc.When}).", false);
+                    continue;
+                }
+            }
             var key = KeyFor(o);
             if (key == "") { Log($"{o.Name}: skipped (no key).", false); continue; }
             requests.Add((o.Id, key));
@@ -1383,6 +1692,7 @@ public partial class MainWindow : Window
         {
             var problems = await _engine.StartOutputsAsync(requests);
             foreach (var p in problems) Log(p, true);
+            foreach (var (o, pick) in picks) _ = MakeBroadcastLiveAsync(o, pick);
             if (problems.Count > 0)
                 MessageBox.Show(this, string.Join(Environment.NewLine, problems), "Some outputs didn't start", MessageBoxButton.OK, MessageBoxImage.Information);
         }, "Connecting to " + names + "…");
@@ -1587,6 +1897,7 @@ public partial class MainWindow : Window
         bool ffmpegChanged = window.Result.FfmpegPath != _state.Settings.FfmpegPath;
         window.ApplySceneHotkeys(); // scene and source hotkeys live on the scenes
         _state.Settings = window.Result;
+        CaptureExclusion.Enabled = _state.Settings.HideFromCapture;
         ApplyDocks();
         Save();
         _shownPlan = null;
@@ -1594,14 +1905,13 @@ public partial class MainWindow : Window
         UpdateCanvasLayout();
         if (ffmpegChanged && !_engine.Running)
             MessageBox.Show(this, "Restart Leapcast to use the new FFmpeg location.", "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
-        if (_engine.Running)
+        if (_engine.Live)
         {
-            if (_engine.Live)
-            {
-                var answer = MessageBox.Show(this, "Apply now? Viewers see a brief pause. A new resolution reconnects each destination.",
-                    "Settings", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                if (answer != MessageBoxResult.Yes) { await ApplyToEngineAsync(false); Status("Settings saved: they apply next time you go live."); return; }
-            }
+            // what would restart the stream was locked in the dialog: the rest applies live, the stream isn't touched
+            await Guarded("Applying settings…", () => ApplyToEngineAsync(false), "Settings applied.");
+        }
+        else if (_engine.Running)
+        {
             await Guarded("Applying settings…", () => ApplyToEngineAsync(true), "Settings applied.");
         }
         else

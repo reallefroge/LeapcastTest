@@ -51,6 +51,38 @@ public sealed class WasapiAudioBridge : IAudioBridge
     // ------------------------------------------------------------------ speech tap (voice clips)
 
     private volatile Action<short[]>? _speechSink;
+    private volatile Action<short[]>? _loopSink;
+    private Guid? _loopSource;
+    private SpeechPcmConverter _loopConv = new() { AutoGain = false };
+
+    /// <summary>
+    /// Sends one desktop-audio capture (the game, Discord…), as 16 kHz mono, to <paramref name="sink"/>: transcribed
+    /// so words that leak from the speakers into the mic can be told apart from what you say. Null stops it.
+    /// </summary>
+    public void SetDesktopSpeechTap(Guid? sourceId, Action<short[]>? sink)
+    {
+        lock (_lock) { _loopSource = sourceId; _loopConv = new SpeechPcmConverter { AutoGain = false }; _loopSink = sink; }
+    }
+
+    /// <summary>When the scene has no desktop audio source: Windows' default output, captured for the recognizer only.</summary>
+    public static IDisposable CaptureDefaultOutputForSpeech(Action<short[]> sink)
+    {
+        var capture = Task.Run(() => new WasapiLoopbackCapture()).GetAwaiter().GetResult();
+        var conv = new SpeechPcmConverter { AutoGain = false };
+        var format = capture.WaveFormat;
+        capture.DataAvailable += (_, e) =>
+        {
+            try
+            {
+                if (e.BytesRecorded <= 0) return;
+                var pcm = conv.Convert(MonoOf(e.Buffer, e.BytesRecorded, format), format.SampleRate);
+                if (pcm.Length > 0) sink(pcm);
+            }
+            catch { }
+        };
+        capture.StartRecording();
+        return new Stopper(capture);
+    }
     private Guid? _speechSource;
     private SpeechPcmConverter _speechConv = new();
 
@@ -217,6 +249,10 @@ public sealed class WasapiAudioBridge : IAudioBridge
             if (_speechSink is { } sink && _speechSource == feed.SourceId)
             {
                 try { sink(_speechConv.Convert(MonoOf(e.Buffer, e.BytesRecorded, format), format.SampleRate)); } catch { }
+            }
+            if (_loopSink is { } lsink && _loopSource == feed.SourceId)
+            {
+                try { lsink(_loopConv.Convert(MonoOf(e.Buffer, e.BytesRecorded, format), format.SampleRate)); } catch { }
             }
             float peak = PeakOf(e.Buffer, e.BytesRecorded, format);
             if (peak > feed.Peak || Environment.TickCount64 - Interlocked.Read(ref feed.PeakTicks) > 120)

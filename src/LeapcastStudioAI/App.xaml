@@ -659,6 +659,72 @@
       </Setter>
     </Style>
 
+    <Style x:Key="MeterScale" TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="Consolas"/>
+      <Setter Property="FontSize" Value="8"/>
+      <Setter Property="Foreground" Value="#6A7390"/>
+      <Setter Property="HorizontalAlignment" Value="Right"/>
+    </Style>
+    <!-- Vertical mixer fader: a slim lit rail and a console-style cap -->
+    <LinearGradientBrush x:Key="FaderFill" StartPoint="0,1" EndPoint="0,0">
+      <GradientStop Color="#3DD6F5" Offset="0"/>
+      <GradientStop Color="#8B7CFF" Offset="1"/>
+    </LinearGradientBrush>
+    <Style x:Key="FaderSlider" TargetType="Slider">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Orientation" Value="Vertical"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Slider">
+            <Grid HorizontalAlignment="Center" Width="26">
+              <Border Width="4" CornerRadius="2" Background="#14FFFFFF" HorizontalAlignment="Center"/>
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton">
+                        <Border Width="4" CornerRadius="2" Background="{StaticResource FaderFill}" HorizontalAlignment="Center">
+                          <Border.Effect><DropShadowEffect Color="#3DD6F5" BlurRadius="8" ShadowDepth="0" Opacity="0.7"/></Border.Effect>
+                        </Border>
+                      </ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.DecreaseRepeatButton>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Command="Slider.IncreaseLarge" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.IncreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb>
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="Cap" Width="24" Height="12" CornerRadius="3" BorderThickness="1" BorderBrush="#808B7CFF">
+                          <Border.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                              <GradientStop Color="#E9ECF8" Offset="0"/>
+                              <GradientStop Color="#9AA2BC" Offset="1"/>
+                            </LinearGradientBrush>
+                          </Border.Background>
+                          <Border Height="2" Margin="3,0" Background="#3DD6F5" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Cap" Property="BorderBrush" Value="#3DD6F5"/></Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="SectionHeader" TargetType="TextBlock">
       <Setter Property="FontSize" Value="11"/>
       <Setter Property="FontWeight" Value="SemiBold"/>

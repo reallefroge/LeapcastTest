@@ -30,6 +30,11 @@ public sealed class VoiceListener : IDisposable
     public event Action<string, float, DateTime>? Heard;
     /// <summary>Every finished utterance's words (best reading), with when each was said: for clip captions.</summary>
     public event Action<IReadOnlyList<CaptionWord>>? Transcribed;
+    /// <summary>What is being said right now (the unfinished sentence), refreshed a few times a second.</summary>
+    public string Partial => _partial;
+    private volatile string _partial = "";
+    /// <summary>When the last finished sentence was handed out (words up to about then are final).</summary>
+    public DateTime LastResultUtc { get; private set; }
     /// <summary>Only transcribe (captions): never fire <see cref="Heard"/>.</summary>
     public bool TranscribeOnly { get; set; }
     /// <summary>What the recognizer transcribed (diagnostics).</summary>
@@ -92,7 +97,8 @@ public sealed class VoiceListener : IDisposable
                 for (int i = 0; i < count; i++) _ring[(_fed + i) % _ring.Length] = samples[i];
                 _fed += count;
                 var json = rec.Accept(samples, count);
-                if (json is not null) OnResult(json, feed);
+                if (json is not null) { _partial = ""; OnResult(json, feed); }
+                else if (++_chunks % 3 == 0) _partial = PartialText(rec.Partial());
                 if (n < bytes.Length) break; // the stream was completed
             }
             if (!_stop) OnResult(rec.Final(), feed);
@@ -101,8 +107,21 @@ public sealed class VoiceListener : IDisposable
         finally { rec.Dispose(); }
     }
 
+    private int _chunks;
+
+    private static string PartialText(string json)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("partial", out var p) ? p.GetString() ?? "" : "";
+        }
+        catch { return ""; }
+    }
+
     private void OnResult(string json, BlockingAudioStream feed)
     {
+        LastResultUtc = DateTime.UtcNow;
         var readings = VoskApi.Parse(json);
         if (readings.Count == 0 || readings[0].Words.Count == 0 && readings.Count == 1) return;
         double top = readings[0].Score;
