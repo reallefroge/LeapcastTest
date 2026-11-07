@@ -14,6 +14,18 @@ if (args.Length > 0 && args[0] == "--burn")
 }
 
 int failures = 0;
+// quick mode: only the voice-clip listener
+if (args.Length > 0 && args[0] == "--voice")
+{
+    int vf = 0;
+    void VCheck(bool ok, string what) { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) vf++; }
+#if WINDOWS_SPEECH
+    await SpeechTests.RunAsync(VCheck);
+#else
+    await VoskTests.RunAsync(VCheck, null);
+#endif
+    return vf == 0 ? 0 : 1;
+}
 double lastDriftMs = 0; // set by LipSyncAsync: second-half minus first-half offset
 void Check(bool ok, string what) { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) failures++; }
 
@@ -507,10 +519,28 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
         "what a recognizer often hears for it counts too: \"clips\", \"clipped\", \"clipping\", \"clipit\", \"Klip\"");
     Check(new[] { "clipboard", "flip", "slip", "lip", "cliff", "eclipse", "clippers" }.All(h => !VoiceClips.Matches(h, "clip") || h == "clippers"),
         "…but not other words (\"clipboard\", \"flip\", \"slip\", \"cliff\")");
-    var hi = VoiceClips.Sensitivity(new StudioSettings().VoiceClipSensitivity);
-    var norm = VoiceClips.Sensitivity("Normal");
-    Check(new StudioSettings().VoiceClipSensitivity == "High" && hi.Alone < norm.Alone && hi.InSentence < norm.InSentence && hi.UseRejected && hi.Rejection is >= 0 and < 60,
-        $"sensitivity High by default: accepts the word from {hi.Alone:0.00} confidence alone / {hi.InSentence:0.00} in a sentence (Normal: {norm.Alone:0.00}/{norm.InSentence:0.00}) and rechecks what the recognizer rejected");
+    Check(new StudioSettings().VoiceClipSensitivity == "High", "sensitivity High by default");
+    {
+        // what the recognizer gives for an utterance: readings, best first, with scores
+        var lived = VoskApi.Parse("{\"alternatives\":[{\"confidence\":133.0,\"result\":[{\"start\":7.53,\"end\":7.8,\"word\":\"lived\"}],\"text\":\"lived\"}," +
+                               "{\"confidence\":132.6,\"result\":[{\"start\":7.55,\"end\":7.8,\"word\":\"clip\"}],\"text\":\"clip\"}," +
+                               "{\"confidence\":132.2,\"result\":[{\"start\":7.53,\"end\":7.8,\"word\":\"lip\"}],\"text\":\"lip\"}]}");
+        var sentence = VoskApi.Parse("{\"alternatives\":[{\"confidence\":300.1,\"result\":[{\"start\":1.0,\"end\":1.2,\"word\":\"flip\"},{\"start\":1.2,\"end\":1.3,\"word\":\"the\"},{\"start\":1.3,\"end\":1.7,\"word\":\"card\"}]}," +
+                                  "{\"confidence\":290.0,\"result\":[{\"start\":1.0,\"end\":1.2,\"word\":\"clip\"},{\"start\":1.2,\"end\":1.3,\"word\":\"the\"},{\"start\":1.3,\"end\":1.7,\"word\":\"card\"}]}]}");
+        var lipOnly = VoskApi.Parse("{\"alternatives\":[{\"confidence\":80.0,\"result\":[{\"start\":2.0,\"end\":2.2,\"word\":\"lip\"}]}]}");
+        var plain = VoskApi.Parse("{\"result\":[{\"conf\":1.0,\"start\":4.2,\"end\":4.5,\"word\":\"clip\"},{\"conf\":1.0,\"start\":4.5,\"end\":4.7,\"word\":\"that\"}],\"text\":\"clip that\"}");
+        var nl = VoiceClips.Sensitivity("Normal"); var hl = VoiceClips.Sensitivity("High"); var ml = VoiceClips.Sensitivity("Max");
+        Check(lived.Count == 3 && lived[1].Words[0].Text == "clip" && plain.Count == 1 && plain[0].Text == "clip that" && VoskApi.Parse("not json").Count == 0,
+            "the recognizer's results are read (n-best readings with word times, or one reading)");
+        Check(VoiceClips.FindWord(plain, "clip", nl)?.Start == 4.2 && VoiceClips.FindWord(lived, "clip", nl) is null
+              && VoiceClips.FindWord(lived, "clip", hl)?.Start == 7.55 && VoiceClips.FindWord(sentence, "clip", hl) is null && VoiceClips.FindWord(sentence, "clip", ml) is null,
+            "Normal takes the word when it's the best reading; High also a close second (\"lived\" vs \"clip\", 0.4 apart) but not a distant one (\"flip the card\")");
+        Check(VoiceClips.FindWord(lipOnly, "clip", hl)?.Start == 2.0 && VoiceClips.FindWord(lipOnly, "clip", nl) is null && VoiceClips.FindWord(sentence, "clip", ml) is null,
+            "High also takes a word one letter off said entirely on its own (\"lip\"), never inside a sentence (\"flip the card\", not even on Maximum)");
+        Check(VoiceClips.IsWord("clip", "clip") && VoiceClips.IsWord("Clips", "clip") && VoiceClips.IsWord("klip", "clip")
+              && !VoiceClips.IsWord("clipping", "clip") && !VoiceClips.IsWord("clipped", "clip") && !VoiceClips.IsWord("flip", "clip"),
+            "a transcribed \"clip\" / \"clips\" counts; \"clipping\" (a mic clipping) and \"clipped\" don't");
+    }
     string cf = Path.Combine(work, "clips-test");
     if (Directory.Exists(cf)) Directory.Delete(cf, true);
     Directory.CreateDirectory(cf);
@@ -550,15 +580,9 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
     }
     double pass = ToneRms(1000), hiss = ToneRms(12000);
     Check(pass > 0.33 && hiss < 0.01, $"48 → 16 kHz: speech passes ({pass:0.000} RMS at 1 kHz), 12 kHz hiss is filtered out ({hiss:0.0000}) instead of aliasing to 4 kHz");
-    Check(VoiceClips.NearMatch("klip", "clip") && VoiceClips.NearMatch("clap that", "clip") && VoiceClips.NearMatch("flips", "clip")
+    Check(VoiceClips.NearMatch("klip", "clip") && VoiceClips.NearMatch("clap that", "clip") && VoiceClips.NearMatch("flips", "clip") && VoiceClips.NearMatch("lip", "clip")
           && !VoiceClips.NearMatch("but", "clip") && !VoiceClips.NearMatch("by the", "clip") && !VoiceClips.NearMatch("live", "clip") && !VoiceClips.NearMatch("click", "clip"),
-        "High also takes a word one letter off (\"klip\", \"clap\", \"flip\"), not \"but\", \"live\" or \"click\"");
-    Check(VoiceClips.NearMatch("click", "clip", 2) && VoiceClips.NearMatch("chip", "clip", 2) && !VoiceClips.NearMatch("but", "clip", 2) && !VoiceClips.NearMatch("the weather", "clip", 2),
-        "Maximum goes to two letters (\"click\", \"chip\"), still not \"but\"");
-    var nl = VoiceClips.Sensitivity("Normal"); var hl = VoiceClips.Sensitivity("High"); var ml = VoiceClips.Sensitivity("Max");
-    Check(nl.Alone > hl.Alone && hl.Alone > ml.Alone && nl.DictationWeight == 0 && ml.DictationWeight == 0
-          && nl.NearLetters == 0 && hl.NearLetters == 1 && ml.NearLetters == 2 && nl.Rejection > hl.Rejection && hl.Rejection > ml.Rejection,
-        $"the three levels really differ: confidence {nl.Alone}/{hl.Alone}/{ml.Alone}, nothing competing with the word on any level, near-misses 0/1/2 letters");
+        "one letter off: \"klip\", \"clap\", \"flip\", \"lip\"; not \"but\", \"live\" or \"click\"");
     // a quiet microphone is brought up for the recognizer (not the stream), but its background noise isn't
     (int peak, float gain) Run(double toneAmp, double noise)
     {
@@ -591,6 +615,8 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
         $"the recognizer's audio stream fills every read completely (a short read would end recognition), then ends cleanly ({string.Join(",", reads)})");
 #if WINDOWS_SPEECH
     await SpeechTests.RunAsync(Check);
+#else
+    await VoskTests.RunAsync(Check, null);
 #endif
 }
 
@@ -661,9 +687,15 @@ Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip 
     // ---- 9:16: camera top-right on a 960×540 canvas, game full screen ----
     var lay = new ClipLayout(960, 540, new LayoutRect(0, 0, 960, 540), new LayoutRect(700, 20, 240, 135));
     var tplan = VerticalClip.PlanFor(lay);
-    Check(tplan.OutW == 720 && tplan.OutH == 1280 && tplan.CamBox is { } cb0 && tplan.GameBox.W == 720 && tplan.GameBox.H is 404 or 405
-          && cb0.Y + cb0.H < tplan.GameBox.Y && tplan.CoverInGame is not null,
-        $"9:16 layout: camera on top ({tplan.CamBox}), the whole game below at full width ({tplan.GameBox}), nothing cropped");
+    Check(tplan.OutW == 720 && tplan.OutH == 1280 && tplan.CamBox is { } cb0 && tplan.GameBox.W == 720 && tplan.GameBox.H == 720
+          && cb0.Y < 1280 * 0.08 && cb0.H <= 1280 * 0.21 && cb0.W < 720 * 0.6 && cb0.Y + cb0.H < tplan.GameBox.Y && tplan.GameBox.Y + tplan.GameBox.H < 1280 * 0.9
+          && Math.Abs(tplan.GameCrop.W - 540) < 2 && Math.Abs(tplan.GameCrop.X - 210) < 2 && tplan.CoverInGame is not null,
+        $"9:16 layout: a small camera at the top ({tplan.CamBox}), the game big below it ({tplan.GameBox}: the middle {tplan.GameCrop.W:0}×{tplan.GameCrop.H:0} of it)");
+    var wideCam = VerticalClip.PlanFor(new ClipLayout(1920, 1080, null, new LayoutRect(1400, 40, 480, 270)));
+    Check(wideCam.OutW == 1080 && wideCam.Camera is { } wc && Math.Abs(wc.W / wc.H - 4 / 3.0) < 0.01 && wideCam.GameBox.H == 1080 && wideCam.CamBox!.Value.H <= 1920 * 0.21,
+        $"a 16:9 webcam is trimmed to 4:3 (less wall), 1080p canvas → {wideCam.OutW}×{wideCam.OutH}, game {wideCam.GameBox.W}×{wideCam.GameBox.H}, camera {wideCam.CamBox}");
+    var noCam = VerticalClip.PlanFor(new ClipLayout(1920, 1080, null, null));
+    Check(noCam.CamBox is null && noCam.GameBox.H == 1080 && noCam.GameBox.Y is > 300 and < 500, $"no camera: the game alone, a little above the middle ({noCam.GameBox})");
     string wideClip = Path.Combine(work, "wide.mp4"), tall = Path.Combine(work, "wide (9x16).mp4");
     await RunAsync(new[] { "-y", "-f", "lavfi", "-i", "color=c=blue:s=960x540:r=30:d=4", "-f", "lavfi", "-i", "sine=d=4",
         "-filter_complex", "[0:v]drawbox=x=700:y=20:w=240:h=135:color=red:t=fill[v]", "-map", "[v]", "-map", "1:a",
@@ -678,7 +710,8 @@ Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip 
     var cb = tplan.CamBox!.Value;
     var camPx = await At(tall, cb.X + cb.W / 2, cb.Y + cb.H / 2);
     var gamePx = await At(tall, tplan.GameBox.X + 100, tplan.GameBox.Y + tplan.GameBox.H - 60);
-    var coverPx = await At(tall, tplan.GameBox.X + (int)(tplan.CoverInGame!.Value.X * 0.75) + 30, tplan.GameBox.Y + (int)(tplan.CoverInGame!.Value.Y * 0.75) + 30);
+    double gscale = tplan.GameBox.W / tplan.GameCrop.W;
+    var coverPx = await At(tall, tplan.GameBox.X + (int)((tplan.CoverInGame!.Value.X + tplan.CoverInGame!.Value.W / 2) * gscale), tplan.GameBox.Y + (int)((tplan.CoverInGame!.Value.Y + tplan.CoverInGame!.Value.H / 2) * gscale));
     var bgPx = await At(tall, 6, 6);
     Check(size == (720, 1280) && camPx.r > 180 && camPx.b < 80 && gamePx.b > 180 && gamePx.r < 60 && coverPx.r < 170 && bgPx.b is > 30 and < 200,
         $"rendered 9:16 {size}: camera red {camPx}, game blue {gamePx}, the camera's spot in the game blurred {coverPx}, background dimmed {bgPx}");
@@ -863,7 +896,8 @@ Directory.CreateDirectory(liveDir);
 // it gets its own end-to-end test below.
 var settings = new StudioSettings { QualityProfile = "Custom", Resolution = "640 × 360", FrameRate = 30, MaxBitrateKbps = 1500, Encoder = "libx264", RecordingFolder = Path.Combine(work, "videos"),
     ReplaySeconds = 6, Outputs = new() { outA, outB, outV }, AdaptivePerformance = false,
-    InstantSwitching = true }; // live show/hide and seamless scene switches (light mode is tested on its own)
+    InstantSwitching = true, // live show/hide and seamless scene switches (light mode is tested on its own)
+    VerticalClips = false };  // the live 9:16 clip canvas has its own test
 await engine.UpdateAsync(scene, settings, false);
 async Task AdaptSection(StudioScene light)
 {
@@ -1402,6 +1436,49 @@ await AdaptSection(light);
 
 // ---------------------------------------------------------------- show/hide live, studio mode, rebuilds stay connected
 await LiveSwitchSection(light);
+
+// ---------------------------------------------------------------- live 9:16 clips
+Console.WriteLine("9:16 clips made live from the raw game and camera (no webcam inside the game, nothing re-rendered)");
+{
+    var oldOverride = engine.InputOverride;
+    engine.InputOverride = (src, origin) => SourceTypes.KindOf(src.Type) switch
+    {
+        SourceKind.Display => new InputSpec(new[] { "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=30,realtime=limit=1000" }, false),
+        SourceKind.Camera => new InputSpec(new[] { "-f", "lavfi", "-i", "color=c=red:s=640x360:r=30,realtime=limit=1000" }, false),
+        _ => null
+    };
+    var cscene = new StudioScene { Name = "clip canvas" };
+    cscene.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, Anchor = Anchors.Fill });
+    cscene.Sources.Add(new StudioSource { Name = "Cam", Type = SourceTypes.Camera, Anchor = Anchors.BottomRight });
+    var cset = WithEncoder(settings, "libx264");
+    cset.VerticalClips = true;
+    await engine.UpdateAsync(new[] { cscene }, cscene, cset, false);
+    await engine.SetReplayBufferAsync(true);
+    await Task.Delay(9000);
+    string vdir = Path.Combine(work, "clips-9x16");
+    var (vpath, isVertical) = await engine.SaveClipAsync(4, vdir, vertical: true);
+    var vsize = await Recap.SizeOfAsync(ffmpeg, vpath, CancellationToken.None);
+    var vprobe = await ProbeAsync(vpath);
+    var lp = VerticalClip.LivePlan(720, 1280, 16 / 9.0, 16 / 9.0);
+    async Task<(int r, int g, int b)> VAt(int x, int y)
+    {
+        var px = await RawAsync(new[] { "-v", "error", "-sseof", "-1", "-i", vpath, "-frames:v", "1", "-vf", $"crop=6:6:{x - 3}:{y - 3},scale=1:1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-" });
+        return px.Length >= 3 ? (px[0], px[1], px[2]) : (-1, -1, -1);
+    }
+    var cbx = lp.CamBox!.Value;
+    var camC = await VAt(cbx.X + cbx.W / 2, cbx.Y + cbx.H / 2);
+    // where the webcam sits on the 16:9 picture (bottom right), inside the game panel's crop: must be game, not webcam
+    var gameBR = await VAt(lp.GameBox.X + lp.GameBox.W - 20, lp.GameBox.Y + lp.GameBox.H - 20);
+    var gameMid = await VAt(lp.GameBox.X + lp.GameBox.W / 2, lp.GameBox.Y + lp.GameBox.H / 2);
+    var camCorner = await VAt(cbx.X + 3, cbx.Y + 3);
+    Check(isVertical && vsize == (720, 1280) && vprobe.duration is > 3 and < 7 && engine.CanClipVertical,
+        $"a 9:16 clip is cut straight from the live clip canvas: {vsize}, {vprobe.duration:0.0}s ({Path.GetFileName(vpath)})");
+    Check(camC.r > 180 && camC.b < 80 && gameBR.b > 150 && gameBR.r < 80 && gameMid.b > 150 && gameMid.r < 80 && camCorner.r < 120,
+        $"camera on top {camC} with rounded corners {camCorner}, the game panel is the raw game: no webcam in its corner {gameBR}, middle {gameMid}");
+    await engine.SetReplayBufferAsync(false);
+    engine.InputOverride = oldOverride;
+    await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
+}
 
 // ---------------------------------------------------------------- reconnects
 Console.WriteLine("A destination that drops reconnects on its own; the others don't notice");

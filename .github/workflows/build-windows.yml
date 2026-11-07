@@ -46,14 +46,17 @@ jobs:
         run: |
           $env:PATH = (Resolve-Path "publish/win-x64/ffmpeg/bin").Path + ";" + $env:PATH
           $env:LEAPCAST_LOG_COMMANDS = "1"
+          # voice clips: the bundled speech model (libvosk.dll comes with the test project's Vosk package)
+          $env:LEAPCAST_VOSK_MODEL = (Resolve-Path "publish/win-x64/speech/vosk-model-small-en-us-0.15").Path
+          $env:LEAPCAST_REQUIRE_VOSK = "1"
           New-Item -ItemType Directory -Force smoke | Out-Null
           dotnet run -c Release --project tests/CoreTests 2>&1 | Tee-Object -FilePath smoke/engine-tests.txt
           $code = $LASTEXITCODE
           Get-ChildItem $env:TEMP\leapcast-tests\data\logs -ErrorAction SilentlyContinue | Copy-Item -Destination smoke/ -ErrorAction SilentlyContinue
           Get-ChildItem $env:TEMP\leapcast-tests\*.log -ErrorAction SilentlyContinue | Copy-Item -Destination smoke/ -ErrorAction SilentlyContinue
           # Surface results as annotations (readable without downloading logs)
-          Get-Content smoke/engine-tests.txt | Where-Object { $_ -match 'FAIL|engine:|FFmpeg under test|ddagrab|lip|gpu-window|gpu-display|transition-debug|PASS.*(crossfade|gap|GPU)' } |
-            Select-Object -First 20 | ForEach-Object { Write-Host "::warning title=engine-test::$($_.Trim())" }
+          Get-Content smoke/engine-tests.txt | Where-Object { $_ -match 'FAIL|engine:|FFmpeg under test|ddagrab|lip|gpu-window|gpu-display|transition-debug|PASS.*(crossfade|gap|GPU)|said,|note: Maximum|9:16' } |
+            Select-Object -First 30 | ForEach-Object { Write-Host "::warning title=engine-test::$($_.Trim())" }
           $ff = Join-Path $env:TEMP "leapcast-tests\data\logs\ffmpeg-last.log"
           if (Test-Path $ff) {
             Get-Content $ff | Select-Object -Skip 1 | Where-Object { $_.Trim() } | Select-Object -Last 8 |

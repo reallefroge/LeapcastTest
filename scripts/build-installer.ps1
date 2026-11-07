@@ -5,6 +5,8 @@ param(
     [switch]$SkipInstaller,
     # Use a specific FFmpeg build zip instead of downloading (any Windows x64 *GPL* build with ddagrab works).
     [string]$FfmpegZip = "",
+    # Use a local copy of the Vosk speech model zip (vosk-model-small-en-us-0.15.zip) instead of downloading it.
+    [string]$VoskZip = "",
     [switch]$SkipFfmpeg
 )
 
@@ -24,9 +26,42 @@ if (Test-Path $PublishDir) { Remove-Item $PublishDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $PublishDir | Out-Null
 
 dotnet publish $Project -c Release -r $Runtime --self-contained true `
-    -p:PublishSingleFile=false -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishReadyToRun=true `
+    -p:PublishSingleFile=false -p:IncludeNativeLibrariesForSelfExtract=false -p:PublishReadyToRun=false `
     -o $PublishDir
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
+
+# ---------------------------------------------------------------- speech model (voice clips)
+$VoskModel = "vosk-model-small-en-us-0.15"
+$VoskSha = "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498"
+New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+if (-not $VoskZip) {
+    $VoskZip = Join-Path $CacheDir "$VoskModel.zip"
+    if (-not (Test-Path $VoskZip)) {
+        # CI: the copy kept as a release asset of this repository (.github/workflows/fetch-vosk-model.yml)
+        if ($env:GITHUB_REPOSITORY -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+            Write-Host "Downloading the speech model from this repository's release asset..." -ForegroundColor Cyan
+            if (-not $env:GH_TOKEN -and $env:GITHUB_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
+            $rel = gh api "repos/$($env:GITHUB_REPOSITORY)/releases/tags/speech-model-$VoskModel" | ConvertFrom-Json
+            $asset = $rel.assets | Where-Object { $_.name -eq "$VoskModel.zip" } | Select-Object -First 1
+            if ($asset) {
+                Invoke-WebRequest "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/releases/assets/$($asset.id)" -OutFile $VoskZip `
+                    -Headers @{ "Accept" = "application/octet-stream"; "Authorization" = "Bearer $($env:GH_TOKEN)"; "User-Agent" = "leapcast-build" }
+            }
+        }
+        if (-not (Test-Path $VoskZip)) {
+            Write-Host "Downloading the speech model from alphacephei.com..." -ForegroundColor Cyan
+            Invoke-WebRequest "https://alphacephei.com/vosk/models/$VoskModel.zip" -OutFile $VoskZip
+        }
+    }
+}
+$hash = (Get-FileHash $VoskZip -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($hash -ne $VoskSha) { Remove-Item $VoskZip -ErrorAction SilentlyContinue; throw "Speech model checksum mismatch ($hash)." }
+$SpeechDir = Join-Path $PublishDir "speech"
+New-Item -ItemType Directory -Force -Path $SpeechDir | Out-Null
+Expand-Archive -Path $VoskZip -DestinationPath $SpeechDir -Force
+if (-not (Test-Path (Join-Path $SpeechDir "$VoskModel\am\final.mdl"))) { throw "The speech model didn't unpack where expected." }
+if (-not (Test-Path (Join-Path $PublishDir "libvosk.dll"))) { throw "libvosk.dll is missing from the published app." }
+Write-Host "Bundled speech model: $VoskModel" -ForegroundColor Green
 
 # ---------------------------------------------------------------- FFmpeg (the media engine)
 if (-not $SkipFfmpeg) {

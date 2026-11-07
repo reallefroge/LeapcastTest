@@ -68,6 +68,8 @@ public sealed class StreamEngine : IDisposable
     private readonly IAudioBridge _audio;
     private readonly IPlatformServices _platform;
     private readonly SegmentCache _cache;
+    /// <summary>The live 9:16 clip canvas's own recent segments (Settings → 9:16 clips).</summary>
+    private readonly SegmentCache _clipCache;
     private readonly CameraBridge _cameras;
     private readonly WindowCaptureBridge _windows;
     private readonly BrowserBridge _browsers;
@@ -79,7 +81,7 @@ public sealed class StreamEngine : IDisposable
     private readonly CancellationTokenSource _life = new();
 
     /// <summary>Which encodes the running pipeline has. A different shape needs a new pipeline.</summary>
-    private sealed record Shape(bool Run, bool Main, bool MainBus, bool Vertical, bool VerticalEncode, string Own);
+    private sealed record Shape(bool Run, bool Main, bool MainBus, bool Vertical, bool VerticalEncode, string Own, bool Clip = false);
 
     private FfmpegRunner? _runner;
     private Shape? _runnerShape;
@@ -276,6 +278,7 @@ public sealed class StreamEngine : IDisposable
         ThreadPool.GetMinThreads(out int workers, out int io);
         ThreadPool.SetMinThreads(Math.Max(workers, 32), Math.Max(io, 32));
         _cache = new SegmentCache(Path.Combine(dataRoot, "cache", "segments"));
+        _clipCache = new SegmentCache(Path.Combine(dataRoot, "cache", "clips-9x16"));
         _logDir = Path.Combine(dataRoot, "logs");
         _tempDir = Path.Combine(dataRoot, "cache", "overlays");
         _pipeDir = Path.Combine(dataRoot, "cache", "pipes");
@@ -838,8 +841,32 @@ public sealed class StreamEngine : IDisposable
         return output;
     }
 
+    /// <summary>The live 9:16 clip canvas is running: <see cref="SaveClipAsync"/> can cut a 9:16 clip straight away.</summary>
+    public bool CanClipVertical => _runnerShape?.Clip == true && _runner is not null && _clipCache.HasActiveSession;
+
+    /// <summary>Off: 9:16 clips are rendered from the 16:9 clip after it's saved (tests, or a GPU out of encoder sessions).</summary>
+    public bool ClipCanvasEnabled { get; set; } = true;
+
+    /// <summary>
+    /// A clip from the live 9:16 clip canvas when it's running (<paramref name="vertical"/>), else from the stream.
+    /// Returns the file and whether it is 9:16 already.
+    /// </summary>
+    public async Task<(string Path, bool Vertical)> SaveClipAsync(int seconds, string folder, bool vertical, DateTime? endUtc = null, string? label = null,
+        CancellationToken ct = default)
+    {
+        if (vertical && CanClipVertical)
+        {
+            try { return (await SaveClipFromAsync(_clipCache, seconds, folder, ct, endUtc, label), true); }
+            catch (Exception ex) { Message?.Invoke(this, new EngineMessageEventArgs("9:16 clip: " + ex.Message + " (saving 16:9 instead)", true)); }
+        }
+        return (await SaveClipAsync(seconds, folder, ct, endUtc, label), false);
+    }
+
     /// <param name="endUtc">End the clip here (just before the word was said); null = the last seconds up to now.</param>
-    public async Task<string> SaveClipAsync(int seconds, string folder, CancellationToken ct = default, DateTime? endUtc = null, string? label = null)
+    public Task<string> SaveClipAsync(int seconds, string folder, CancellationToken ct = default, DateTime? endUtc = null, string? label = null)
+        => SaveClipFromAsync(_cache, seconds, folder, ct, endUtc, label);
+
+    private async Task<string> SaveClipFromAsync(SegmentCache cache, int seconds, string folder, CancellationToken ct, DateTime? endUtc, string? label)
     {
         if (!CanClip) throw new InvalidOperationException("Nothing to clip. Start streaming, recording or the replay buffer.");
         Directory.CreateDirectory(folder);
@@ -848,8 +875,8 @@ public sealed class StreamEngine : IDisposable
         string file = VoiceClips.PathFor(folder, (end ?? now).ToLocalTime(), label);
         seconds = Math.Clamp(seconds, 5, 600);
         return end is { } at
-            ? await _cache.SaveEndingAtAsync(RequireFfmpeg(), seconds, at, file, ct)
-            : await _cache.SaveReplayAsync(RequireFfmpeg(), seconds, file, ct);
+            ? await cache.SaveEndingAtAsync(RequireFfmpeg(), seconds, at, file, ct)
+            : await cache.SaveReplayAsync(RequireFfmpeg(), seconds, file, ct);
     }
 
     public sealed record BenchmarkResult(double Fps, int TargetFps, double Speed, long Dropped, string Health)
@@ -1000,7 +1027,9 @@ public sealed class StreamEngine : IDisposable
         string own = string.Join(",", pool.Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || vCanvas))
             .Select(o => $"{o.Id:N}:{o.OwnBitrateKbps}:{(o.IsVertical ? "v" : "h")}").OrderBy(x => x, StringComparer.Ordinal));
         bool run = PreviewOn || main || vEnc || own.Length > 0;
-        return new Shape(run, main, mainBus, vCanvas, vEnc, own);
+        // 9:16 clips are made live alongside the clip history (from the raw game and camera), not re-rendered after
+        bool clip = main && Settings.VerticalClips && ClipCanvasEnabled;
+        return new Shape(run, main, mainBus, vCanvas, vEnc, own, clip);
     }
 
     private async Task ReconcileAsync(bool requireSuccess = false)
@@ -1077,6 +1106,9 @@ public sealed class StreamEngine : IDisposable
         var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)));
         lock (_windows.CaptureSizes) foreach (var (k, v) in _windows.CaptureSizes) _knownSizes[k] = v;
         string? segPattern = shape.Main ? _cache.BeginSession(origin) : null;
+        string? clipPattern = shape.Clip ? _clipCache.BeginSession(origin) : null;
+        var clipSize = VerticalClip.OutputSize(plan.Height);
+        var clipPlan = plan with { Width = clipSize.W, Height = clipSize.H, Fps = 30, CapKbps = clipSize.W >= 1080 ? 6000 : 4500, LowLatency = false, Light = false };
         _stuckWarned = false;
 
         // One TS bus per encode that feeds destinations; outputs subscribe/unsubscribe at will.
@@ -1114,6 +1146,11 @@ public sealed class StreamEngine : IDisposable
             KnownSizes = new Dictionary<string, (int, int)>(_knownSizes),
             SegmentPattern = segPattern,
             SegmentSeconds = _cache.SegmentSeconds,
+            ClipCanvas = shape.Clip ? clipSize : null,
+            ClipPlan = shape.Clip ? clipPlan : null,
+            ClipSegmentPattern = clipPattern,
+            ClipHandle = Settings.ClipHandle,
+            ClipFont = Recap.FontFile(),
             Preview = true,
             // lighter rungs: smaller, slower preview (every preview frame is scaled, converted and copied to the app)
             PreviewWidth = Performance.SmallPreview ? 640 : PreviewWidthPx, PreviewHeight = Performance.SmallPreview ? 360 : PreviewHeightPx,
@@ -1276,8 +1313,9 @@ public sealed class StreamEngine : IDisposable
         r.Dispose();
         foreach (var b in _buses.Values) b.Dispose();
         _buses = new();
-        bool encoded = _runnerShape is { } sh && (sh.Main || sh.VerticalEncode || sh.Own.Length > 0);
+        bool encoded = _runnerShape is { } sh && (sh.Main || sh.VerticalEncode || sh.Own.Length > 0 || sh.Clip);
         if (_runnerShape?.Main == true) _cache.EndSession();
+        if (_runnerShape?.Clip == true) _clipCache.EndSession();
         if (encoded) _audio.ClosePipes();
         _cameras.ClosePipes(); // readers stay open (warm) for the next run
         _windows.ClosePipes();
@@ -1379,6 +1417,7 @@ public sealed class StreamEngine : IDisposable
                 int keep = Math.Max(Settings.ReplaySeconds, Settings.VoiceClipEnabled ? Settings.VoiceClipSeconds : 0);
                 if (Settings.DeathClips) keep = Math.Max(keep, (int)(DeathDetector.MaxFight + DeathDetector.BeforeFight).TotalSeconds + 10);
                 _cache.Housekeep(Math.Clamp(keep, 5, 600));
+                _clipCache.Housekeep(Math.Clamp(keep, 5, 600));
                 if (!_stuckWarned && _cache.SegmentsStuck())
                 {
                     _stuckWarned = true;

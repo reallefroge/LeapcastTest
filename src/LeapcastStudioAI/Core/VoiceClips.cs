@@ -41,17 +41,13 @@ public static class VoiceClips
     }
 
     /// <summary>One sensitivity level: what the listener accepts.</summary>
-    /// <param name="Alone">Lowest confidence for the word said on its own (or found by the sentence grammar).</param>
-    /// <param name="InSentence">Lowest confidence for the word inside free dictation.</param>
-    /// <param name="Rejection">The recognizer's own rejection bar (0–100; it drops results below it before we see them).</param>
-    /// <param name="UseRejected">Also check what the recognizer rejected, and its runner-up guesses.</param>
-    /// <param name="NearLetters">Accept words this many letters away from the word ("klip", "clap"); 0 = exact only.</param>
-    /// <param name="DictationWeight">How much free dictation competes with the word (0 = not loaded: everything is heard
-    /// as a possible "clip"). Lower = the word wins more often; dictation is what keeps other speech from triggering.</param>
-    /// <param name="Filler">Instead of dictation, a list of everyday words soaks up other speech: lighter than
-    /// dictation, so a word said over a noisy mic still wins.</param>
-    public sealed record SensitivityLevel(float Alone, float InSentence, int Rejection, bool UseRejected, int NearLetters, float DictationWeight,
-        bool Filler = false)
+    /// <param name="Alternatives">How many readings of each utterance the recognizer gives (best first).</param>
+    /// <param name="Margin">A runner-up reading counts when its score is within this of the best one (0 = the best
+    /// reading only). Scores are the recognizer's log-likelihoods: readings that differ in one short word ("lived" /
+    /// "live" / "lip") are usually under 1 apart; a reading the audio doesn't support is several points down.</param>
+    /// <param name="NearLetters">Also accept a word this many letters off ("lip", "flip", "klip"), but only when the
+    /// utterance is short (at most <paramref name="NearMaxWords"/> words): a word said on its own, as a command.</param>
+    public sealed record SensitivityLevel(int Alternatives, double Margin, int NearLetters, int NearMaxWords)
     {
         public bool Near => NearLetters > 0;
     }
@@ -59,33 +55,48 @@ public static class VoiceClips
     /// <summary>How readily the word counts, by the Settings choice.</summary>
     public static SensitivityLevel Sensitivity(string? level) => level switch
     {
-        // Every level listens the same way: only for the word (alone or with any speech around it), with nothing
-        // competing for it (dictation out-voted it: "clip" heard as "but", "by", "Felice set"). The levels differ in
-        // how sure the recognizer must be, and how far a mishearing may be from the word.
-        // Measured with Windows' recognizer: the word really said scores ~0.99 (alone, mid-sentence, noisy mic);
-        // ordinary speech forced onto it ("the weather is nice today" → "… clip") scores 0.72–0.79.
-        // Normal: a clear "clip" only
-        "Normal" => new(0.93f, 0.93f, 30, false, 0, 0f),
-        // High: a sure match, or one letter off ("klip", "clap")
-        "High" => new(0.85f, 0.85f, 10, true, 1, 0f),
-        // Maximum: almost any match, up to two letters off ("click", "chip")
-        "Max" => new(0.05f, 0.05f, 0, true, 2, 0f),
+        // Every level transcribes all speech into ordinary words, so talking about something else never turns into
+        // the word; they differ in how much doubt is allowed when the recognizer isn't sure it heard the word.
+        // Normal: the word is the recognizer's best reading
+        "Normal" => new(1, 0, 0, 0),
+        // High: or a close second reading ("lived" / "live" / "clip" for a quick, mumbled word), or a word one letter
+        // off said entirely on its own ("lip", "flip": how the small model often hears a short "clip")
+        "High" => new(3, 1.5, 1, 1),
+        // Maximum: more doubt allowed, and one letter off in a two-word command too ("lip that")
+        "Max" => new(5, 3.0, 1, 2),
         _ => Sensitivity("High"),
     };
 
-    /// <summary>Everyday words that soak up other speech on High (so it isn't forced onto the trigger word).</summary>
-    public static readonly string[] FillerWords =
+    /// <summary>
+    /// One transcribed word is the trigger word: the word or its plural ("clip", "clips"), also with a k ("klip").
+    /// Not "clipped" / "clipping" ("my mic is clipping" isn't a request for a clip).
+    /// </summary>
+    public static bool IsWord(string? heard, string word)
     {
-        "a", "about", "after", "again", "all", "alright", "and", "any", "are", "as", "at", "back", "bad", "be", "because", "been",
-        "before", "big", "but", "by", "can", "come", "could", "day", "did", "do", "does", "done", "dont", "down", "even", "first",
-        "for", "from", "game", "get", "go", "going", "gonna", "good", "got", "guys", "had", "has", "have", "he", "hello", "her",
-        "here", "hey", "him", "his", "how", "i", "if", "im", "in", "is", "it", "its", "just", "kill", "know", "last", "let", "lets",
-        "like", "live", "look", "lot", "make", "man", "me", "more", "my", "need", "new", "nice", "no", "not", "now", "of", "oh", "ok",
-        "okay", "on", "one", "only", "or", "our", "out", "over", "play", "really", "right", "see", "she", "so", "some", "still",
-        "stream", "take", "than", "thank", "thanks", "that", "the", "their", "them", "then", "there", "they", "thing", "think",
-        "this", "time", "to", "today", "too", "turn", "two", "up", "us", "very", "wait", "want", "was", "way", "we", "weather",
-        "well", "were", "what", "when", "where", "which", "who", "why", "will", "win", "with", "wow", "yeah", "yes", "you", "your",
-    };
+        if (string.IsNullOrWhiteSpace(heard) || string.IsNullOrWhiteSpace(word)) return false;
+        string h = heard.Trim().ToLowerInvariant(), w = word.Trim().ToLowerInvariant();
+        if (h == w || h == w + "s" || h == w + "es") return true;
+        return w.Length > 1 && w[0] == 'c' && h.Length > 1 && h[0] == 'k' && IsWord("c" + h[1..], w);
+    }
+
+    /// <summary>
+    /// The trigger word in one recognized utterance, by the sensitivity level: the first matching word of the best
+    /// reading, else of a close runner-up. Null when the utterance isn't the word.
+    /// </summary>
+    public static VoskApi.Word? FindWord(IReadOnlyList<VoskApi.Hypothesis> readings, string word, SensitivityLevel level)
+    {
+        if (readings.Count == 0) return null;
+        double best = readings[0].Score;
+        for (int i = 0; i < readings.Count && i < Math.Max(1, level.Alternatives); i++)
+        {
+            var r = readings[i];
+            if (i > 0 && !(double.IsNaN(best) || best - r.Score <= level.Margin)) break;
+            foreach (var w in r.Words) if (IsWord(w.Text, word)) return w;
+            if (level.Near && r.Words.Count <= level.NearMaxWords)
+                foreach (var w in r.Words) if (NearMatch(w.Text, word, level.NearLetters)) return w;
+        }
+        return null;
+    }
 
     /// <summary>
     /// Maximum sensitivity: also a word one letter away from the trigger ("klip", "clap", "flip", "clit"), which is

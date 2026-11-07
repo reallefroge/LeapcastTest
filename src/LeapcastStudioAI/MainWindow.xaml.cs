@@ -478,7 +478,8 @@ public partial class MainWindow : Window
 
     // ------------------------------------------------------------------ voice clips ("Clip")
 
-    private VoiceCommandListener? _voice;
+    private VoiceListener? _voice;
+    private IDisposable? _voiceMic;          // Windows' default mic, when the scene has none
     private string _voiceKey = "";           // what the running listener was started with (word | mic)
     private DateTime _voiceRetryAfter = DateTime.MinValue;
     private bool _voiceSaving;
@@ -508,17 +509,18 @@ public partial class MainWindow : Window
         if (DateTime.UtcNow < _voiceRetryAfter) return;
         try
         {
-            var listener = new VoiceCommandListener();
-            BlockingAudioStream? feed = micId is null ? null : new BlockingAudioStream();
-            if (feed is not null) _audio.SetSpeechTap(micId, feed.Write);
+            var listener = new VoiceListener { RecordingsFolder = Path.Combine(StateStore.Folder, "logs", "voice-audio") };
+            var feed = new BlockingAudioStream();
+            if (micId is not null) _audio.SetSpeechTap(micId, feed.Write);
             listener.Heard += (text, conf, spokenUtc) =>
             {
-                VoiceLog($"HEARD “{text}” ({conf:0.00}), said at {spokenUtc.ToLocalTime():HH:mm:ss.fff}: saving a clip");
+                VoiceLog($"HEARD “{text}”, said at {spokenUtc.ToLocalTime():HH:mm:ss.fff}: saving a clip");
                 Dispatcher.BeginInvoke(() => SaveVoiceClip(text, spokenUtc));
             };
             listener.Debug += VoiceLog;
             VoiceLog($"listening for “{s.VoiceClipWord}” on {(micId is null ? "Windows' default microphone" : "the scene's microphone")}, sensitivity {s.VoiceClipSensitivity}");
             listener.Start(s.VoiceClipWord, feed, s.VoiceClipSensitivity);
+            if (micId is null) _voiceMic = WasapiAudioBridge.CaptureDefaultMicForSpeech(feed.Write);
             _voice = listener;
             _voiceKey = wantKey;
             VoiceTagText.Text = $"🎙 Say “{CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s.VoiceClipWord.Trim())}”";
@@ -567,6 +569,8 @@ public partial class MainWindow : Window
     private void StopVoice()
     {
         _audio.SetSpeechTap(null, null);
+        _voiceMic?.Dispose();
+        _voiceMic = null;
         _voice?.Dispose();
         _voice = null;
         _voiceKey = "";
@@ -586,8 +590,8 @@ public partial class MainWindow : Window
             int seconds = VoiceClips.ClampSeconds(s.VoiceClipSeconds);
             Status($"Saving clip ({seconds} s)…");
             var layout = _engine.CurrentClipLayout();
-            string path = await _engine.SaveClipAsync(seconds, ClipFolder(), endUtc: spokenUtc - BeforeWord);
-            ClipSaved(path, layout);
+            var (path, vertical) = await _engine.SaveClipAsync(seconds, ClipFolder(), s.VerticalClips, spokenUtc - BeforeWord);
+            ClipSaved(path, vertical ? null : layout);
         }
         catch (Exception ex) { Log("Clip: " + ex.Message, true); }
         finally { _voiceSaving = false; }
@@ -596,21 +600,33 @@ public partial class MainWindow : Window
     private string ClipFolder() =>
         string.IsNullOrWhiteSpace(_state.Settings.VoiceClipFolder) ? VoiceClips.DefaultFolder : _state.Settings.VoiceClipFolder;
 
-    /// <summary>Every clip: logged, added to this session's recap, and (Settings) a 9:16 copy for TikTok / Shorts.</summary>
+    /// <summary>
+    /// Every clip: turned into 9:16 for TikTok / Shorts when that's on (only the 9:16 file is kept, under the clip's
+    /// name), logged, and added to this session's recap.
+    /// </summary>
     private async void ClipSaved(string path, ClipLayout? layout)
     {
+        if (_state.Settings.VerticalClips && layout is not null)
+        {
+            Status($"Making the 9:16 clip…");
+            string temp = Path.Combine(Path.GetDirectoryName(path)!, Path.GetFileNameWithoutExtension(path) + " (9x16).mp4");
+            try
+            {
+                temp = await _engine.SaveVerticalAsync(path, layout);
+                File.Delete(path);
+                File.Move(temp, path);
+            }
+            catch (Exception ex)
+            {
+                try { File.Delete(temp); } catch { }
+                Log("9:16 clip: " + ex.Message + " (kept the 16:9 clip)", true);
+                VoiceLog("9:16 failed: " + ex.Message);
+            }
+        }
         VoiceLog("saved " + path);
         Log($"Clip saved: {Path.GetFileName(path)}", false);
         Status($"Clip saved: {Path.GetFileName(path)}");
         _sessionClips.Add(path);
-        if (!_state.Settings.VerticalClips || layout is null) return;
-        try
-        {
-            string vertical = await _engine.SaveVerticalAsync(path, layout);
-            VoiceLog("saved " + vertical);
-            Log($"9:16 clip saved: {Path.GetFileName(vertical)}", false);
-        }
-        catch (Exception ex) { Log("9:16 clip: " + ex.Message, true); VoiceLog("9:16 failed: " + ex.Message); }
     }
 
     private readonly List<string> _sessionClips = new();
@@ -652,8 +668,8 @@ public partial class MainWindow : Window
             var layout = _engine.CurrentClipLayout();
             // they reacted to what they saw a few seconds ago (viewers watch with a delay)
             var end = msg.ReceivedUtc - TimeSpan.FromSeconds(Math.Clamp(s.ChatClipDelaySeconds, 0, 20));
-            string path = await _engine.SaveClipAsync(seconds, ClipFolder(), endUtc: end, label: "chat");
-            ClipSaved(path, layout);
+            var (path, vertical) = await _engine.SaveClipAsync(seconds, ClipFolder(), s.VerticalClips, end, "chat");
+            ClipSaved(path, vertical ? null : layout);
         }
         catch (Exception ex) { Log("Chat clip: " + ex.Message, true); }
     }
@@ -713,8 +729,8 @@ public partial class MainWindow : Window
             var end = deathUtc + TimeSpan.FromSeconds(3);
             int seconds = (int)Math.Ceiling((end - fightStartUtc).TotalSeconds);
             var layout = _engine.CurrentClipLayout();
-            string path = await _engine.SaveClipAsync(seconds, ClipFolder(), endUtc: end, label: "death");
-            ClipSaved(path, layout);
+            var (path, vertical) = await _engine.SaveClipAsync(seconds, ClipFolder(), _state.Settings.VerticalClips, end, "death");
+            ClipSaved(path, vertical ? null : layout);
         }
         catch (Exception ex) { Log("Death clip: " + ex.Message, true); }
         finally { _deathSaving = false; }

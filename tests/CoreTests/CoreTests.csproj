@@ -6,13 +6,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>LeapcastStudioAI.Tests</RootNamespace>
   </PropertyGroup>
-  <!-- Windows only: the voice-clip listener (Windows' speech recognizer) is tested too. -->
+  <!-- Windows only: Windows' voices speak test phrases to the voice-clip listener. -->
   <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
     <DefineConstants>$(DefineConstants);WINDOWS_SPEECH</DefineConstants>
   </PropertyGroup>
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
     <PackageReference Include="System.Speech" Version="8.0.0" />
-    <Compile Include="../../src/LeapcastStudioAI/Windows/VoiceCommandListener.cs" />
+    <!-- libvosk.dll (the managed wrapper isn't used: Core/VoskApi.cs calls libvosk directly) -->
+    <PackageReference Include="Vosk" Version="0.3.38" ExcludeAssets="compile" />
   </ItemGroup>
   <ItemGroup>
     <!-- The engine core is platform-neutral, so it is compiled and exercised against real FFmpeg here. -->

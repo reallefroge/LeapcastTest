@@ -63,6 +63,38 @@ public sealed class WasapiAudioBridge : IAudioBridge
         lock (_lock) { _speechSource = sourceId; _speechConv = new SpeechPcmConverter(); _speechSink = sink; }
     }
 
+    /// <summary>
+    /// When no microphone is in the scene: captures Windows' default microphone for the recognizer only (it isn't
+    /// streamed). Dispose to stop.
+    /// </summary>
+    public static IDisposable CaptureDefaultMicForSpeech(Action<short[]> sink)
+    {
+        var capture = Task.Run(() => new WasapiCapture()).GetAwaiter().GetResult();
+        var conv = new SpeechPcmConverter();
+        var format = capture.WaveFormat;
+        capture.DataAvailable += (_, e) =>
+        {
+            try
+            {
+                var mono = MonoOf(e.Buffer, e.BytesRecorded, format);
+                var pcm = conv.Convert(mono, format.SampleRate);
+                if (pcm.Length > 0) sink(pcm);
+            }
+            catch { }
+        };
+        capture.StartRecording();
+        return new Stopper(capture);
+    }
+
+    private sealed class Stopper(WasapiCapture capture) : IDisposable
+    {
+        public void Dispose()
+        {
+            try { capture.StopRecording(); } catch { }
+            try { capture.Dispose(); } catch { }
+        }
+    }
+
     /// <summary>Is a capture running for this source (the mic the recognizer would listen to)?</summary>
     public bool IsCapturing(Guid sourceId)
     {

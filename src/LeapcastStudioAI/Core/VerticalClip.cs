@@ -7,15 +7,23 @@ namespace LeapcastStudioAI;
 public sealed record ClipLayout(int CanvasW, int CanvasH, LayoutRect? Game, LayoutRect? Camera);
 
 /// <summary>
-/// Turns a 16:9 clip into a 9:16 one for TikTok / Shorts: the camera on top (rounded corners), the whole game below it
-/// (nothing cropped, so the action and spell cards stay in), a blurred, darkened copy of the game behind everything,
-/// and an optional handle line at the bottom. Where the camera sat over the game, the game copy is blurred so the
-/// camera doesn't appear twice.
+/// Turns a 16:9 clip into a 9:16 one for TikTok / Shorts: a small camera near the top (rounded corners), the game
+/// big below it (the middle of the picture, where the action is, filling the width), a blurred, darkened copy of the
+/// game behind everything, and an optional handle line at the bottom. Where the camera sat over the game, the game
+/// copy is blurred so the camera doesn't appear twice.
 /// </summary>
 public static class VerticalClip
 {
-    public sealed record Plan(int OutW, int OutH, LayoutRect Game, LayoutRect? Camera, (int X, int Y, int W, int H) GameBox,
+    /// <param name="Game">The game on the canvas (the background is made from all of it).</param>
+    /// <param name="GameCrop">The part of the game shown in the panel (its middle, as wide as fits the panel's shape).</param>
+    public sealed record Plan(int OutW, int OutH, LayoutRect Game, LayoutRect GameCrop, LayoutRect? Camera, (int X, int Y, int W, int H) GameBox,
         (int X, int Y, int W, int H)? CamBox, (int X, int Y, int W, int H)? CoverInGame);
+
+    /// <summary>The game panel's shape (width / height): square, so the game fills the width and over half the height.
+    /// A 16:9 game keeps its middle 56%: the character, the battle circle and the spell cards.</summary>
+    public const double GameAspect = 1.0;
+    /// <summary>The camera: at most this share of the height (and 4:3 at most: a wide webcam's sides are cut).</summary>
+    public const double CamHeight = 0.2, CamMaxAspect = 4 / 3.0;
 
     private static int Even(double v) => Math.Max(2, (int)Math.Round(v / 2) * 2);
 
@@ -26,42 +34,73 @@ public static class VerticalClip
         return (w, w * 16 / 9);
     }
 
-    public static Plan PlanFor(ClipLayout layout)
+    /// <summary>The middle of <paramref name="r"/> at most <paramref name="aspect"/> wide (w/h).</summary>
+    private static LayoutRect Middle(LayoutRect r, double aspect)
     {
-        var (ow, oh) = OutputSize(layout.CanvasH);
+        if (r.H <= 0 || r.W / r.H <= aspect) return r;
+        double w = r.H * aspect;
+        return new LayoutRect(r.X + (r.W - w) / 2, r.Y, w, r.H);
+    }
+
+    public static Plan PlanFor(ClipLayout layout, (int W, int H)? size = null)
+    {
+        var (ow, oh) = size ?? OutputSize(layout.CanvasH);
         var canvas = new LayoutRect(0, 0, layout.CanvasW, layout.CanvasH);
         var game = Clamp(layout.Game ?? canvas, canvas);
+        if (game.W < 8 || game.H < 8) game = canvas;
         LayoutRect? cam = layout.Camera is { } c ? Clamp(c, canvas) : null;
         if (cam is { } cc && (cc.W < 8 || cc.H < 8)) cam = null;
+        if (cam is { } wide) cam = Middle(wide, CamMaxAspect);
 
-        // the game: full width, whole picture
-        int gw = ow, gh = Even(ow * game.H / game.W);
-        if (gh > oh * 0.55) { gh = Even(oh * 0.55); gw = Even(gh * game.W / game.H); }
-        int gap = Even(oh * 0.02);
+        // the game: the full width, its middle cropped to the panel's shape
+        var crop = Middle(game, GameAspect);
+        int gw = ow, gh = Even(ow * crop.H / crop.W);
+        int margin = Even(oh * 0.05), gap = Even(oh * 0.02);
         (int X, int Y, int W, int H)? camBox = null;
         int gy;
         if (cam is { } k)
         {
-            // the camera above it, as big as fits (up to 85% of the width)
-            double room = oh - gh - gap * 3 - oh * 0.08;
-            int ch = Even(Math.Min(room, ow * 0.85 * k.H / k.W));
+            // the camera near the top, small and centred; the game right under it
+            int ch = Even(oh * CamHeight);
             int cw = Even(ch * k.W / k.H);
-            int top = Even((oh - (ch + gap + gh)) / 2.0 - oh * 0.02);
-            camBox = ((ow - cw) / 2 / 2 * 2, Math.Max(gap, top), cw, ch);
-            gy = camBox.Value.Y + ch + gap;
+            if (cw > ow * 0.7) { cw = Even(ow * 0.7); ch = Even(cw * k.H / k.W); }
+            camBox = ((ow - cw) / 2 / 2 * 2, margin, cw, ch);
+            gy = margin + ch + gap;
+            int maxH = oh - gy - Even(oh * 0.08); // room for the handle line
+            if (gh > maxH) { gh = maxH; crop = Middle(game, gw / (double)gh); }
         }
-        else gy = Even((oh - gh) / 2.0);
+        else
+        {
+            if (gh > oh * 0.7) gh = Even(oh * 0.7);
+            crop = Middle(game, gw / (double)gh);
+            gy = Even((oh - gh) / 2.0 - oh * 0.03);
+        }
         var gameBox = ((ow - gw) / 2 / 2 * 2, gy, gw, gh);
 
-        // where the camera covered the game, in the game crop's own pixels
+        // where the camera covered the game, in the shown crop's own pixels
         (int X, int Y, int W, int H)? cover = null;
-        if (cam is { } kc && Intersect(kc, game) is { } hit && hit.W > 4 && hit.H > 4)
+        var camOnCanvas = layout.Camera is { } lc ? Clamp(lc, canvas) : (LayoutRect?)null;
+        if (camOnCanvas is { } kc && Intersect(kc, crop) is { } hit && hit.W > 4 && hit.H > 4)
         {
-            int gx = Even(game.W) , gyh = Even(game.H);
-            int cx = Math.Min(Even(hit.X - game.X), gx - 4), cy = Math.Min(Even(hit.Y - game.Y), gyh - 4);
+            int gx = Even(crop.W), gyh = Even(crop.H);
+            int cx = Math.Min(Even(hit.X - crop.X), gx - 4), cy = Math.Min(Even(hit.Y - crop.Y), gyh - 4);
             cover = (cx, cy, Math.Min(Even(hit.W), gx - cx), Math.Min(Even(hit.H), gyh - cy));
         }
-        return new Plan(ow, oh, game, cam, gameBox, camBox, cover);
+        return new Plan(ow, oh, game, crop, cam, gameBox, camBox, cover);
+    }
+
+    /// <summary>
+    /// The live 9:16 clip canvas (<paramref name="w"/>×<paramref name="h"/>): where the game panel and the camera go,
+    /// for a game picture of <paramref name="gameAspect"/> and a camera of <paramref name="camAspect"/> (null = none).
+    /// Same layout as <see cref="PlanFor"/>, but built from the raw sources, so nothing needs covering.
+    /// </summary>
+    public static Plan LivePlan(int w, int h, double gameAspect, double? camAspect)
+    {
+        const int u = 1080; // a nominal canvas: only the shapes matter
+        int gw = Math.Max(16, (int)Math.Round(u * Math.Max(0.2, gameAspect)));
+        LayoutRect? cam = camAspect is { } ca ? new LayoutRect(0, 0, Math.Max(8, Math.Min(gw, 400 * Math.Max(0.2, ca))), 400) : null;
+        var p = PlanFor(new ClipLayout(gw, u, new LayoutRect(0, 0, gw, u), cam), (w, h));
+        return p with { CoverInGame = null };
     }
 
     /// <summary>The ffmpeg filter graph: input 0 = the 16:9 clip, input 1 = the rounded-corner mask (when there's a camera).</summary>
@@ -78,12 +117,12 @@ public static class VerticalClip
         // the game panel: the whole game; the spot under the camera blurred
         if (p.CoverInGame is { } cv)
         {
-            g.Add($"[gamesrc]crop={R(p.Game)},split[gm][gc]");
+            g.Add($"[gamesrc]crop={R(p.GameCrop)},split[gm][gc]");
             // frosted: blurred, desaturated and darkened, so it reads as a smudge rather than a second camera
             g.Add($"[gc]crop={cv.W}:{cv.H}:{cv.X}:{cv.Y},boxblur=12:2,eq=brightness=-0.3:saturation=0.25[gcb]");
             g.Add($"[gm][gcb]overlay={cv.X}:{cv.Y},scale={p.GameBox.W}:{p.GameBox.H}:flags=lanczos,setsar=1[game]");
         }
-        else g.Add($"[gamesrc]crop={R(p.Game)},scale={p.GameBox.W}:{p.GameBox.H}:flags=lanczos,setsar=1[game]");
+        else g.Add($"[gamesrc]crop={R(p.GameCrop)},scale={p.GameBox.W}:{p.GameBox.H}:flags=lanczos,setsar=1[game]");
         g.Add($"[bg][game]overlay={p.GameBox.X}:{p.GameBox.Y}[v1]");
         string last = "v1";
         if (p.Camera is { } cam && p.CamBox is { } cb)
