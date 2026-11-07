@@ -1252,6 +1252,10 @@ public partial class MainWindow : Window
             StreamInfoHost.Child = view;
             await view.EnsureCoreWebView2Async(env);
             view.CoreWebView2.NewWindowRequested += (_, e) => { e.Handled = true; view.CoreWebView2.Navigate(e.Uri); };
+            // the pages are made for a wide browser: shrink them to the panel's width (and re-fit as it changes)
+            view.CoreWebView2.NavigationCompleted += (_, _) => FitStreamInfo(true);
+            view.CoreWebView2.HistoryChanged += (_, _) => FitStreamInfo(true);
+            view.SizeChanged += (_, _) => FitStreamInfo(true);
             view.CoreWebView2.Navigate(StreamInfoUrl());
             _infoView = view;
         }
@@ -1260,6 +1264,53 @@ public partial class MainWindow : Window
             StreamInfoHint.Text = "The web panel couldn't start (" + ex.Message + "). Use \"Open in your browser\" instead.";
         }
         finally { _infoStarting = false; }
+    }
+
+    private const string MeasurePageWidth = @"(() => {
+  const vw = window.innerWidth;
+  let right = Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0);
+  const all = document.body ? document.body.getElementsByTagName('*') : [];
+  for (let i = 0; i < all.length && i < 4000; i++) {
+    const r = all[i].getBoundingClientRect();
+    if (r.width < 2 || r.height < 2 || r.left >= vw || r.right <= 0) continue;
+    const st = getComputedStyle(all[i]);
+    if (st.visibility === 'hidden' || st.display === 'none') continue;
+    if (r.right > right) right = r.right;
+  }
+  return JSON.stringify({ vw: vw, need: Math.ceil(right) });
+})()
+";
+    private int _fitRun;
+
+    /// <summary>
+    /// Zooms the web panel out until the page fits the panel's width (no sideways scrolling or cut-off columns):
+    /// measures how wide the page lays itself out, then keeps checking for a few seconds as it finishes loading.
+    /// </summary>
+    private async void FitStreamInfo(bool fromFull)
+    {
+        if (_infoView is not { CoreWebView2: { } core } view) return;
+        int run = ++_fitRun;
+        await Task.Delay(350);
+        if (run != _fitRun) return;
+        try
+        {
+            if (fromFull) { view.ZoomFactor = 1.0; await Task.Delay(400); }
+            for (int pass = 0; pass < 8 && run == _fitRun; pass++)
+            {
+                string raw = await core.ExecuteScriptAsync(MeasurePageWidth);
+                // the script returns a JSON string (quoted): unwrap, then read it
+                var inner = System.Text.Json.JsonSerializer.Deserialize<string>(raw);
+                if (inner is not null)
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(inner);
+                    double vw = doc.RootElement.GetProperty("vw").GetDouble(), need = doc.RootElement.GetProperty("need").GetDouble();
+                    if (vw > 0 && need > vw + 2)
+                        view.ZoomFactor = Math.Clamp(view.ZoomFactor * vw / need, 0.4, 1.0);
+                }
+                await Task.Delay(pass < 3 ? 700 : 2000); // pages keep laying out while they load
+            }
+        }
+        catch { }
     }
 
     private void StreamInfoSite_Click(object sender, RoutedEventArgs e)
