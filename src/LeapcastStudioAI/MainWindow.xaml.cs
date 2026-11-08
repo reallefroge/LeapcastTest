@@ -2529,6 +2529,8 @@ public partial class MainWindow : Window
         SelectedScene?.ApplyFolders();
         SceneEdited();
         RedrawEditors();
+        // the "not loaded" labels follow (after the click finishes, so the row isn't rebuilt under the mouse)
+        Dispatcher.BeginInvoke(RefreshSourceRows, System.Windows.Threading.DispatcherPriority.Background);
     }
 
     private void SourceLock_Click(object sender, RoutedEventArgs e)
@@ -2584,6 +2586,18 @@ public partial class MainWindow : Window
         var scene = SelectedScene;
         if (scene is null) { SourcesList.ItemsSource = null; return; }
         scene.ApplyFolders();
+        // what the pipeline actually captures: hidden sources (unless instant switching keeps them ready) and anything
+        // under a full-screen capture aren't loaded at all, so they cost nothing
+        PipelineBuilder.HiddenSourcesLive = _state.Settings.InstantSwitching;
+        var loaded = PipelineBuilder.CompositedLayers(scene.Sources).ToHashSet();
+        var cover = scene.Sources.LastOrDefault(x => x.Shown && SourceTypes.KindOf(x.Type) is SourceKind.Display or SourceKind.Window or SourceKind.Camera
+                                                      && Anchors.Resolve(x) == Anchors.Fill);
+        string Detail(StudioSource x)
+        {
+            if (!SourceTypes.IsVideo(SourceTypes.KindOf(x.Type)) || loaded.Contains(x)) return x.Type;
+            if (!x.Shown) return x.Type + " · hidden, not loaded";
+            return x.Type + $" · under {cover?.Name ?? "a full-screen capture"}, not loaded";
+        }
         var rows = new List<StudioSource>();
         foreach (var block in Enumerable.Reverse(scene.Blocks()))
         {
@@ -2595,9 +2609,9 @@ public partial class MainWindow : Window
                 head.ListDetail = kids.Count == 0 ? "Empty folder" : kids.Count == 1 ? "1 source" : $"{kids.Count} sources";
                 rows.Add(head);
                 if (head.Collapsed) continue;
-                foreach (var k in Enumerable.Reverse(kids)) { k.ListIndent = 22; k.ListDetail = k.Type; rows.Add(k); }
+                foreach (var k in Enumerable.Reverse(kids)) { k.ListIndent = 22; k.ListDetail = Detail(k); rows.Add(k); }
             }
-            else { head.ListDetail = head.Type; rows.Add(head); }
+            else { head.ListDetail = Detail(head); rows.Add(head); }
         }
         var selected = SourcesList.SelectedItem;
         _syncingSelection = true;
