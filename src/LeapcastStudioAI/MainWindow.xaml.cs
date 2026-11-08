@@ -542,7 +542,15 @@ public partial class MainWindow : Window
             listener.Transcribed += _transcript.Add;
             listener.Transcribed += w => _sessionLog?.AddWords(w);
             var feed = new BlockingAudioStream();
-            if (micId is not null) _audio.SetSpeechTap(micId, feed.Write);
+            // your mic also goes to the last few minutes in memory (clip captions) and, while recording, its own track (VOD captions)
+            Action<short[]> tap = pcm =>
+            {
+                feed.Write(pcm);
+                var now = DateTime.UtcNow;
+                _micRing.Write(pcm, now);
+                _micTrack?.Write(pcm, now);
+            };
+            if (micId is not null) _audio.SetSpeechTap(micId, tap);
             listener.Heard += (text, conf, spokenUtc) =>
             {
                 VoiceLog($"HEARD “{text}”, said at {spokenUtc.ToLocalTime():HH:mm:ss.fff}: saving a clip");
@@ -553,10 +561,11 @@ public partial class MainWindow : Window
                 ? $"listening for “{s.VoiceClipWord}” on {(micId is null ? "Windows' default microphone" : "the scene's microphone")}, sensitivity {s.VoiceClipSensitivity}"
                 : $"transcribing {(micId is null ? "Windows' default microphone" : "the scene's microphone")} for clip captions");
             listener.Start(s.VoiceClipWord, feed, s.VoiceClipSensitivity);
-            if (micId is null) _voiceMic = WasapiAudioBridge.CaptureDefaultMicForSpeech(feed.Write);
+            if (micId is null) _voiceMic = WasapiAudioBridge.CaptureDefaultMicForSpeech(tap);
             StartDesktopTranscript(deskId);
             _voice = listener;
             _voiceKey = wantKey;
+            if (s.ClipCaptions) EnsureWhisperModel();
             VoiceTagText.Text = $"🎙 Say “{CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s.VoiceClipWord.Trim())}”";
             VoiceTag.Visibility = s.VoiceClipEnabled ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -702,6 +711,25 @@ public partial class MainWindow : Window
     /// </summary>
     private readonly Transcript _transcript = new();
     private volatile LeapcastStudioAI.Vod.SessionLog? _sessionLog;
+    private readonly LeapcastStudioAI.Vod.MicRing _micRing = new(240);
+    private volatile LeapcastStudioAI.Vod.MicTrack? _micTrack;
+    private Task? _whisperModelTask;
+
+    /// <summary>Gets the accurate caption model in the background (once, about 148 MB) when captions are on.</summary>
+    private void EnsureWhisperModel()
+    {
+        if (!Whisper.Installed || Whisper.Ready || _whisperModelTask is { IsCompleted: false }) return;
+        _whisperModelTask = Task.Run(async () =>
+        {
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+                await Whisper.EnsureModelAsync(http, null, CancellationToken.None);
+                VoiceLog("caption model ready (Whisper base.en)");
+            }
+            catch (Exception ex) { VoiceLog("caption model download failed: " + ex.Message + " (the live recognizer is used for now)"); }
+        });
+    }
 
     private async void ClipSaved(string path, ClipLayout? layout, DateTime? endUtc = null)
     {
@@ -741,7 +769,7 @@ public partial class MainWindow : Window
             await DesktopCaughtUpAsync(endUtc, TimeSpan.FromSeconds(6));
             if (await Captions.ProbeAsync(ffmpeg, path) is not { } info) return;
             var start = endUtc - TimeSpan.FromSeconds(info.Duration);
-            var mine = _transcript.Between(start, endUtc);
+            var mine = await WhisperBetweenAsync(ffmpeg, start, endUtc) ?? _transcript.Between(start, endUtc);
             // only what you said: words the game / Discord said at the same moment leaked in through the speakers
             var spoken = Echo.Remove(mine, _deskTranscript.Between(start - Echo.Window, endUtc + Echo.Window));
             if (spoken.Count < mine.Count) VoiceLog($"captions: left out {mine.Count - spoken.Count} word(s) that came from the desktop audio");
@@ -755,6 +783,28 @@ public partial class MainWindow : Window
             File.Move(temp, path);
         }
         catch (Exception ex) { Log("Captions: " + ex.Message + " (the clip was kept without them)", true); VoiceLog("captions failed: " + ex.Message); }
+    }
+
+    /// <summary>What you said between two moments, by Whisper from your mic alone; null when Whisper can't (then the live recognizer's words are used).</summary>
+    private async Task<List<CaptionWord>?> WhisperBetweenAsync(string ffmpeg, DateTime start, DateTime end)
+    {
+        if (!Whisper.Ready) { EnsureWhisperModel(); return null; }
+        var from = start - TimeSpan.FromSeconds(0.3);
+        if (_micRing.Between(from, end + TimeSpan.FromSeconds(0.3)) is not { Length: > 1600 } pcm) return null;
+        string wav = Path.Combine(Path.GetTempPath(), $"leapcast-clipmic-{Guid.NewGuid():N}.wav");
+        try
+        {
+            using (var t = new LeapcastStudioAI.Vod.MicTrack(wav))
+            {
+                t.Write(pcm, from + TimeSpan.FromSeconds(pcm.Length / 16000.0));
+                t.Finish();
+            }
+            var words = await Whisper.TranscribeAsync(ffmpeg, wav, null, CancellationToken.None);
+            VoiceLog($"captions: Whisper heard {words.Count} word(s)");
+            return words.Select(w => new CaptionWord(w.Text, from + TimeSpan.FromSeconds(w.Start), from + TimeSpan.FromSeconds(w.End))).ToList();
+        }
+        catch (Exception ex) { VoiceLog("captions: Whisper failed (" + ex.Message + "), using the live recognizer"); return null; }
+        finally { try { File.Delete(wav); } catch { } }
     }
 
     private readonly List<string> _sessionClips = new();
@@ -1897,13 +1947,24 @@ public partial class MainWindow : Window
         _vodWindow.Show();
     }
 
+    private void DropMicTrack()
+    {
+        if (_micTrack is not { } mt) return;
+        _micTrack = null;
+        mt.Finish();
+        try { File.Delete(mt.Path); } catch { }
+    }
+
     private async void Record_Click(object sender, RoutedEventArgs e)
     {
         if (!_engine.Recording)
         {
             // what happens while recording is logged for the VOD editor (your words, clips, deaths, chat)
             _sessionLog = new LeapcastStudioAI.Vod.SessionLog { Layout = _engine.CurrentClipLayout() };
+            try { _micTrack = new LeapcastStudioAI.Vod.MicTrack(Path.Combine(Path.GetTempPath(), $"leapcast-mic-{Guid.NewGuid():N}.wav")); }
+            catch (Exception ex) { _micTrack = null; Log("Mic track not recorded: " + ex.Message, true); }
             await Guarded("Starting recording…", () => _engine.StartRecordingAsync(), "Recording.");
+            if (!_engine.Recording) DropMicTrack();
         }
         else
         {
@@ -1914,8 +1975,27 @@ public partial class MainWindow : Window
                 Status("Saved " + Path.GetFileName(path));
                 Log("Recording saved: " + path, false);
                 if (_sessionLog is { } log && _engine.LastRecordingStartUtc is { } start)
-                    try { log.ToSidecar(start).Save(path); } catch (Exception ex) { Log("Session log not saved: " + ex.Message, true); }
+                    try
+                    {
+                        var side = log.ToSidecar(start);
+                        // your mic on its own next to the recording: the VOD editor's captions come from it
+                        if (_micTrack is { } mt)
+                        {
+                            _micTrack = null;
+                            if (mt.Finish() && mt.StartUtc is { } micStart)
+                            {
+                                string micPath = LeapcastStudioAI.Vod.VodSidecar.MicPathFor(path);
+                                File.Move(mt.Path, micPath, true);
+                                side.MicFile = Path.GetFileName(micPath);
+                                side.MicOffset = (micStart - start).TotalSeconds;
+                            }
+                            else try { File.Delete(mt.Path); } catch { }
+                        }
+                        side.Save(path);
+                    }
+                    catch (Exception ex) { Log("Session log not saved: " + ex.Message, true); }
             }
+            DropMicTrack();
             _sessionLog = null;
         }
     }

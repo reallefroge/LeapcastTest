@@ -1,3 +1,5 @@
+using System.Net.Http;
+
 namespace LeapcastStudioAI.Vod;
 
 /// <summary>
@@ -12,6 +14,15 @@ public static class VodEditor
         Func<int, int, double, IReadOnlyList<string>> videoArgs, IProgress<Progress>? progress, CancellationToken ct)
     {
         progress?.Report(new Progress(0, "Watching the recording"));
+        // the caption model, once (≈148 MB)
+        if (Whisper.Installed && !Whisper.Ready)
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(20) };
+                await Whisper.EnsureModelAsync(http, new Progress<double>(f => progress?.Report(new Progress(0, $"Downloading the caption model, once ({f:P0})"))), ct);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { /* captions from the live recognizer instead */ }
         var signals = await VodAnalyzer.AnalyzeAsync(ffmpeg, recording,
             new Progress<double>(f => progress?.Report(new Progress(0.3 * f, $"Watching the recording ({f:P0})"))), ct);
         progress?.Report(new Progress(0.3, "Finding the best moments"));

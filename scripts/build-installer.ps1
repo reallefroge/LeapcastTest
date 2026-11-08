@@ -63,6 +63,47 @@ if (-not (Test-Path (Join-Path $SpeechDir "$VoskModel\am\final.mdl"))) { throw "
 if (-not (Test-Path (Join-Path $PublishDir "libvosk.dll"))) { throw "libvosk.dll is missing from the published app." }
 Write-Host "Bundled speech model: $VoskModel" -ForegroundColor Green
 
+# ---------------------------------------------------------------- Whisper (accurate captions for clips and VOD edits)
+# The official whisper.cpp Windows build and the Silero voice-activity model; the base.en model (148 MB) downloads on first use.
+$WhisperTag = "b5454"
+$WhisperFiles = @{
+    "whisper-bin-x64.zip"    = @{ Sha = "b1158bd10edf92c9799149a6fc5d3e58da3f495241d6fb3423088130e88ffbf3"; Url = "https://github.com/ggml-org/whisper.cpp/releases/download/$WhisperTag/whisper-blas-bin-x64.zip" }
+    "ggml-silero-v5.1.2.bin" = @{ Sha = "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf"; Url = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin" }
+}
+New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+foreach ($name in $WhisperFiles.Keys) {
+    $dest = Join-Path $CacheDir $name
+    $want = $WhisperFiles[$name].Sha
+    if ((Test-Path $dest) -and ((Get-FileHash $dest -Algorithm SHA256).Hash.ToLowerInvariant() -ne $want)) { Remove-Item $dest }
+    if (-not (Test-Path $dest) -and $env:GITHUB_REPOSITORY) {
+        # CI: the copy kept as a release asset of this repository (.github/workflows/fetch-whisper.yml)
+        if (-not $env:GH_TOKEN -and $env:GITHUB_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
+        try { gh release download speech-whisper -R $env:GITHUB_REPOSITORY -p $name -D $CacheDir --clobber 2>&1 | Out-Host } catch { }
+    }
+    if (-not (Test-Path $dest)) {
+        Write-Host "Downloading $name from its official source..." -ForegroundColor Cyan
+        Invoke-WebRequest $WhisperFiles[$name].Url -OutFile $dest
+    }
+    $h = (Get-FileHash $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($h -ne $want) { Remove-Item $dest -ErrorAction SilentlyContinue; throw "$name checksum mismatch ($h)." }
+}
+$WhisperDir = Join-Path $PublishDir "speech\whisper"
+New-Item -ItemType Directory -Force -Path $WhisperDir | Out-Null
+$wtmp = Join-Path $CacheDir "whisper-unpack"
+if (Test-Path $wtmp) { Remove-Item $wtmp -Recurse -Force }
+Expand-Archive -Path (Join-Path $CacheDir "whisper-bin-x64.zip") -DestinationPath $wtmp -Force
+$cli = Get-ChildItem $wtmp -Recurse -Filter "whisper-cli.exe" | Select-Object -First 1
+if (-not $cli) { throw "whisper-cli.exe isn't in the whisper.cpp build." }
+Copy-Item $cli.FullName $WhisperDir
+Get-ChildItem $cli.DirectoryName -Filter "*.dll" | Where-Object { $_.Name -notmatch '^SDL' } | Copy-Item -Destination $WhisperDir
+Copy-Item (Join-Path $CacheDir "ggml-silero-v5.1.2.bin") $WhisperDir
+Remove-Item $wtmp -Recurse -Force
+foreach ($f in 'whisper-cli.exe','whisper.dll','ggml.dll','ggml-base.dll','ggml-silero-v5.1.2.bin') {
+    if (-not (Test-Path (Join-Path $WhisperDir $f))) { throw "Whisper bundle is missing $f." }
+}
+& (Join-Path $WhisperDir "whisper-cli.exe") --help 2>&1 | Select-Object -First 3 | Out-Host
+Write-Host "Bundled Whisper ($WhisperTag): $((Get-ChildItem $WhisperDir).Count) files" -ForegroundColor Green
+
 # ---------------------------------------------------------------- FFmpeg (the media engine)
 if (-not $SkipFfmpeg) {
     New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null

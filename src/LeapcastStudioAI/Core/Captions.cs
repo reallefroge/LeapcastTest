@@ -108,10 +108,27 @@ public static class Captions
     /// Groups the words said during a clip (starting at <paramref name="clipStartUtc"/>, <paramref name="clipSeconds"/>
     /// long) into captions of a few words, timed to the clip.
     /// </summary>
+    /// <summary>
+    /// The same word twice at (nearly) the same moment, e.g. heard by two recognizers or twice across a sentence
+    /// boundary: only the first is kept.
+    /// </summary>
+    public static List<CaptionWord> Dedupe(IEnumerable<CaptionWord> words)
+    {
+        var kept = new List<CaptionWord>();
+        foreach (var w in words.OrderBy(w => w.StartUtc))
+        {
+            bool dup = kept.Count > 0 && kept.Skip(Math.Max(0, kept.Count - 3)).Any(k =>
+                string.Equals(k.Text, w.Text, StringComparison.OrdinalIgnoreCase) && (w.StartUtc - k.StartUtc).TotalSeconds < 0.25
+                || w.StartUtc < k.EndUtc - TimeSpan.FromSeconds(0.12) && string.Equals(k.Text, w.Text, StringComparison.OrdinalIgnoreCase));
+            if (!dup) kept.Add(w);
+        }
+        return kept;
+    }
+
     public static List<Caption> Build(IReadOnlyList<CaptionWord> words, DateTime clipStartUtc, double clipSeconds)
     {
         var groups = new List<List<CaptionWord>>();
-        foreach (var w in words.Where(w => !string.IsNullOrWhiteSpace(w.Text) && w.Text != "[unk]").OrderBy(w => w.StartUtc))
+        foreach (var w in Dedupe(words.Where(w => !string.IsNullOrWhiteSpace(w.Text) && w.Text != "[unk]")))
         {
             var cur = groups.Count > 0 ? groups[^1] : null;
             bool fresh = cur is null || cur.Count >= MaxWords

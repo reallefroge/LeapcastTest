@@ -29,7 +29,7 @@ public sealed class Piece
 }
 
 public sealed record SfxCue(double At, SfxKind Kind, float Gain);
-public sealed record MusicSpan(double From, double To, Mood Mood, int Seed, bool TapeStopAtEnd);
+public sealed record MusicSpan(double From, double To, Mood Mood, int Seed, bool TapeStopAtEnd, MusicStyle Style = MusicStyle.Edm);
 /// <summary>On-screen text: title, chapter, later, end (timeline seconds).</summary>
 public sealed record TextCue(string Kind, double At, double Len, string Text, string? Sub = null);
 /// <summary>A caption word placed on the finished video's timeline.</summary>

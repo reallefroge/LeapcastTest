@@ -59,6 +59,8 @@ public static class AssWriter
         }
         // no captions under the title, chapter or end cards
         var blocked = plan.Texts.Where(t => t.Kind is "title" or "end" or "chapter").Select(t => (t.At - 0.1, t.At + t.Len)).ToList();
+        // one caption line on screen at a time: each line ends when the next begins (never two drawn over each other)
+        var lines = new List<(double A, double B, string Text)>();
         foreach (var g in groups)
         {
             if (blocked.Any(b => g[0].Start < b.Item2 && g[^1].End > b.Item1)) continue;
@@ -81,8 +83,14 @@ public static class AssWriter
                     else text.Append(word);
                     if (j + 1 < g.Count) text.Append(' ');
                 }
-                Ev(0, a, b, "Cap", text.ToString());
+                lines.Add((a, b, text.ToString()));
             }
+        }
+        lines.Sort((x, y) => x.A.CompareTo(y.A));
+        for (int i = 0; i < lines.Count; i++)
+        {
+            double b = i + 1 < lines.Count ? Math.Min(lines[i].B, lines[i + 1].A) : lines[i].B;
+            if (b - lines[i].A >= 0.04) Ev(0, lines[i].A, b, "Cap", lines[i].Text);
         }
 
         // ---- title, chapters, tags, end card

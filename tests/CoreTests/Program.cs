@@ -42,16 +42,24 @@ if (args.Length > 1 && args[0] == "--vod")
 if (args.Length > 1 && args[0] == "--music")
 {
     Directory.CreateDirectory(args[1]);
-    foreach (var mood in Enum.GetValues<LeapcastStudioAI.Vod.Mood>())
+    foreach (var style in Enum.GetValues<LeapcastStudioAI.Vod.MusicStyle>())
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var track = LeapcastStudioAI.Vod.MusicSynth.Track(mood, 40, 7);
-        LeapcastStudioAI.Vod.Dsp.WriteWav(Path.Combine(args[1], mood + ".wav"), track);
-        Console.WriteLine($"{mood}: {track.Length / 48000.0:0.0}s in {sw.ElapsedMilliseconds} ms, peak {track.Peak():0.00}");
+        var track = LeapcastStudioAI.Vod.MusicSynth.Track(style, 45, 7);
+        bool bad = track.L.Any(float.IsNaN) || track.R.Any(float.IsNaN);
+        LeapcastStudioAI.Vod.Dsp.WriteWav(Path.Combine(args[1], style + ".wav"), track);
+        Console.WriteLine($"{style}: {track.Length / 48000.0:0.0}s in {sw.ElapsedMilliseconds} ms, peak {track.Peak():0.00}{(bad ? " NaN!" : "")}");
     }
     foreach (var k in Enum.GetValues<LeapcastStudioAI.Vod.SfxKind>())
         LeapcastStudioAI.Vod.Dsp.WriteWav(Path.Combine(args[1], "sfx-" + k + ".wav"), LeapcastStudioAI.Vod.Sfx.Make(k, 3));
     return 0;
+}
+// quick mode: only Whisper captions
+if (args.Length > 0 && args[0] == "--whisper")
+{
+    int wf = 0;
+    await WhisperTests.RunAsync((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) wf++; });
+    return wf == 0 ? 0 : 1;
 }
 // quick mode: only the voice-clip listener
 if (args.Length > 0 && args[0] == "--voice")
@@ -1612,6 +1620,9 @@ await LiveSwitchSection(light);
 // ---------------------------------------------------------------- VOD editor
 Console.WriteLine("VOD editor (a long recording → an edited video)");
 await VodTests.RunAsync(ffmpeg, work, Check);
+#if !WINDOWS_SPEECH
+await WhisperTests.RunAsync(Check);
+#endif
 
 // ---------------------------------------------------------------- live 9:16 clips
 Console.WriteLine("9:16 clips made live from the raw game and camera (no webcam inside the game, nothing re-rendered)");

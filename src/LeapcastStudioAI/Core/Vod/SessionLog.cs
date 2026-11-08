@@ -18,6 +18,11 @@ public sealed class VodSidecar
     public List<VodWord> Words { get; set; } = new();
     public List<VodWord> Desktop { get; set; } = new();
     public List<VodMarker> Markers { get; set; } = new();
+    /// <summary>Your mic on its own, next to the recording (16 kHz WAV), and where it starts in the recording (s).</summary>
+    public string? MicFile { get; set; }
+    public double MicOffset { get; set; }
+
+    public static string MicPathFor(string video) => Path.Combine(Path.GetDirectoryName(video) ?? "", Path.GetFileNameWithoutExtension(video) + ".mic.wav");
 
     public static string PathFor(string video) => Path.Combine(Path.GetDirectoryName(video) ?? "", Path.GetFileNameWithoutExtension(video) + ".leapcast.json");
 

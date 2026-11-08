@@ -36,7 +36,9 @@ public static class VodPlanner
     public static EditPlan Plan(VodSignals s, VodEditOptions o)
     {
         int n = Math.Max(1, (int)Math.Ceiling(s.Duration / Bin));
-        var words = s.Words.OrderBy(w => w.Start).ToList();
+        var t0 = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var words = Captions.Dedupe(s.Words.Select(w => new CaptionWord(w.Text, t0.AddSeconds(w.Start), t0.AddSeconds(w.End))))
+            .Select(w => new VodWord(w.Text, (w.StartUtc - t0).TotalSeconds, (w.EndUtc - t0).TotalSeconds)).ToList();
         double target = s.Duration >= o.TargetSeconds * 2 ? o.TargetSeconds : Math.Max(45, Math.Min(o.TargetSeconds, s.Duration * 0.45));
         var rng = new Random((int)(s.Duration * 1000) ^ words.Count);
         var _momentIndex = new Dictionary<Piece, int>(ReferenceEqualityComparer.Instance); // which moment each piece shows
@@ -297,8 +299,22 @@ public static class VodPlanner
         // ---------------------------------------------------------------- music: a track per chapter, cut for deaths
         if (o.Music)
         {
+            bool InChapter(int c, double t) => chosen.Where((_, k) => chapterOf[k] == c).Any(x => t >= x.From && t <= x.To);
             var moods = ChapterMoods(chapters, c => chosen.Where((_, k) => chapterOf[k] == c).Select(x => x.Value).DefaultIfEmpty(0).Average(),
-                                     c => s.Markers.Any(m => m.Kind is "death" or "fight" && chosen.Where((_, k) => chapterOf[k] == c).Any(x => m.At >= x.From && m.At <= x.To)));
+                                     c => s.Markers.Any(m => m.Kind is "death" or "fight" && InChapter(c, m.At)),
+                                     c => words.Count(w => Laughs.Contains(w.Text.ToLowerInvariant()) && InChapter(c, w.Start)));
+            // a different style for every chapter (fitting its mood), never the same twice in a video
+            var used = new HashSet<MusicStyle>();
+            var styleRng = new Random((int)(s.Duration * 13) ^ chapters);
+            MusicStyle StyleFor(Mood m)
+            {
+                var options = MusicSynth.StylesFor(m).Where(x => !used.Contains(x)).ToArray();
+                if (options.Length == 0) options = Enum.GetValues<MusicStyle>().Where(x => !used.Contains(x)).DefaultIfEmpty(MusicSynth.StylesFor(m)[0]).ToArray();
+                var pick = options[styleRng.Next(options.Length)];
+                used.Add(pick);
+                return pick;
+            }
+            var styles = moods.Select(StyleFor).ToArray();
             double end = plan.Duration;
             for (int c = 0; c < chapters; c++)
             {
@@ -310,11 +326,11 @@ public static class VodPlanner
                 int seed = (int)(from * 7919) ^ c;
                 foreach (var (sa, se) in stops)
                 {
-                    if (sa - cur > 2) plan.Music.Add(new MusicSpan(cur, sa + 0.6, moods[c], seed, true));
+                    if (sa - cur > 2) plan.Music.Add(new MusicSpan(cur, sa + 0.6, moods[c], seed, true, styles[c]));
                     cur = se;
                     seed += 31;
                 }
-                if (to - cur > 2) plan.Music.Add(new MusicSpan(cur, to, c == chapters - 1 && to >= end - 0.01 ? Mood.Epic : moods[c], seed, false));
+                if (to - cur > 2) plan.Music.Add(new MusicSpan(cur, to, moods[c], seed, false, styles[c]));
             }
         }
 
@@ -331,16 +347,18 @@ public static class VodPlanner
         return plan;
     }
 
-    private static Mood[] ChapterMoods(int chapters, Func<int, double> energy, Func<int, bool> fights)
+    private static readonly HashSet<string> Laughs = new() { "haha", "hahaha", "ha", "lol", "lmao", "funny", "hilarious", "laughing", "hehe" };
+
+    private static Mood[] ChapterMoods(int chapters, Func<int, double> energy, Func<int, bool> fights, Func<int, int> laughs)
     {
         var e = Enumerable.Range(0, chapters).Select(energy).ToArray();
         double med = e.OrderBy(x => x).ElementAt(e.Length / 2);
         var moods = new Mood[chapters];
         for (int c = 0; c < chapters; c++)
         {
-            moods[c] = fights(c) ? Mood.Tense : e[c] >= med ? Mood.Hype : Mood.Chill;
+            moods[c] = fights(c) ? Mood.Tense : laughs(c) >= 3 ? Mood.Fun : e[c] >= med ? Mood.Hype : Mood.Chill;
             if (c > 0 && moods[c] == moods[c - 1])
-                moods[c] = moods[c] switch { Mood.Hype => Mood.Epic, Mood.Chill => Mood.Hype, Mood.Tense => Mood.Epic, _ => Mood.Hype };
+                moods[c] = moods[c] switch { Mood.Hype => Mood.Epic, Mood.Chill => Mood.Fun, Mood.Tense => Mood.Epic, Mood.Fun => Mood.Chill, _ => Mood.Hype };
         }
         if (chapters > 1) moods[^1] = moods[^2] == Mood.Epic ? Mood.Hype : Mood.Epic;
         return moods;

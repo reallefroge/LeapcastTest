@@ -19,6 +19,7 @@ static class SpeechTests
         {
             Console.WriteLine("    note: no English text-to-speech voice on this machine; only the voice-free listener tests run");
             await VoskTests.RunAsync(check, null);
+            await WhisperTests.RunAsync(check);
             return;
         }
         Console.WriteLine("    voices: " + string.Join(", ", voices));
@@ -37,6 +38,7 @@ static class SpeechTests
                 return s;
             }
             await VoskTests.RunAsync(check, Say, name);
+            if (name == voices[0]) await WhisperTests.RunAsync(check, Say);
         }
     }
 }

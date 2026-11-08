@@ -21,6 +21,8 @@ public sealed class VodSignals
     public required List<VodMarker> Markers { get; init; }
     public ClipLayout? Layout { get; init; }
     public bool WordsFromMic { get; init; }
+    /// <summary>The words came from Whisper (accurate), not the live recognizer.</summary>
+    public bool WordsFromWhisper { get; init; }
     /// <summary>The recording has a sound track (a silent one is scored with music only).</summary>
     public bool HasAudio { get; init; } = true;
 
@@ -50,13 +52,16 @@ public static class VodAnalyzer
         return p;
     }
 
-    public static async Task<VodSignals> AnalyzeAsync(string ffmpeg, string video, IProgress<double>? progress, CancellationToken ct)
+    public static async Task<VodSignals> AnalyzeAsync(string ffmpeg, string video, IProgress<double>? progress, CancellationToken ct, bool useWhisper = true)
     {
         var (dur, w, h, fps, hasAudio) = await ProbeAsync(ffmpeg, video, ct);
         var side = VodSidecar.Load(video);
         bool haveWords = side is { Words.Count: > 0 };
         double audioDone = 0, videoDone = 0;
-        void Report() => progress?.Report(Math.Min(1, (audioDone + videoDone) / 2));
+        // Whisper (when installed) writes the captions: most of the time goes there
+        bool whisper = useWhisper && Whisper.Ready;
+        double whisperDone = 0;
+        void Report() => progress?.Report(Math.Min(1, whisper ? (audioDone + videoDone) / 2 * 0.35 + whisperDone * 0.65 : (audioDone + videoDone) / 2));
 
         // ---- sound: level every 0.1 s; words from the recognizer when there's no session log
         var audioTask = Task.Run(async () =>
@@ -68,7 +73,7 @@ public static class VodAnalyzer
             VoskApi.Recognizer? rec = null;
             try
             {
-                if (!haveWords && VoiceListener.Available(out _))
+                if (!haveWords && !whisper && VoiceListener.Available(out _))
                     rec = new VoskApi.Recognizer(VoiceListenerModel(), alternatives: 0);
             }
             catch { rec = null; }
@@ -153,7 +158,29 @@ public static class VodAnalyzer
             return (motion.ToArray(), bright.ToArray(), deaths);
         }, ct);
 
+        // the words: Whisper on your mic track (only your voice), else on the recording's sound; then speaker leaks out
+        var whisperTask = !whisper ? Task.FromResult<List<VodWord>?>(null) : Task.Run(async () =>
+        {
+            try
+            {
+                string? mic = side?.MicFile is { } mf ? Path.Combine(Path.GetDirectoryName(video) ?? "", mf) : null;
+                bool fromMic = mic is not null && File.Exists(mic);
+                var list = await Whisper.TranscribeAsync(ffmpeg, fromMic ? mic! : video, new Progress<double>(f => { whisperDone = f; Report(); }), ct);
+                if (fromMic && side!.MicOffset != 0) list = list.Select(w => w with { Start = w.Start + side.MicOffset, End = w.End + side.MicOffset }).ToList();
+                if (side is { Desktop.Count: > 0 })
+                {
+                    var t0 = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                    CaptionWord C(VodWord w) => new(w.Text, t0.AddSeconds(w.Start), t0.AddSeconds(w.End));
+                    list = Echo.Remove(list.Select(C).ToList(), side.Desktop.Select(C).ToList())
+                        .Select(w => new VodWord(w.Text, (w.StartUtc - t0).TotalSeconds, (w.EndUtc - t0).TotalSeconds)).ToList();
+                }
+                return (List<VodWord>?)list;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { return null; } // the recognizer's words are still there
+        }, ct);
         var (loud, heard) = await audioTask;
+        var whispered = await whisperTask;
         var (mot, bri, found) = await videoTask;
         var markers = new List<VodMarker>(side?.Markers ?? new());
         // deaths seen in the video that the session log doesn't already have
@@ -164,7 +191,8 @@ public static class VodAnalyzer
         return new VodSignals
         {
             Duration = dur, Width = w, Height = h, Fps = fps, HasAudio = hasAudio, Loud = loud, Motion = mot, Brightness = bri,
-            Words = haveWords ? side!.Words : heard, Markers = markers, Layout = side?.Layout, WordsFromMic = haveWords,
+            Words = whispered is { Count: > 0 } ? whispered : haveWords ? side!.Words : heard, Markers = markers, Layout = side?.Layout,
+            WordsFromMic = haveWords || side?.MicFile is not null, WordsFromWhisper = whispered is { Count: > 0 },
         };
     }
 

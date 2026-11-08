@@ -216,7 +216,7 @@ public static class VodRenderer
         foreach (var span in plan.Music)
         {
             double len = span.To - span.From;
-            var track = MusicSynth.Track(span.Mood, len + 1.5, span.Seed);
+            var track = MusicSynth.Track(span.Style, len + 1.5, span.Seed);
             int at = Dsp.Frames(span.From), n = Math.Min(track.Length, Dsp.Frames(len));
             // a quick fade in (it lands on the cut) and a short fade out into the next section's silence beat
             int fin = Dsp.Frames(0.03), fout = Dsp.Frames(span.TapeStopAtEnd ? 0.02 : 0.35);
@@ -231,24 +231,27 @@ public static class VodRenderer
             if (span.TapeStopAtEnd) Sfx.TapeStop(music, Dsp.Frames(span.To - 0.6), 0.6);
         }
 
-        // ducking: under your voice the music sits ~11 dB down, under other sound ~5 dB, alone (cards) it's full
+        // the music serves the story: a quiet bed under your voice (≈ -22 dB), almost gone once you've been talking a
+        // while, a little more under game sound, and only up front on its own (title, end card)
         var spoken = new bool[(int)(dur * 20) + 1];
-        foreach (var c in plan.Captions) for (double t = c.Start - 0.1; t < c.End + 0.15; t += 0.05) if (t >= 0 && (int)(t * 20) < spoken.Length) spoken[(int)(t * 20)] = true;
-        double gain = 0.5;
+        foreach (var c in plan.Captions) for (double t = c.Start - 0.15; t < c.End + 0.4; t += 0.05) if (t >= 0 && (int)(t * 20) < spoken.Length) spoken[(int)(t * 20)] = true;
+        double gain = 0.35, talking = 0;
         int step = Dsp.Rate / 200; // 5 ms
         for (int i = 0; i < music.Length; i += step)
         {
             double t = i / (double)Dsp.Rate;
             var piece = plan.Pieces.LastOrDefault(p => p.At <= t);
-            double target = 0.5;
+            double target = 0.35;
             if (piece is { Mute: false })
             {
-                bool voice = spoken[Math.Min(spoken.Length - 1, (int)(t * 20))] || piece.Speed < 1;
+                bool voice = spoken[Math.Min(spoken.Length - 1, (int)(t * 20))];
+                talking = voice ? talking + 0.005 : Math.Max(0, talking - 0.01);
                 double src = piece.In + (t - piece.At) * piece.Speed;
                 bool loud = s.LoudAt(src) > -28;
-                target = voice ? 0.14 : loud ? 0.28 : 0.4;
+                target = piece.Speed < 1 ? 0.06 : voice ? (talking > 6 ? 0.035 : 0.075) : loud ? 0.12 : 0.18;
             }
-            double coef = target < gain ? 0.25 : 0.03; // fast down, slow back up
+            else talking = 0;
+            double coef = target < gain ? 0.25 : 0.02; // quick to get out of the way, slow to come back
             for (int k = 0; k < step && i + k < music.Length; k++)
             {
                 gain += (target - gain) * coef / step * 4;
@@ -261,7 +264,7 @@ public static class VodRenderer
         foreach (var cue in plan.Sfx)
         {
             var fx = Sfx.Make(cue.Kind, seed++);
-            bed.Mix(fx, Dsp.Frames(cue.At), cue.Gain);
+            bed.Mix(fx, Dsp.Frames(cue.At), cue.Gain * 0.75f); // accents, not punches
         }
         return bed;
     }
