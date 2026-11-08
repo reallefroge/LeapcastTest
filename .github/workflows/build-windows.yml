@@ -62,7 +62,7 @@ jobs:
           Get-ChildItem $env:TEMP\leapcast-tests\data\logs -ErrorAction SilentlyContinue | Copy-Item -Destination smoke/ -ErrorAction SilentlyContinue
           Get-ChildItem $env:TEMP\leapcast-tests\*.log -ErrorAction SilentlyContinue | Copy-Item -Destination smoke/ -ErrorAction SilentlyContinue
           # Surface results as annotations (readable without downloading logs)
-          Get-Content smoke/engine-tests.txt | Where-Object { $_ -match 'FAIL|Whisper|Slur|safety|Loud guard|spoken test|Chat|chat:|Overlays|Alerts|Streamlabs|engine:|FFmpeg under test|ddagrab|lip|gpu-window|gpu-display|transition-debug|PASS.*(crossfade|gap|GPU)|said,|note: Maximum|9:16' } |
+          Get-Content smoke/engine-tests.txt | Where-Object { $_ -match 'FAIL|Whisper|Slur|safety|Loud guard|spoken test|spotter|Chat|chat:|Overlays|Alerts|Streamlabs|engine:|FFmpeg under test|ddagrab|lip|gpu-window|gpu-display|transition-debug|PASS.*(crossfade|gap|GPU)|said,|note: Maximum|9:16' } |
             Select-Object -First 30 | ForEach-Object { Write-Host "::warning title=engine-test::$($_.Trim())" }
           $ff = Join-Path $env:TEMP "leapcast-tests\data\logs\ffmpeg-last.log"
           if (Test-Path $ff) {

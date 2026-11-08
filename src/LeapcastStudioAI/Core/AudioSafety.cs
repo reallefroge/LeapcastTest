@@ -184,6 +184,10 @@ public sealed class SlurSpotter : IDisposable
         _thread.Start();
     }
 
+    /// <summary>Diagnostics: what the recognizer heard and when (tests).</summary>
+    public Action<string>? Trace { get; set; }
+    private string _lastTrace = "";
+
     /// <summary>Where the recognizer has got to on the timeline (s).</summary>
     public double HeardUntil => _t0 + Interlocked.Read(ref _fed) / 16000.0;
 
@@ -202,11 +206,15 @@ public sealed class SlurSpotter : IDisposable
                 var json = rec.Accept(pcm, pcm.Length);
                 _fed += pcm.Length;
                 double now = _t0 + _fed / 16000.0;
-                if (json is not null) { Check(json, "result", now); lastPartial = ""; continue; }
+                if (json is not null) { Trace?.Invoke($"{now:0.00}s result: {string.Join(" ", Words(json, "result").Select(w => w.Word))}"); Check(json, "result", now); lastPartial = ""; continue; }
                 // the running guess costs time: only when caught up (a slow PC must not fall behind the delay)
                 if (_queue.Count > 0) continue;
                 var partial = rec.Partial();
-                if (partialWords) Check(partial, "partial_result", now);
+                // word times in the running guess when this libvosk gives them; otherwise (or when it leaves them
+                // out) the running text itself: a new filtered word in it was said within the last moment
+                var timed = partialWords ? Words(partial, "partial_result") : new();
+                if (Trace is { } tr) { string tx = Text(partial); if (tx != _lastTrace) { _lastTrace = tx; tr($"{now:0.00}s q{_queue.Count} partial{(timed.Count > 0 ? "+times" : "")}: {tx}"); } }
+                if (timed.Count > 0) Check(partial, "partial_result", now);
                 else
                 {
                     // no word times in the running guess: a new slur in it was said within the last moment or so
@@ -300,6 +308,8 @@ public sealed class DesktopSafety : IDisposable
     public int Muted { get; private set; }
     public int LoudTriggers => _guard?.Triggers ?? 0;
     public double DelaySeconds => _delaySlots / 100.0;
+    /// <summary>Diagnostics (tests): the recognizer's running results.</summary>
+    public Action<string>? Trace { get; set; }
 
     /// <summary>Live changes (word list, filter and guard on/off); the delay itself stays as built.</summary>
     public void Update(AudioSafetyConfig cfg)
@@ -349,6 +359,7 @@ public sealed class DesktopSafety : IDisposable
                     LastMargin = from + _delaySlots / 100.0 - Interlocked.Read(ref _latest) / 48000.0;
                     Log?.Invoke($"Stream safety: muted a filtered word at {TimeSpan.FromSeconds(Math.Max(0, from)):hh\\:mm\\:ss} (desktop audio).");
                 });
+            if (_spotter is not null && Trace is not null) _spotter.Trace = Trace;
             if (_spotter is not null)
             {
                 // the recognizer gets 100 ms at a time (10 ms pieces would cost it far more work)
