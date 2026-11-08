@@ -70,7 +70,8 @@ static class SafetyTests
         if (!VoiceListener.Available(out _)) { Console.WriteLine("    note: no speech model: spoken safety test skipped"); return; }
         var speech = say("the pineapple was sitting on the kitchen table", 0); // 16 kHz
         var pcm16 = new List<short>();
-        pcm16.AddRange(new short[16000]); pcm16.AddRange(speech); pcm16.AddRange(new short[16000 * 3]);
+        // a few seconds of quiet first: in the app the filter has been running since the stream started
+        pcm16.AddRange(new short[16000 * 4]); pcm16.AddRange(speech); pcm16.AddRange(new short[16000 * 3]);
         // where the words really are (the same recognizer, offline)
         double ps = -1, pe = -1, ts = -1, te = -1;
         using (var rec = new VoskApi.Recognizer(VoiceListener.SharedModel(), alternatives: 0))

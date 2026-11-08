@@ -170,6 +170,7 @@ public sealed class SlurSpotter : IDisposable
     private readonly Func<string, bool> _isSlur;
     private readonly Action<double, double, string> _found;
     private readonly double _t0;
+    private readonly VoskApi.Model _model;
     private long _fed;
     private volatile bool _stop;
 
@@ -177,7 +178,7 @@ public sealed class SlurSpotter : IDisposable
     /// <param name="found">(from, to, word) on the timeline, in seconds.</param>
     public SlurSpotter(VoskApi.Model model, double timelineStart, Func<string, bool> isSlur, Action<double, double, string> found)
     {
-        _t0 = timelineStart; _isSlur = isSlur; _found = found;
+        _t0 = timelineStart; _isSlur = isSlur; _found = found; _model = model;
         var rec = new VoskApi.Recognizer(model, alternatives: 0);
         bool partialWords = rec.TryPartialWords();
         _thread = new Thread(() => Run(rec, partialWords)) { IsBackground = true, Name = "Leapcast slur filter", Priority = ThreadPriority.AboveNormal };
@@ -196,7 +197,20 @@ public sealed class SlurSpotter : IDisposable
 
     private void Run(VoskApi.Recognizer rec, bool partialWords)
     {
+        // warm the recognizer up on a throwaway stream first: its first second of decoding is slow, and a slow
+        // start is exactly what the delay can't absorb
+        try
+        {
+            using var warm = new VoskApi.Recognizer(_model, alternatives: 0);
+            warm.TryPartialWords();
+            var quiet = new short[1600];
+            for (int i = 0; i < 20; i++) { quiet[i % quiet.Length] = (short)((i * 37) % 200 - 100); warm.Accept(quiet, quiet.Length); warm.Partial(); }
+            warm.Final();
+        }
+        catch { }
+
         var reported = new HashSet<long>(); // (start in 10 ms) already muted
+        int maxBacklog = 0;
         string lastPartial = "";
         try
         {
@@ -208,7 +222,11 @@ public sealed class SlurSpotter : IDisposable
                 double now = _t0 + _fed / 16000.0;
                 if (json is not null) { Trace?.Invoke($"{now:0.00}s result: {string.Join(" ", Words(json, "result").Select(w => w.Word))}"); Check(json, "result", now); lastPartial = ""; continue; }
                 // the running guess costs time: only when caught up (a slow PC must not fall behind the delay)
-                if (_queue.Count > 0) continue;
+                if (_queue.Count > 0)
+                {
+                    if (Trace is { } tb && _queue.Count > maxBacklog) { maxBacklog = _queue.Count; tb($"{now:0.00}s behind by {_queue.Count * 0.1:0.0} s"); }
+                    continue;
+                }
                 var partial = rec.Partial();
                 // word times in the running guess when this libvosk gives them; otherwise (or when it leaves them
                 // out) the running text itself: a new filtered word in it was said within the last moment
@@ -328,6 +346,8 @@ public sealed class DesktopSafety : IDisposable
         if (cfg.LoudGuard) _guard = new LoudGuard();
         _delaySlots = (int)Math.Round(Math.Max(0, cfg.DelaySeconds) * 100);
         if (_delaySlots > 0) _line = new float[_delaySlots * ContentGains.SlotSamples * 2];
+        // load the recognizer now (off the audio thread), so it's ready and warm before the first word
+        if (cfg.MuteSlurs && _delaySlots > 0 && model is not null) _modelTask = Task.Run(() => { try { return model(); } catch { return null; } });
     }
 
     /// <summary>Takes 10 ms that just arrived (sample index <paramref name="index"/> on the timeline) and returns the 10 ms to send now, in place.</summary>
