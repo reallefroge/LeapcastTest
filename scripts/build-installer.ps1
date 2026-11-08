@@ -162,6 +162,7 @@ if (-not $SkipFfmpeg) {
                 }
             }
             if (-not $ok) { throw "Couldn't download FFmpeg ($($asset.name)); GitHub's download servers may be down. Try again later." }
+        } else { Write-Host "Using cached $($asset.name)" }
     }
     $Extract = Join-Path $CacheDir "ffmpeg-extract"
     if (Test-Path $Extract) { Remove-Item $Extract -Recurse -Force }
