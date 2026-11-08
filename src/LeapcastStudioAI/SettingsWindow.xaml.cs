@@ -47,12 +47,23 @@ public partial class SettingsWindow : Window
     /// While live, everything that would restart the encoder (and so drop or pause the stream) is greyed out and
     /// can't be clicked; everything else still applies at once, without touching the stream.
     /// </summary>
+    /// <summary>The slur filter only works with the delay: say so next to it.</summary>
+    private void SafetyChanged(object? sender, RoutedEventArgs? e)
+    {
+        if (SlurHint is null || SafetyDelayBox is null) return;
+        bool on = SafetyDelayBox.IsChecked == true;
+        SlurHint.Text = "Racial, ethnic and anti-LGBTQ slurs are built in. Desktop audio is transcribed on this PC as it plays; a filtered word is cut out (silence) before it reaches the stream."
+                        + (on ? "" : "  ⚠ Turn on the safety delay above for this to work: without it, a word is on stream before it can be heard.");
+        SlurHint.Foreground = (Brush)FindResource(on ? "MutedBrush" : "WarnBrush");
+    }
+
     private void LockWhileLive()
     {
         var locked = new FrameworkElement[]
         {
             ContentBox, ProfileBox, ResolutionBox, FrameRateBox, BitrateBox, EncoderBox, PresetBox, RateBox, AudioBox, LowLatencyBox,
             VerticalBox, VerticalResBox, VerticalBitrateBox, UploadBox, TestButton, VerticalClipsBox, InstantSwitchBox,
+            SafetyDelayBox, SafetyDelaySecondsBox,
         };
         var bannered = new HashSet<Panel>();
         foreach (var c in locked)
@@ -124,6 +135,15 @@ public partial class SettingsWindow : Window
         VerticalClipsBox.IsChecked = current.VerticalClips;
         ClipCaptionsBox.IsChecked = current.ClipCaptions;
         CaptionSpellingsBox.Text = current.CaptionSpellings ?? "";
+        SafetyDelayBox.IsChecked = current.SafetyDelay;
+        string sec = current.SafetyDelaySeconds.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        SafetyDelaySecondsBox.SelectedItem = SafetyDelaySecondsBox.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Content == sec)
+                                            ?? SafetyDelaySecondsBox.Items[1];
+        MuteSlursBox.IsChecked = current.MuteSlurs;
+        MuteAbleistBox.IsChecked = current.MuteAbleist;
+        MuteWordsBox.Text = current.MuteWords ?? "";
+        LoudGuardBox.IsChecked = current.LoudGuard;
+        SafetyChanged(null, null);
         ClipHandleBox.Text = current.ClipHandle;
         DeathClipsBox.IsChecked = current.DeathClips;
         ChatClipsBox.IsChecked = current.ChatClips;
@@ -217,6 +237,14 @@ public partial class SettingsWindow : Window
         s.VerticalClips = VerticalClipsBox.IsChecked == true;
         s.ClipCaptions = ClipCaptionsBox.IsChecked == true;
         s.CaptionSpellings = CaptionSpellingsBox.Text.Trim();
+        s.SafetyDelay = SafetyDelayBox.IsChecked == true;
+        if (SafetyDelaySecondsBox.SelectedItem is ComboBoxItem si &&
+            double.TryParse((string)si.Content, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var secs))
+            s.SafetyDelaySeconds = secs;
+        s.MuteSlurs = MuteSlursBox.IsChecked == true;
+        s.MuteAbleist = MuteAbleistBox.IsChecked == true;
+        s.MuteWords = MuteWordsBox.Text.Trim();
+        s.LoudGuard = LoudGuardBox.IsChecked == true;
         s.ClipHandle = ClipHandleBox.Text.Trim();
         s.DeathClips = DeathClipsBox.IsChecked == true;
         s.ChatClips = ChatClipsBox.IsChecked == true;

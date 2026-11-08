@@ -54,6 +54,13 @@ if (args.Length > 1 && args[0] == "--music")
         LeapcastStudioAI.Vod.Dsp.WriteWav(Path.Combine(args[1], "sfx-" + k + ".wav"), LeapcastStudioAI.Vod.Sfx.Make(k, 3));
     return 0;
 }
+// quick mode: only stream safety (unit level)
+if (args.Length > 0 && args[0] == "--safety")
+{
+    int sf = 0;
+    SafetyTests.Run((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) sf++; });
+    return sf == 0 ? 0 : 1;
+}
 // quick mode: only Whisper captions
 if (args.Length > 0 && args[0] == "--whisper")
 {
@@ -1202,6 +1209,68 @@ if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_ADAPT") == "1")
     return failures == 0 ? 0 : 1;
 }
 
+async Task SafetySection()
+{
+    Console.WriteLine("Stream safety delay: desktop audio waits 1.5 s in Leapcast, the stream follows in sync, the preview doesn't wait");
+    var sc = new StudioScene { Name = "safety" };
+    sc.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, CaptureMethod = testCapture });
+    sc.Sources.Add(new StudioSource { Name = "Cam", Type = SourceTypes.Camera, DeviceName = "x", Mirror = true, CameraDenoise = false });
+    sc.Sources.Add(new StudioSource { Name = "Desktop", Type = SourceTypes.DesktopAudio });
+    sc.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone });
+    var safe = WithEncoder(settings, "libx264");
+    safe.SafetyDelay = true; safe.SafetyDelaySeconds = 1.5;
+    audio.SimulateSafety = true;
+    try
+    {
+        await engine.UpdateAsync(new[] { sc }, sc, safe, true);
+        await engine.SetPreviewAsync(true);
+        int port = RtmpServer.FreePort();
+        var o = new StreamOutput { Name = "Safety test", Service = "Custom", ServerUrl = $"rtmp://127.0.0.1:{port}/live" };
+        keys[o.Id] = "s";
+        settings.Outputs.Add(o);
+        safe.Outputs.Add(o);
+        await engine.UpdateAsync(new[] { sc }, sc, safe, false);
+        string flv = Path.Combine(liveDir, "safety.flv");
+        var srv = RtmpServer.Start(ffmpeg, port, "s", flv);
+        await engine.StartRecordingAsync();
+        var probs = await engine.StartOutputAsync(o.Id);
+        Check(probs.Count == 0 && Math.Abs(engine.SafetyDelayActive - 1.5) < 1e-6, $"the stream runs with the 1.5 s safety delay ({engine.SafetyDelayActive} s){string.Concat(probs.Select(x => ": " + x))}");
+        int f0 = frames;
+        var sw = Stopwatch.StartNew();
+        await Task.Delay(14000);
+        double previewFps = (frames - f0) / sw.Elapsed.TotalSeconds;
+        Check(previewFps > 12, $"the preview keeps running live while the stream is delayed ({previewFps:0.0} fps)");
+        Check(Out(o)?.State == OutputState.Live, $"the delayed stream is live ({Out(o)?.State}, {Out(o)?.Kbps:0} kbps)");
+        Check(last is { Fps: > 20 }, $"the encoder keeps real time with the delay ({last?.Fps:0.0} fps, {last?.Health})");
+        string clip = await engine.SaveReplayAsync();
+        string recS = await engine.StopRecordingAsync();
+        await engine.StopOutputAsync(o.Id);
+        srv.WaitForExit(5000);
+        var lipS = await LipSyncAsync(recS, 539, 293);
+        Check(lipS.events >= 3 && Math.Abs(lipS.offsetMs) < 150 && lipS.spreadMs < 250,
+            $"safety-delayed recording: camera, mic and the delayed desktop audio line up ({lipS.offsetMs:+0;-0} ms, spread {lipS.spreadMs:0} ms over {lipS.events} events)");
+        var lipF = await LipSyncAsync(flv, 539, 293);
+        Check(lipF.events >= 3 && Math.Abs(lipF.offsetMs) < 150 && lipF.spreadMs < 250,
+            $"safety-delayed stream: in sync on the destination too ({lipF.offsetMs:+0;-0} ms, spread {lipF.spreadMs:0} ms over {lipF.events} events)");
+        var cp = await ProbeAsync(clip);
+        Check(cp.ok && cp.duration > 3, $"replay clip saves with the delay on ({cp.duration:0.0} s)");
+        settings.Outputs.Remove(o);
+    }
+    finally
+    {
+        audio.SimulateSafety = false;
+        await engine.UpdateAsync(new[] { scene }, scene, WithEncoder(settings, "libx264"), true);
+    }
+}
+
+if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_SAFETY") == "1")
+{
+    await SafetySection();
+    await engine.StopAllAsync();
+    Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(S)");
+    return failures == 0 ? 0 : 1;
+}
+
 if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_SYNC") == "1")
 {
     await SyncSection();
@@ -1616,6 +1685,10 @@ await AdaptSection(light);
 
 // ---------------------------------------------------------------- show/hide live, studio mode, rebuilds stay connected
 await LiveSwitchSection(light);
+
+// ---------------------------------------------------------------- stream safety delay
+SafetyTests.Run(Check);
+await SafetySection();
 
 // ---------------------------------------------------------------- VOD editor
 Console.WriteLine("VOD editor (a long recording → an edited video)");
@@ -2130,6 +2203,11 @@ sealed class FakePlatform(string png) : IPlatformServices
 sealed class FifoAudioBridge(string dir) : IAudioBridge
 {
     private List<StudioSource> _sources = new();
+    /// <summary>Act like the app's bridge with stream safety: desktop audio comes out the safety delay late.</summary>
+    public bool SimulateSafety { get; set; }
+    private double _delay;
+    public bool DelaysDesktopAudio => SimulateSafety;
+    public void SetSafety(AudioSafetyConfig config) => _delay = config.DelaySeconds;
     private CancellationTokenSource? _cts;
     private readonly List<string> _paths = new();
     public void Configure(IReadOnlyList<StudioSource> audioSources) => _sources = audioSources.ToList();
@@ -2143,9 +2221,10 @@ sealed class FifoAudioBridge(string dir) : IAudioBridge
             double freq = 440 + 220 * k++;
             double phase = 0;
             var buf = new byte[480 * 8];
+            double late = SimulateSafety && SourceTypes.KindOf(s.Type) == SourceKind.DesktopAudio ? _delay : 0;
             map[s.Id] = PacedPipe.Create(dir, ".f32", n =>
             {
-                bool on = SyncMarker.At(origin + n / 100.0);
+                bool on = SyncMarker.At(origin + n / 100.0 - late);
                 for (int i = 0; i < 480; i++)
                 {
                     float v = (float)((on ? 0.3 : 0.0) * Math.Sin(phase)); phase += 2 * Math.PI * freq / 48000;

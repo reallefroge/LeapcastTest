@@ -63,6 +63,13 @@ public sealed class PipelineRequest
     /// <summary>Common time origin (Unix seconds). Every live input is wall-clock stamped and shifted by this,
     /// so game, camera, mic and desktop audio line up no matter how long each device took to open.</summary>
     public double WallclockOrigin { get; init; }
+    /// <summary>
+    /// Stream safety delay (s): <see cref="DelayedAudio"/> inputs carry audio this much late (it waited in Leapcast
+    /// so filtered words could be muted); every encode is shifted by the same amount so picture and sound stay
+    /// together. The preview isn't delayed.
+    /// </summary>
+    public double SafetyDelay { get; init; }
+    public IReadOnlySet<Guid> DelayedAudio { get; init; } = new HashSet<Guid>();
 
     /// <summary>Test/alternate platform hook: return an input for a source instead of the Windows device input.</summary>
     /// <remarks>Receives the wall-clock origin so sample/frame-counted inputs can be aligned to it.</remarks>
@@ -535,6 +542,13 @@ public static class PipelineBuilder
                           $"fontcolor=white:fontsize={SmartTuner.Even((int)(CW * 0.045))}:x=(w-text_w)/2:y=h-{SmartTuner.Even((int)(CH * 0.06))}-text_h:" +
                           "shadowcolor=black@0.6:shadowx=2:shadowy=2,format=yuv420p[cenc]");
             else graph.Add("[cvfinal]format=yuv420p[cenc]");
+            if (r.SafetyDelay > 0)
+            {
+                // the 9:16 clip encode runs behind like the others (its sound is the delayed mix)
+                int ci = graph.FindLastIndex(x => x.EndsWith("[cenc]"));
+                graph[ci] = graph[ci][..^"[cenc]".Length] + "[cencpre]";
+                graph.Add($"[cencpre]setpts=PTS+{I(r.SafetyDelay)}/TB[cenc]");
+            }
         }
 
         // fan the composited canvases out to encodes + preview
@@ -549,7 +563,11 @@ public static class PipelineBuilder
         void Fan(string src, List<string> outs)
         {
             if (outs.Count == 0) { graph.Add($"[{src}]nullsink"); return; }
-            graph.Add(outs.Count == 1 ? $"[{src}]null[{outs[0]}]" : $"[{src}]split={outs.Count}{string.Concat(outs.Select(o => $"[{o}]"))}");
+            // stream safety: every encode is shifted by the delay to meet its (delayed) sound; the preview isn't
+            bool Delayed(string o) => r.SafetyDelay > 0 && !o.EndsWith("prevsrc");
+            string L(string o) => Delayed(o) ? o + "pre" : o;
+            graph.Add(outs.Count == 1 ? $"[{src}]null[{L(outs[0])}]" : $"[{src}]split={outs.Count}{string.Concat(outs.Select(o => $"[{L(o)}]"))}");
+            foreach (var o in outs.Where(Delayed)) graph.Add($"[{o}pre]setpts=PTS+{I(r.SafetyDelay)}/TB[{o}]");
         }
         Fan("vfinal", hOuts);
         if (vertical) Fan("vvfinal", vOuts);
@@ -606,11 +624,16 @@ public static class PipelineBuilder
 
                 var chain = new StringBuilder($"[{idx}:a]");
                 if (spec.Wallclock) chain.Append("asetpts=PTS-" + I(r.WallclockOrigin) + "/TB,");
+                double sd = r.SafetyDelay;
+                // stream safety: this pipe's sound arrives late (it waited in Leapcast); back to when it was heard,
+                // so scene fades and volume changes land on the right moment
+                if (sd > 0 && r.DelayedAudio.Contains(rep.Id)) chain.Append($"asetpts=PTS-{I(sd)}/TB,atrim=start=0,");
                 chain.Append("aresample=48000:async=1000,"); // absorbs device clock drift + pipe jitter
                 if (cleanup) chain.Append("highpass=f=80,afftdn=nr=12:nf=-40:tn=1,"); // adaptive background-noise removal
                 // always a named gain stage: scene switches crossfade it, show/hide sets it live
                 chain.Append($"{gainName}=volume={I(perScene[active])}:eval=frame,");
                 gains.Add(new AudioGainStage(gainName, perScene) { Key = key });
+                if (sd > 0) chain.Append($"asetpts=PTS+{I(sd)}/TB,"); // …then everything moves back by the delay, with the picture
                 chain.Append($"aformat=sample_fmts=fltp:channel_layouts=stereo[a{idx}]");
                 graph.Add(chain.ToString());
                 mixInputs.Add($"[a{idx}]");
@@ -622,7 +645,7 @@ public static class PipelineBuilder
             if (mixInputs.Count == 0)
             {
                 args.AddRange(new[] { "-re", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo" });
-                mixed = $"[{inputCount++}:a]aformat=sample_fmts=fltp:channel_layouts=stereo";
+                mixed = $"[{inputCount++}:a]{(r.SafetyDelay > 0 ? $"asetpts=PTS+{I(r.SafetyDelay)}/TB," : "")}aformat=sample_fmts=fltp:channel_layouts=stereo";
             }
             else if (mixInputs.Count == 1)
                 mixed = $"{mixInputs[0]}{master}alimiter=limit=0.95:level=0";

@@ -205,6 +205,7 @@ public partial class MainWindow : Window
         _engine.ModesChanged += () => Dispatcher.BeginInvoke(() => ApplyStatus(_engine.Snapshot()));
         _engine.PerformanceChanged += _ => Dispatcher.BeginInvoke(() => { _shownPlan = null; UpdatePlanDisplay(); UpdateCanvasLayout(); });
         _audio.DeviceError += msg => Dispatcher.BeginInvoke(() => Log(msg, true));
+        _audio.SafetyLog += msg => Dispatcher.BeginInvoke(() => Log(msg, false));
 
         // in studio mode the Program isn't edited (it's on air); the staged scene is edited in the Preview
         _hEditor = MakeEditor(HEditLayer, HViewbox, CanvasKind.Horizontal, () => _hCanvas, () => _studio ? null : SelectedScene);
@@ -950,6 +951,9 @@ public partial class MainWindow : Window
         int liveCount = st.Outputs.Count(o => o.State == OutputState.Live);
         LiveTagText.Text = st.Reconnecting ? "RECONNECTING" : $"LIVE  {Fmt(st.LiveFor)}  ·  {liveCount}/{st.Outputs.Count(o => o.State != OutputState.Error)}";
         RecTag.Visibility = st.Recording ? Visibility.Visible : Visibility.Collapsed;
+        double delay = _engine.SafetyDelayActive;
+        SafetyTag.Visibility = delay > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (delay > 0) SafetyTagText.Text = $"🛡 {delay.ToString("0.#", CultureInfo.InvariantCulture)} s delay";
         RecTagText.Text = $"● REC  {Fmt(st.RecordingFor)}";
 
         StatNow.Text = st.Live && st.UploadKbps > 0 ? $"↑ {st.UploadKbps:N0} kbps"
@@ -2049,6 +2053,8 @@ public partial class MainWindow : Window
     private void Settings_Click(object sender, RoutedEventArgs e) => OpenSettings(null);
 
     private void SettingsMenu_Click(object sender, RoutedEventArgs e) => OpenSettings((sender as FrameworkElement)?.Tag as string);
+
+    private void SafetyTag_Click(object sender, MouseButtonEventArgs e) => OpenSettings("Safety");
 
     private async void OpenSettings(string? tab)
     {

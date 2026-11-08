@@ -93,6 +93,11 @@
                   ToolTip="Voice clips on (Settings → Recording)">
             <TextBlock x:Name="VoiceTagText" Text="🎙 Say “Clip”" FontWeight="SemiBold" FontSize="12" Foreground="#9FE8FF"/>
           </Border>
+          <Border x:Name="SafetyTag" Background="#1A7CF5A0" BorderBrush="#557CF5A0" BorderThickness="1" CornerRadius="11" Padding="11,4" Margin="0,0,6,0"
+                  Visibility="Collapsed" VerticalAlignment="Center" Cursor="Hand" MouseLeftButtonUp="SafetyTag_Click"
+                  ToolTip="Stream safety delay on: desktop audio is checked for slurs before it goes out. Click for the settings.">
+            <TextBlock x:Name="SafetyTagText" Text="🛡 2 s delay" FontWeight="SemiBold" FontSize="12" Foreground="#A8F5C8"/>
+          </Border>
           <Border x:Name="RecTag" Background="#7A2E31" CornerRadius="11" Padding="11,4" Margin="0,0,6,0" Visibility="Collapsed" VerticalAlignment="Center">
             <TextBlock x:Name="RecTagText" Text="● REC" FontWeight="Bold" FontSize="12"/>
           </Border>

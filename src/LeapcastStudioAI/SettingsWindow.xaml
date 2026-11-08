@@ -161,6 +161,35 @@
           </Border>
         </ScrollViewer>
       </TabItem>
+      <TabItem Header="Safety" Tag="Safety">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <Border Style="{StaticResource Card}" Margin="0,4,8,0">
+            <StackPanel>
+            <TextBlock Text="SAFETY DELAY" Style="{StaticResource SectionHeader}"/>
+            <CheckBox x:Name="SafetyDelayBox" Content="Run the stream a little behind so words can be muted" Checked="SafetyChanged" Unchecked="SafetyChanged"/>
+            <TextBlock Text="Delay (seconds)" Style="{StaticResource FieldLabel}"/>
+            <ComboBox x:Name="SafetyDelaySecondsBox" Width="120" HorizontalAlignment="Left">
+              <ComboBoxItem Content="1.5"/><ComboBoxItem Content="2"/><ComboBoxItem Content="3"/><ComboBoxItem Content="4"/><ComboBoxItem Content="5"/>
+            </ComboBox>
+            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="Desktop audio (the game, Discord) waits this long inside Leapcast, so a slur can be heard and muted before it goes out. Your stream, recordings and clips run this far behind; your preview doesn't. Off: no delay, nothing is behind."/>
+
+            <TextBlock Text="SLUR FILTER (DESKTOP AUDIO)" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
+            <CheckBox x:Name="MuteSlursBox" Content="Mute slurs said in desktop audio"/>
+            <CheckBox x:Name="MuteAbleistBox" Content="Also mute the r-word" Margin="0,4,0,0"/>
+            <TextBlock Text="More words to mute (one per line)" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="MuteWordsBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="54" MaxHeight="120" VerticalScrollBarVisibility="Auto"/>
+            <TextBlock x:Name="SlurHint" Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="Racial, ethnic and anti-LGBTQ slurs are built in. Desktop audio is transcribed on this PC as it plays; a filtered word is cut out (silence) before it reaches the stream. Needs the safety delay."/>
+
+            <TextBlock Text="LOUD AUDIO PROTECTION" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
+            <CheckBox x:Name="LoudGuardBox" Content="Turn sudden, very loud desktop audio right down (ear-rape protection)"/>
+            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="A blown-out mic on Discord, a screamer or a soundboard blast is turned down to a comfortable level within 10 ms and eased back once it calms down. Normal loud game moments are left alone. Works with or without the delay (with it, it catches the very first moment too)."/>
+            </StackPanel>
+          </Border>
+        </ScrollViewer>
+      </TabItem>
       <TabItem Header="Recording" Tag="Recording">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">

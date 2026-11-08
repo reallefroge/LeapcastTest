@@ -39,6 +39,7 @@ static class SpeechTests
             }
             await VoskTests.RunAsync(check, Say, name);
             if (name == voices[0]) await WhisperTests.RunAsync(check, Say);
+            if (name == voices[0]) await SafetyTests.SpokenAsync(check, Say);
         }
     }
 }

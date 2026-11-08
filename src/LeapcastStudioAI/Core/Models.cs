@@ -487,6 +487,20 @@ public sealed class StudioSettings
     public bool VerticalClips { get; set; } = true;
     /// <summary>Captions on clips: what you said (transcribed from your mic, on this PC) burned into the clip.</summary>
     public bool ClipCaptions { get; set; } = true;
+    /// <summary>Stream safety: desktop audio (and so the stream, recordings and clips) runs this far behind, so a
+    /// filtered word can be muted before it goes out. Off: no delay (the slur filter can't work).</summary>
+    public bool SafetyDelay { get; set; }
+    public double SafetyDelaySeconds { get; set; } = 2;
+    /// <summary>Mute slurs heard in desktop audio (needs the safety delay).</summary>
+    public bool MuteSlurs { get; set; } = true;
+    public bool MuteAbleist { get; set; } = true;
+    /// <summary>More words to mute, one per line.</summary>
+    public string MuteWords { get; set; } = "";
+    /// <summary>Turn sudden, very loud desktop audio right down (ear-rape protection). Works with or without the delay.</summary>
+    public bool LoudGuard { get; set; } = true;
+
+    public AudioSafetyConfig SafetyConfig() => new(
+        SafetyDelay ? Math.Clamp(SafetyDelaySeconds, 1, 5) : 0, MuteSlurs && SafetyDelay, MuteAbleist, MuteWords ?? "", LoudGuard);
     /// <summary>Names captions spell your way, one per line: "Khrysalis = Chrysalis, Crysalis" (Wizard101's are built in).</summary>
     public string CaptionSpellings { get; set; } = "";
     /// <summary>Wizard101: when the health globe empties (HP 0), save the fight that led to it.</summary>

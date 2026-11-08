@@ -50,6 +50,7 @@ public static class VoskApi
     [DllImport(Lib)] internal static extern IntPtr vosk_recognizer_partial_result(IntPtr rec);
     [DllImport(Lib)] internal static extern IntPtr vosk_recognizer_final_result(IntPtr rec);
     [DllImport(Lib)] internal static extern void vosk_recognizer_free(IntPtr rec);
+    [DllImport(Lib)] internal static extern void vosk_recognizer_set_partial_words(IntPtr rec, int words);
 
     /// <summary>A loaded model (about 70 MB of memory for the small English one). Load once, share between recognizers.</summary>
     public sealed class Model : IDisposable
@@ -82,6 +83,13 @@ public static class VoskApi
         {
             if (count <= 0) return null;
             return vosk_recognizer_accept_waveform_s(_h, samples, count) != 0 ? Str(vosk_recognizer_result(_h)) : null;
+        }
+
+        /// <summary>Word times in the running guess too (newer libvosk); false when this build can't.</summary>
+        public bool TryPartialWords()
+        {
+            try { vosk_recognizer_set_partial_words(_h, 1); return true; }
+            catch (EntryPointNotFoundException) { return false; }
         }
 
         /// <summary>What is being said right now (unfinished utterance).</summary>

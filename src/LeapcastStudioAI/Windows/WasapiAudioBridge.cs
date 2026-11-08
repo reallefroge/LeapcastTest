@@ -32,6 +32,9 @@ public sealed class WasapiAudioBridge : IAudioBridge
 
         public NamedPipeServerStream? Pipe;
         public Thread? Writer;
+        public bool Desktop;
+        /// <summary>Stream safety (desktop audio): delay line, slur filter, loud-audio guard. Null: straight through.</summary>
+        public volatile DesktopSafety? Safety;
 
         public void Dispose()
         {
@@ -47,6 +50,28 @@ public sealed class WasapiAudioBridge : IAudioBridge
     private CancellationTokenSource? _pipeCts;
 
     public event Action<string>? DeviceError;
+    /// <summary>What stream safety did (a word muted…), for the log.</summary>
+    public event Action<string>? SafetyLog;
+
+    // ------------------------------------------------------------------ stream safety (desktop audio)
+
+    private AudioSafetyConfig _safety = AudioSafetyConfig.Off;
+    public bool DelaysDesktopAudio => true;
+
+    public void SetSafety(AudioSafetyConfig config)
+    {
+        lock (_lock)
+        {
+            _safety = config;
+            foreach (var f in _feeds.Values) f.Safety?.Update(config);
+        }
+    }
+
+    private static VoskApi.Model? SafetyModel()
+    {
+        try { return VoiceListener.Available(out _) ? VoiceListener.SharedModel() : null; }
+        catch { return null; }
+    }
 
     // ------------------------------------------------------------------ speech tap (voice clips)
 
@@ -226,6 +251,7 @@ public sealed class WasapiAudioBridge : IAudioBridge
     private void StartCapture(Feed feed, StudioSource src)
     {
         bool mic = SourceTypes.KindOf(src.Type) == SourceKind.Microphone;
+        feed.Desktop = SourceTypes.KindOf(src.Type) == SourceKind.DesktopAudio;
         using var en = new MMDeviceEnumerator();
         MMDevice device = string.IsNullOrWhiteSpace(src.AudioDeviceId)
             ? en.GetDefaultAudioEndpoint(mic ? DataFlow.Capture : DataFlow.Render, Role.Multimedia)
@@ -287,6 +313,14 @@ public sealed class WasapiAudioBridge : IAudioBridge
             {
                 if (feed.Capture is null || feed.Stereo48k is null) continue;
                 string name = $"leapcast_{feed.SourceId:N}_{Environment.TickCount64}";
+                feed.Safety?.Dispose();
+                feed.Safety = null;
+                if (feed.Desktop && _safety.Any)
+                {
+                    var safety = new DesktopSafety(_safety, SafetyModel);
+                    safety.Log += m => SafetyLog?.Invoke(m);
+                    feed.Safety = safety;
+                }
                 // Created synchronously so the pipe exists before ffmpeg tries to open it.
                 var pipe = LocalPipe.Server(name, PipeDirection.Out, 0, 1 << 16);
                 feed.Pipe = pipe;
@@ -345,6 +379,8 @@ public sealed class WasapiAudioBridge : IAudioBridge
                     int got = 0;
                     try { got = feed.Stereo48k!.Read(samples, 0, samples.Length); } catch { }
                     if (got < samples.Length) Array.Clear(samples, got, samples.Length - got);
+                    // stream safety: guard + slur filter look at it, then it waits out the delay with their decisions applied
+                    try { feed.Safety?.Process(samples, written); } catch { }
                     pipe.Write(MemoryMarshal.AsBytes(samples.AsSpan()));
                     written += chunk;
                 }
@@ -366,6 +402,8 @@ public sealed class WasapiAudioBridge : IAudioBridge
             f.Writer?.Join(1000);
             f.Pipe = null;
             f.Writer = null;
+            f.Safety?.Dispose();
+            f.Safety = null;
         }
     }
 

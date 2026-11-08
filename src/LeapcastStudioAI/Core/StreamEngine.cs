@@ -19,6 +19,10 @@ public interface IAudioBridge : IDisposable
     void ClosePipes();
     /// <summary>Peak level in dBFS (−60 … 0).</summary>
     double LevelDb(Guid sourceId);
+    /// <summary>Stream safety for desktop audio (applies from the next <see cref="OpenPipes"/>).</summary>
+    void SetSafety(AudioSafetyConfig config) { }
+    /// <summary>Delays desktop-audio pipes by the safety delay (the pipeline shifts everything else to match).</summary>
+    bool DelaysDesktopAudio => false;
 }
 
 public interface IPlatformServices
@@ -249,7 +253,7 @@ public sealed class StreamEngine : IDisposable
                 double wall = new DateTimeOffset(t).ToUnixTimeMilliseconds() / 1000.0 - origin;
                 best = Math.Min(best, wall - p.OutTime.TotalSeconds);
             }
-        return best == double.MaxValue ? 0 : Math.Clamp(best, 0, 3);
+        return best == double.MaxValue ? 0 : Math.Clamp(best, 0, 3 + (_runnerRequest?.SafetyDelay ?? 0));
     }
 
     /// <summary>The compositor's current time (what runtime filter commands are scheduled against).</summary>
@@ -436,7 +440,9 @@ public sealed class StreamEngine : IDisposable
             await RestartAsync();
             return;
         }
-        bool structural = RunnerFingerprint(Composited()) != _runnerFingerprint;
+        bool structural = RunnerFingerprint(Composited()) != _runnerFingerprint
+                          || (_runnerRequest is not null && Math.Abs(_runnerRequest.SafetyDelay - (_audio.DelaysDesktopAudio ? Settings.SafetyConfig().DelaySeconds : 0)) > 1e-6);
+        _audio.SetSafety(Settings.SafetyConfig()); // word list, guard on/off: live
         if (restartIfRunning || structural)
         {
             _activeIndex = index;
@@ -454,6 +460,9 @@ public sealed class StreamEngine : IDisposable
         RefreshLayout();
         await ReconcileAsync(); // e.g. vertical canvas switched on, an output enabled with its own encoder
     });
+
+    /// <summary>The safety delay the running pipeline was built with (0 = none).</summary>
+    public double SafetyDelayActive => _runnerRequest?.SafetyDelay ?? 0;
 
     public Task UpdateAsync(StudioScene scene, StudioSettings settings, bool restartIfRunning) =>
         UpdateAsync(new[] { scene }, scene, settings, restartIfRunning);
@@ -1104,7 +1113,14 @@ public sealed class StreamEngine : IDisposable
         _audio.Configure(AudioSources());
         double origin = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
         IReadOnlyDictionary<Guid, string> pipes = new Dictionary<Guid, string>();
+        // stream safety: desktop audio waits in Leapcast (filtered words muted, ear-rape turned down), the encodes follow
+        var safety = Settings.SafetyConfig();
+        _audio.SetSafety(safety);
+        double safetyDelay = _audio.DelaysDesktopAudio ? safety.DelaySeconds : 0;
         if (encode) pipes = _audio.OpenPipes(origin);
+        var delayedAudio = new HashSet<Guid>(safetyDelay > 0
+            ? AudioSources().Where(x => SourceTypes.KindOf(x.Type) == SourceKind.DesktopAudio && pipes.ContainsKey(x.Id)).Select(x => x.Id)
+            : Enumerable.Empty<Guid>());
 
         // Webcams: one warm reader per device, fed to this run through counted pipes.
         var camUses = new Dictionary<string, (InputSpec device, List<StudioSource> uses)>();
@@ -1126,8 +1142,9 @@ public sealed class StreamEngine : IDisposable
             browserUses.TryAdd(PipelineBuilder.InputKey(src), src);
         var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)));
         lock (_windows.CaptureSizes) foreach (var (k, v) in _windows.CaptureSizes) _knownSizes[k] = v;
-        string? segPattern = shape.Main ? _cache.BeginSession(origin) : null;
-        string? clipPattern = shape.Clip ? _clipCache.BeginSession(origin) : null;
+        // (with the safety delay, encoded timestamps run that much ahead of when things happened)
+        string? segPattern = shape.Main ? _cache.BeginSession(origin - safetyDelay) : null;
+        string? clipPattern = shape.Clip ? _clipCache.BeginSession(origin - safetyDelay) : null;
         var clipSize = VerticalClip.OutputSize(plan.Height);
         var clipPlan = plan with { Width = clipSize.W, Height = clipSize.H, Fps = 30, CapKbps = clipSize.W >= 1080 ? 6000 : 4500, LowLatency = false, Light = false };
         _stuckWarned = false;
@@ -1183,6 +1200,8 @@ public sealed class StreamEngine : IDisposable
             AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
             MasterVolumeDb = Settings.MasterVolumeDb,
             WallclockOrigin = origin,
+            SafetyDelay = safetyDelay,
+            DelayedAudio = delayedAudio,
             InputOverride = InputOverride,
             InputThreadQueueSupported = InputThreadQueueSupported,
             CameraInputs = camFeeds,
