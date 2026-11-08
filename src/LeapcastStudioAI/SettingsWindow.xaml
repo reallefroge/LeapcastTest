@@ -219,6 +219,11 @@
             <CheckBox x:Name="ClipCaptionsBox" Content="Captions on clips (what you say)" Margin="0,8,0,0"/>
             <TextBlock Text="Your mic is transcribed on this PC while clips can be taken; the words said during a clip are burned into it as captions."
                        Style="{StaticResource Hint}"/>
+            <TextBlock Text="Names to spell right (captions)" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="CaptionSpellingsBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="54" MaxHeight="120"
+                     VerticalScrollBarVisibility="Auto"/>
+            <TextBlock Text="One per line: the right spelling, then what it gets heard as, e.g. “Khrysalis = Chrysalis, Crysalis”. Wizard101's worlds and names (Khrysalis, Khrys, Krokotopia, MooShu, Dragonspyre…) are already built in."
+                       Style="{StaticResource Hint}"/>
             <TextBlock Text="Text at the bottom (optional)" Style="{StaticResource FieldLabel}"/>
             <TextBox x:Name="ClipHandleBox"/>
 

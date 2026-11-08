@@ -128,7 +128,7 @@ public static class Captions
     public static List<Caption> Build(IReadOnlyList<CaptionWord> words, DateTime clipStartUtc, double clipSeconds)
     {
         var groups = new List<List<CaptionWord>>();
-        foreach (var w in Dedupe(words.Where(w => !string.IsNullOrWhiteSpace(w.Text) && w.Text != "[unk]")))
+        foreach (var w in Dedupe(Vocabulary.Fix(words.Where(w => !string.IsNullOrWhiteSpace(w.Text) && w.Text != "[unk]").ToList())))
         {
             var cur = groups.Count > 0 ? groups[^1] : null;
             bool fresh = cur is null || cur.Count >= MaxWords

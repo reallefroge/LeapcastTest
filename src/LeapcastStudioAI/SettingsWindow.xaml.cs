@@ -123,6 +123,7 @@ public partial class SettingsWindow : Window
         HideFromCaptureBox.IsChecked = current.HideFromCapture;
         VerticalClipsBox.IsChecked = current.VerticalClips;
         ClipCaptionsBox.IsChecked = current.ClipCaptions;
+        CaptionSpellingsBox.Text = current.CaptionSpellings ?? "";
         ClipHandleBox.Text = current.ClipHandle;
         DeathClipsBox.IsChecked = current.DeathClips;
         ChatClipsBox.IsChecked = current.ChatClips;
@@ -215,6 +216,7 @@ public partial class SettingsWindow : Window
         s.HideFromCapture = HideFromCaptureBox.IsChecked == true;
         s.VerticalClips = VerticalClipsBox.IsChecked == true;
         s.ClipCaptions = ClipCaptionsBox.IsChecked == true;
+        s.CaptionSpellings = CaptionSpellingsBox.Text.Trim();
         s.ClipHandle = ClipHandleBox.Text.Trim();
         s.DeathClips = DeathClipsBox.IsChecked == true;
         s.ChatClips = ChatClipsBox.IsChecked == true;

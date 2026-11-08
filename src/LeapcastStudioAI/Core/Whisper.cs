@@ -120,6 +120,8 @@ public static class Whisper
             var args = new List<string> { "-m", ModelPath, "-f", wav, "-l", "en", "-ojf", "-of", outBase, "-np", "-pp",
                 "-t", Math.Clamp(Environment.ProcessorCount - 2, 2, 8).ToString(CultureInfo.InvariantCulture),
                 "-sns", "-nth", "0.6", "-dtw", "base.en", "-bs", "5", "-bo", "5" };
+            // the names to expect (Khrysalis, Krokotopia, yours…), so they come out spelled right
+            args.AddRange(new[] { "--prompt", Vocabulary.Prompt() });
             if (Vad() is { } vad) args.AddRange(new[] { "--vad", "-vm", vad, "-vp", "250" });
             var psi = new ProcessStartInfo(cli) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
             foreach (var a in args) psi.ArgumentList.Add(a);
@@ -142,7 +144,7 @@ public static class Whisper
             if (p.ExitCode != 0 || !File.Exists(outBase + ".json"))
                 throw new InvalidOperationException($"Whisper failed (exit code {p.ExitCode}): " + Tail(errText.ToString()));
             progress?.Report(1);
-            return Parse(await File.ReadAllTextAsync(outBase + ".json", ct));
+            return Vocabulary.Fix(Parse(await File.ReadAllTextAsync(outBase + ".json", ct)));
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }

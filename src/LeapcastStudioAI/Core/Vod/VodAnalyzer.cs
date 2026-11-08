@@ -191,7 +191,7 @@ public static class VodAnalyzer
         return new VodSignals
         {
             Duration = dur, Width = w, Height = h, Fps = fps, HasAudio = hasAudio, Loud = loud, Motion = mot, Brightness = bri,
-            Words = whispered is { Count: > 0 } ? whispered : haveWords ? side!.Words : heard, Markers = markers, Layout = side?.Layout,
+            Words = Vocabulary.Fix(whispered is { Count: > 0 } ? whispered : haveWords ? side!.Words : heard), Markers = markers, Layout = side?.Layout,
             WordsFromMic = haveWords || side?.MicFile is not null, WordsFromWhisper = whispered is { Count: > 0 },
         };
     }

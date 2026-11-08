@@ -193,6 +193,7 @@ public partial class MainWindow : Window
         VersionLabel.Text = ver is null ? "" : $"v{ver.Major}.{ver.Minor}.{ver.Build}";
         _state = StateStore.Load();
         CaptureExclusion.Enabled = _state.Settings.HideFromCapture;
+        Vocabulary.SetUser(_state.Settings.CaptionSpellings);
         _engine = new StreamEngine(_audio, new WindowsPlatform(), StateStore.Folder)
         {
             KeyResolver = o => SecretStore.Unprotect(o.StreamKeyProtected),
@@ -2186,6 +2187,7 @@ public partial class MainWindow : Window
 
     private void Save()
     {
+        Vocabulary.SetUser(_state.Settings.CaptionSpellings);
         try { StateStore.Save(_state); }
         catch (Exception ex) { Status("Could not save settings: " + ex.Message); }
         RegisterHotkeys();
