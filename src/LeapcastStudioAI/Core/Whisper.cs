@@ -107,7 +107,7 @@ public static class Whisper
             if (from > 0) conv.AddRange(new[] { "-ss", from.ToString("0.###", CultureInfo.InvariantCulture) });
             conv.AddRange(new[] { "-i", input });
             if (length is { } l) conv.AddRange(new[] { "-t", l.ToString("0.###", CultureInfo.InvariantCulture) });
-            conv.AddRange(new[] { "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav });
+            conv.AddRange(new[] { "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-map_metadata", "-1", "-bitexact", wav });
             var (code, err) = await EncoderCatalog.RunQuietAsync(ffmpeg, conv, TimeSpan.FromMinutes(30), ct);
             if (code != 0 || !File.Exists(wav)) throw new InvalidOperationException("Couldn't read the sound: " + err.Trim());
 
@@ -149,12 +149,27 @@ public static class Whisper
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
+    /// <summary>Where a WAV's samples start (after "data"; FFmpeg's headers carry extra chunks, so not always byte 44).</summary>
+    private static long DataOffset(FileStream f)
+    {
+        var r = new BinaryReader(f, System.Text.Encoding.ASCII, leaveOpen: true);
+        f.Position = 12;
+        while (f.Position + 8 <= f.Length)
+        {
+            string id = new string(r.ReadChars(4));
+            uint size = r.ReadUInt32();
+            if (id == "data") return f.Position;
+            f.Position += size + (size & 1);
+        }
+        return 44;
+    }
+
     /// <summary>The sound level (dBFS) every 50 ms of a 16 kHz mono WAV.</summary>
     internal static float[] Envelope(string wav)
     {
         var o = new List<float>();
         using var f = File.OpenRead(wav);
-        f.Position = 44;
+        f.Position = DataOffset(f);
         var buf = new byte[1600]; // 50 ms
         int got;
         while ((got = f.ReadAtLeast(buf, buf.Length, throwOnEndOfStream: false)) >= 2)
@@ -189,7 +204,14 @@ public static class Whisper
             float floor = sorted[(int)(sorted.Length * 0.1)], loudest = sorted[^1];
             float gate = loudest - floor < 12 ? float.NegativeInfinity : Math.Max(floor + 9, -60);
             for (int i = 0; i < env.Length; i++) on[i] = env[i] > gate;
-            // close tiny gaps between syllables (≤ 150 ms)
+            // drop lone clicks (under 100 ms), then close tiny gaps between syllables (≤ 150 ms)
+            for (int i = 0; i < on.Length; i++)
+                if (on[i])
+                {
+                    int k = i; while (k < on.Length && on[k]) k++;
+                    if (k - i < 2) for (int q = i; q < k; q++) on[q] = false;
+                    i = k;
+                }
             for (int i = 0; i < on.Length; i++)
                 if (!on[i])
                 {

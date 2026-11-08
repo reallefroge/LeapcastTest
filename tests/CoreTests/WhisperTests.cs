@@ -48,6 +48,17 @@ static class WhisperTests
               && anchored[0].Start >= 1.99 && anchored[0].End <= 2.40 + 1e-6 && anchored[3].Start >= 3.30 - 1e-6 && anchored[3].End <= 3.9 + 1e-6,
             $"Whisper timing: words the live recognizer also heard take its exact times, the rest fit between ({string.Join(" ", anchored.Select(x => $"{x.Text}@{x.Start:0.00}"))})");
 
+        // the level is read from the samples, not the file's header (FFmpeg writes extra chunks before them)
+        string hw = Path.Combine(Path.GetTempPath(), $"leapcast-hdr-{Guid.NewGuid():N}.wav");
+        var ffw = FfmpegLocator.Find(null);
+        if (ffw is not null)
+        {
+            await EncoderCatalog.RunQuietAsync(ffw, new[] { "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "1", "-c:a", "pcm_s16le", "-metadata", "title=a long title to make the header bigger", hw }, TimeSpan.FromSeconds(30), CancellationToken.None);
+            var silentEnv = Whisper.Envelope(hw);
+            check(silentEnv.Length >= 19 && silentEnv.All(x => x < -90), $"Whisper timing: a silent WAV reads as silent from its first moment ({(silentEnv.Length > 0 ? silentEnv[0] : 0):0} dB)");
+            try { File.Delete(hw); } catch { }
+        }
+
         // ---- names spelled the game's way
         Vocabulary.SetUser("");
         string F(string t) => Vocabulary.FixText(t);
