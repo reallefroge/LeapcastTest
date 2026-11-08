@@ -110,6 +110,6 @@ static class SafetyTests
         double Level(double a, double b) { int i0 = (int)((a + 2) * 100), i1 = Math.Min(chunks - 1, (int)((b + 2) * 100)); double m = 0; for (int i = i0; i <= i1; i++) m = Math.Max(m, outRms[i]); return m; }
         double inPine = Level(ps + 0.04, pe - 0.04), inTable = Level(ts, te);
         check(ds.Muted >= 1 && inPine < 0.002 && inTable > 0.01,
-            $"Slur filter (spoken): the filtered word is silent on the delayed stream, the rest of the sentence isn't (word {inPine:0.0000}, “table” {inTable:0.000}, {ds.Muted} mute(s))");
+            $"Slur filter (spoken): the filtered word is silent on the delayed stream, the rest of the sentence isn't (word {inPine:0.0000}, “table” {inTable:0.000}, {ds.Muted} mute(s), caught {ds.LastMargin:0.00} s before it would have gone out)");
     }
 }

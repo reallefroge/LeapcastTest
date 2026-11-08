@@ -184,6 +184,9 @@ public sealed class SlurSpotter : IDisposable
         _thread.Start();
     }
 
+    /// <summary>Where the recognizer has got to on the timeline (s).</summary>
+    public double HeardUntil => _t0 + Interlocked.Read(ref _fed) / 16000.0;
+
     /// <summary>Audio in (16 kHz mono); never blocks the audio thread (drops if the recognizer is far behind).</summary>
     public void Feed(short[] pcm) { if (!_stop) _queue.TryAdd(pcm); }
 
@@ -200,6 +203,8 @@ public sealed class SlurSpotter : IDisposable
                 _fed += pcm.Length;
                 double now = _t0 + _fed / 16000.0;
                 if (json is not null) { Check(json, "result", now); lastPartial = ""; continue; }
+                // the running guess costs time: only when caught up (a slow PC must not fall behind the delay)
+                if (_queue.Count > 0) continue;
                 var partial = rec.Partial();
                 if (partialWords) Check(partial, "partial_result", now);
                 else
@@ -286,6 +291,10 @@ public sealed class DesktopSafety : IDisposable
     private readonly int _delaySlots;
     private float _lastGain = 1;
     private readonly Downsampler _down = new();
+    private readonly List<short> _pending = new();
+    private long _latest;
+    /// <summary>The last filtered word's margin: how long before it would have gone out it was muted (s).</summary>
+    public double LastMargin { get; private set; } = double.NaN;
     private HashSet<string> _custom;
     public event Action<string>? Log;
     public int Muted { get; private set; }
@@ -315,6 +324,7 @@ public sealed class DesktopSafety : IDisposable
     public void Process(float[] stereo, long index)
     {
         long slot = index / ContentGains.SlotSamples;
+        Interlocked.Exchange(ref _latest, index);
         // ---- look at what just arrived
         if (_guard is { } guard)
         {
@@ -335,9 +345,16 @@ public sealed class DesktopSafety : IDisposable
                 {
                     _gains.Mute(from, to);
                     Muted++;
+                    // it goes out DelaySeconds after it arrived: how much of that was left when it was caught
+                    LastMargin = from + _delaySlots / 100.0 - Interlocked.Read(ref _latest) / 48000.0;
                     Log?.Invoke($"Stream safety: muted a filtered word at {TimeSpan.FromSeconds(Math.Max(0, from)):hh\\:mm\\:ss} (desktop audio).");
                 });
-            _spotter?.Feed(_down.Process(stereo));
+            if (_spotter is not null)
+            {
+                // the recognizer gets 100 ms at a time (10 ms pieces would cost it far more work)
+                _pending.AddRange(_down.Process(stereo));
+                if (_pending.Count >= 1600) { _spotter.Feed(_pending.ToArray()); _pending.Clear(); }
+            }
         }
 
         // ---- the delay line: what goes out now arrived DelaySeconds ago
