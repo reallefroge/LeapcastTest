@@ -243,7 +243,10 @@ public static class VodPlanner
 
         // ---------------------------------------------------------------- end card: the last frame, frozen and blurred
         var lastMoment = plan.Pieces.Last(p => p.Role is "moment" or "slow" or "face");
-        plan.Pieces.Add(new Piece { Role = "end", In = Math.Max(0, lastMoment.Out - 0.1), Out = lastMoment.Out, Hold = 10, Blur = true, Mute = true });
+        // (a frame safely inside the file: the very last instant may have no picture)
+        double endFrame = Math.Max(0, Math.Min(lastMoment.Out, s.Duration - 0.6) - 0.15);
+        plan.Pieces.Add(new Piece { Role = "end", In = endFrame, Out = endFrame + 0.1, Hold = 10, Blur = true, Mute = true });
+        if (!s.HasAudio) foreach (var p in plan.Pieces) p.Mute = true;
 
         // ---------------------------------------------------------------- the timeline
         double at = 0;

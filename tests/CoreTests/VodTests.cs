@@ -6,22 +6,26 @@ using LeapcastStudioAI.Vod;
 /// a saved clip and a death, with the session log Leapcast would have written.</summary>
 static class VodTests
 {
-    public static async Task MakeSyntheticStreamAsync(string ffmpeg, string path, double seconds = 240)
+    public static async Task MakeSyntheticStreamAsync(string ffmpeg, string path, double seconds = 240, bool sidecar = true, bool audio = true, int size = 720)
     {
         // talking every 20 s for 9 s; loud reactions at 100, 160 and 215 s; a loading screen 60–90 s
-        string voice = "if(lt(mod(t,20),9),0.12,0)+if(lt(abs(t-100),2.5)+lt(abs(t-160),2.5)+lt(abs(t-215),2.5),0.55,0)";
+        string voice = $"if(lt(mod(t,20),9),0.12,0)+if(lt(abs(t-100),2.5)+lt(abs(t-160),2.5)+lt(abs(t-215),2.5)+lt(abs(t-{seconds - 2}),2),0.55,0)";
+        int vw = size * 16 / 9, vh = size;
         string aexpr = $"0.015*(random(0)-0.5)+({voice})*sin(2*PI*210*t)*(0.55+0.45*sin(2*PI*5*t))";
         var psi = new ProcessStartInfo(ffmpeg) { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true };
         foreach (var a in new[] { "-y", "-v", "error",
-            "-f", "lavfi", "-i", $"testsrc2=s=1280x720:r=30:d={seconds}",
-            "-f", "lavfi", "-i", $"color=c=0x101830:s=1280x720:r=30:d={seconds}",
+            "-f", "lavfi", "-i", $"testsrc2=s={vw}x{vh}:r={(size >= 1080 ? 60 : 30)}:d={seconds}",
+            "-f", "lavfi", "-i", $"color=c=0x101830:s={vw}x{vh}:r={(size >= 1080 ? 60 : 30)}:d={seconds}",
             "-f", "lavfi", "-i", $"aevalsrc='{aexpr}':s=48000:d={seconds}",
-            "-filter_complex", "[0:v][1:v]overlay=enable='between(t,60,90)'[g];[g]drawbox=x=960:y=40:w=280:h=158:color=red:t=fill[v]",
-            "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-g", "60", "-c:a", "aac", "-shortest", path })
+            "-filter_complex", $"[0:v][1:v]overlay=enable='between(t,60,90)'[g];[g]drawbox=x={vw * 3 / 4}:y={vh - vh / 4}:w={vw / 4}:h={vh / 4}:color=red:t=fill[v]",
+            "-map", "[v]" }.Concat(audio ? new[] { "-map", "2:a", "-c:a", "aac" } : Array.Empty<string>())
+            .Concat(new[] { "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-g", "60", "-shortest", path }))
             psi.ArgumentList.Add(a);
         using (var p = Process.Start(psi)!) { var e = p.StandardError.ReadToEndAsync(); await p.WaitForExitAsync(); if (p.ExitCode != 0) throw new Exception(await e); }
 
-        var side = new VodSidecar { Layout = new ClipLayout(1280, 720, new LayoutRect(0, 0, 1280, 720), new LayoutRect(960, 40, 280, 158)) };
+        if (!sidecar) { File.Delete(VodSidecar.PathFor(path)); return; }
+        // the camera in the bottom-right corner, running a few pixels past the canvas edge (as layouts can)
+        var side = new VodSidecar { Layout = new ClipLayout(1920, 1080, new LayoutRect(0, 0, 1920, 1080), new LayoutRect(1440, 810, 490, 280)) };
         string[] chatter = { "okay", "so", "we", "need", "to", "get", "the", "key", "first", "then", "go", "left" };
         for (double t = 0; t < seconds; t += 20)
             for (int k = 0; k < 9; k++) side.Words.Add(new VodWord(chatter[(int)(t / 20 + k) % chatter.Length], t + 0.3 + k * 0.85, t + 0.3 + k * 0.85 + 0.5));

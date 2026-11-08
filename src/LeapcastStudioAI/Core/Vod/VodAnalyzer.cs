@@ -21,6 +21,8 @@ public sealed class VodSignals
     public required List<VodMarker> Markers { get; init; }
     public ClipLayout? Layout { get; init; }
     public bool WordsFromMic { get; init; }
+    /// <summary>The recording has a sound track (a silent one is scored with music only).</summary>
+    public bool HasAudio { get; init; } = true;
 
     public float LoudAt(double t) => Loud.Length == 0 ? -90 : Loud[Math.Clamp((int)(t / LoudStep), 0, Loud.Length - 1)];
     public float MotionAt(double t) => Motion.Length == 0 ? 0 : Motion[Math.Clamp((int)(t / VideoStep), 0, Motion.Length - 1)];
@@ -29,13 +31,13 @@ public sealed class VodSignals
 /// <summary>Reads a recording once for sound and once for pictures (in parallel, at low priority).</summary>
 public static class VodAnalyzer
 {
-    public static async Task<(double Duration, int W, int H, double Fps)> ProbeAsync(string ffmpeg, string file, CancellationToken ct)
+    public static async Task<(double Duration, int W, int H, double Fps, bool Audio)> ProbeAsync(string ffmpeg, string file, CancellationToken ct)
     {
         var (_, info) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-i", file }, TimeSpan.FromSeconds(30), ct);
         var p = await Captions.ProbeAsync(ffmpeg, file, ct) ?? throw new InvalidOperationException("That file isn't a video FFmpeg can read.");
         var fps = System.Text.RegularExpressions.Regex.Match(info, @"(\d+(?:\.\d+)?) fps");
         double f = fps.Success ? double.Parse(fps.Groups[1].Value, CultureInfo.InvariantCulture) : 30;
-        return (p.Duration, p.W, p.H, f is > 5 and < 241 ? f : 30);
+        return (p.Duration, p.W, p.H, f is > 5 and < 241 ? f : 30, info.Contains("Audio:"));
     }
 
     private static Process Start(string ffmpeg, IEnumerable<string> args)
@@ -50,7 +52,7 @@ public static class VodAnalyzer
 
     public static async Task<VodSignals> AnalyzeAsync(string ffmpeg, string video, IProgress<double>? progress, CancellationToken ct)
     {
-        var (dur, w, h, fps) = await ProbeAsync(ffmpeg, video, ct);
+        var (dur, w, h, fps, hasAudio) = await ProbeAsync(ffmpeg, video, ct);
         var side = VodSidecar.Load(video);
         bool haveWords = side is { Words.Count: > 0 };
         double audioDone = 0, videoDone = 0;
@@ -161,7 +163,7 @@ public static class VodAnalyzer
         progress?.Report(1);
         return new VodSignals
         {
-            Duration = dur, Width = w, Height = h, Fps = fps, Loud = loud, Motion = mot, Brightness = bri,
+            Duration = dur, Width = w, Height = h, Fps = fps, HasAudio = hasAudio, Loud = loud, Motion = mot, Brightness = bri,
             Words = haveWords ? side!.Words : heard, Markers = markers, Layout = side?.Layout, WordsFromMic = haveWords,
         };
     }

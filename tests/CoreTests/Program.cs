@@ -29,7 +29,8 @@ if (args.Length > 1 && args[0] == "--vod")
     Directory.CreateDirectory(vdir);
     string vff = Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg";
     string src = Path.Combine(vdir, "stream.mp4");
-    await VodTests.MakeSyntheticStreamAsync(vff, src, 360);
+    await VodTests.MakeSyntheticStreamAsync(vff, src, 360, Environment.GetEnvironmentVariable("VOD_NOSIDE") != "1",
+        Environment.GetEnvironmentVariable("VOD_NOAUDIO") != "1", Environment.GetEnvironmentVariable("VOD_1080") == "1" ? 1080 : 720);
     var sw = System.Diagnostics.Stopwatch.StartNew();
     var res = await LeapcastStudioAI.Vod.VodEditor.MakeAsync(vff, src, Path.Combine(vdir, "out"), new LeapcastStudioAI.Vod.VodEditOptions("Wizard101 Boss Rush", 90, Socials: "twitch.tv/example"),
         (w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "20" }, new Progress<LeapcastStudioAI.Vod.VodEditor.Progress>(p => Console.WriteLine($"  {p.Fraction:P0} {p.Step}")), CancellationToken.None);

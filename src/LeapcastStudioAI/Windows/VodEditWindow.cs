@@ -155,14 +155,27 @@ public sealed class VodEditWindow : Window
             var opts = new VodEditOptions(_title.Text.Trim().Length == 0 ? "Stream highlights" : _title.Text.Trim(), minutes * 60, _captions.IsChecked == true,
                 _music.IsChecked == true, _settings.RecapSocials);
             var progress = new Progress<VodEditor.Progress>(x => { _bar.Value = x.Fraction; _step.Text = x.Step; });
+            VodRenderer.LogPath = Path.Combine(StateStore.Folder, "logs", "vod-edit.log");
             var result = await Task.Run(() => VodEditor.MakeAsync(ffmpeg, recording, _settings.VodEditFolder, opts, _engine.VodVideoArgs, progress, _cts.Token));
             _lastVideo = result.Video;
             _bar.Value = 1;
-            _step.Text = $"Done in {(DateTime.Now - started):h\\:mm\\:ss}: {Path.GetFileName(result.Video)} ({result.Length:m\\:ss}), with a thumbnail and a description with chapters next to it.";
+            _step.Text = $"Done in {(DateTime.Now - started):h\\:mm\\:ss}: {Path.GetFileName(result.Video)} ({result.Length:m\\:ss}), with a thumbnail and a description with chapters next to it."
+                         + (VodRenderer.Fallbacks > 0 ? $" ({VodRenderer.Fallbacks} effect(s) were simplified; details in logs\\vod-edit.log)" : "");
             _open.Visibility = Visibility.Visible;
         }
         catch (OperationCanceledException) { _step.Text = "Stopped."; _bar.Value = 0; }
-        catch (Exception ex) { _step.Text = "Couldn't make the video: " + ex.Message; }
+        catch (Exception ex)
+        {
+            _step.Text = "Couldn't make the video: " + ex.Message + " (details in logs\\vod-edit.log)";
+            // the whole story goes to logs\vod-edit.log (the command, FFmpeg's full output, where it happened)
+            try
+            {
+                string log = Path.Combine(StateStore.Folder, "logs", "vod-edit.log");
+                Directory.CreateDirectory(Path.GetDirectoryName(log)!);
+                File.AppendAllText(log, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {recording}{Environment.NewLine}{ex}{Environment.NewLine}{VodRenderer.LastFailure}{Environment.NewLine}{Environment.NewLine}");
+            }
+            catch { }
+        }
         finally
         {
             _cts = null;

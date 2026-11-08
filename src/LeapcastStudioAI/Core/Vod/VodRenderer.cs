@@ -16,6 +16,7 @@ public static class VodRenderer
         IReadOnlyList<string> videoArgs, VodSignals signals, IProgress<(double, string)>? progress, CancellationToken ct)
     {
         Directory.CreateDirectory(outputFolder);
+        Fallbacks = 0;
         string work = Path.Combine(outputFolder, ".work-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(work);
         try
@@ -27,7 +28,13 @@ public static class VodRenderer
                 ct.ThrowIfCancellationRequested();
                 var p = plan.Pieces[i];
                 string file = Path.Combine(work, $"p{i:0000}.mkv");
-                await RunAsync(ffmpeg, PieceArgs(source, p, plan, file), ct);
+                // full effects; if FFmpeg can't (or crashes), simpler effects; at worst the plain shot: the video always gets made
+                for (int level = 0; ; level++)
+                {
+                    try { await RunAsync(ffmpeg, PieceArgs(source, p, plan, file, level), ct); break; }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception) when (level < 2) { Fallbacks++; }
+                }
                 list.AppendLine($"file '{file.Replace("\\", "/").Replace("'", "'\\''")}'");
                 progress?.Report((0.05 + 0.75 * (i + 1) / plan.Pieces.Count, $"Editing: piece {i + 1} of {plan.Pieces.Count}"));
             }
@@ -61,18 +68,31 @@ public static class VodRenderer
             }
             catch (OperationCanceledException) { throw; }
             catch { }
-            var args = new List<string> { "-y", "-v", "error", "-i", body, "-i", bed, "-filter_complex",
-                $"[0:v]eq=contrast=1.05:saturation=1.12:gamma=0.98,vignette=angle=PI/5,ass='{VerticalClip.EscapeFilter(ass)}',format=yuv420p[v];" +
-                mix + $",{norm},aresample=48000[a]",
-                "-map", "[v]", "-map", "[a]" };
-            args.AddRange(videoArgs);
-            args.AddRange(new[] { "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output });
-            await RunAsync(ffmpeg, args, ct);
+            // the full finish; if that fails: the stream's encoder swapped for x264, then without the grade
+            var x264 = new[] { "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p" };
+            var tries = new (string Video, IReadOnlyList<string> Enc)[]
+            {
+                ($"eq=contrast=1.05:saturation=1.12:gamma=0.98,vignette=angle=PI/5,ass='{VerticalClip.EscapeFilter(ass)}',format=yuv420p", videoArgs),
+                ($"eq=contrast=1.05:saturation=1.12:gamma=0.98,vignette=angle=PI/5,ass='{VerticalClip.EscapeFilter(ass)}',format=yuv420p", x264),
+                ($"ass='{VerticalClip.EscapeFilter(ass)}',format=yuv420p", x264),
+            };
+            for (int t = 0; ; t++)
+            {
+                var args = new List<string> { "-y", "-v", "error", "-i", body, "-i", bed, "-filter_complex",
+                    $"[0:v]{tries[t].Video}[v];" + mix + $",{norm},aresample=48000[a]", "-map", "[v]", "-map", "[a]" };
+                args.AddRange(tries[t].Enc);
+                args.AddRange(new[] { "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output });
+                try { await RunAsync(ffmpeg, args, ct); break; }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception) when (t + 1 < tries.Length) { Fallbacks++; }
+            }
 
             // ---- thumbnail and description
             progress?.Report((0.97, "Thumbnail and chapters"));
             string thumb = Path.ChangeExtension(output, ".jpg");
-            await Thumbnail(ffmpeg, source, plan, thumb, ct);
+            try { await Thumbnail(ffmpeg, source, plan, thumb, ct); }
+            catch (OperationCanceledException) { throw; }
+            catch { thumb = ""; } // the video is what matters
             string desc = Path.ChangeExtension(output, ".txt");
             await File.WriteAllTextAsync(desc, Description(plan), ct);
             progress?.Report((1, "Done"));
@@ -94,7 +114,11 @@ public static class VodRenderer
     // ------------------------------------------------------------------ pieces
 
     /// <summary>The ffmpeg command for one piece: trim, slow motion, face crop, punch-ins, whips, shake, letterbox, blur.</summary>
-    public static List<string> PieceArgs(string source, Piece p, EditPlan plan, string output)
+    /// <summary>How many pieces had to be made with simpler effects (logged).</summary>
+    public static int Fallbacks { get; private set; }
+
+    /// <param name="level">0 = every effect; 1 = no frame blending or moving zoom; 2 = just the shot.</param>
+    public static List<string> PieceArgs(string source, Piece p, EditPlan plan, string output, int level = 0)
     {
         int W = plan.Width, H = plan.Height, frames = plan.FramesOf(p);
         double F = plan.Fps, len = frames / F;
@@ -105,9 +129,9 @@ public static class VodRenderer
         var v = new List<string>();
         v.Add(p.Speed < 1 ? $"setpts=(PTS-STARTPTS)/{I(p.Speed)}" : "setpts=PTS-STARTPTS");
         if (p.Hold > 0) v.Add($"tpad=stop_mode=clone:stop_duration={I(p.Hold + 1)}");
-        if (p.Speed < 1) v.Add($"minterpolate=fps={I(F)}:mi_mode=blend");
+        if (p.Speed < 1 && level == 0) v.Add($"minterpolate=fps={I(F)}:mi_mode=blend");
         v.Add($"fps={I(F)}");
-        if (p.Crop is { } cam && plan.Layout is { CanvasW: > 0 } lay)
+        if (p.Crop is { } cam && plan.Layout is { CanvasW: > 0 } lay && level < 2)
         {
             // the face: the camera's spot on the picture, widened to the video's shape
             double sx = (double)W / lay.CanvasW, sy = (double)H / lay.CanvasH;
@@ -133,7 +157,7 @@ public static class VodRenderer
         bool whip = p.WhipIn || p.WhipOut;
         if (whip || p.Shake) z.Add("0.06");
         string zoom = string.Join("+", z);
-        bool moves = z.Count > 1;
+        bool moves = z.Count > 1 && level == 0;
         if (moves)
         {
             string dx = "0", dy = "0";
@@ -145,15 +169,18 @@ public static class VodRenderer
             v.Add($"scale=w='trunc({W}*({zoom})/2)*2':h='trunc({H}*({zoom})/2)*2':eval=frame:flags=bicubic");
             v.Add($"crop={W}:{H}:x='clip((iw-{W})/2+{dx},0,iw-{W})':y='clip((ih-{H})/2+{dy},0,ih-{H})'");
         }
-        if (p.WhipOut) v.Add($"avgblur=sizeX=42:sizeY=1:enable='gte(t,{I(len - 0.17)})'");
-        if (p.WhipIn) v.Add("avgblur=sizeX=42:sizeY=1:enable='lt(t,0.17)'");
-        if (p.Blur) v.Add("gblur=sigma=22,eq=brightness=-0.1:saturation=0.75");
-        if (p.Letterbox)
+        if (level < 2)
         {
-            string bar = $"ih*0.105*min(1,t/0.45)";
-            v.Add($"drawbox=x=0:y=0:w=iw:h='{bar}':color=black:t=fill,drawbox=x=0:y='ih-{bar}':w=iw:h='{bar}':color=black:t=fill");
+            if (p.WhipOut) v.Add($"avgblur=sizeX=42:sizeY=1:enable='gte(t,{I(len - 0.17)})'");
+            if (p.WhipIn) v.Add("avgblur=sizeX=42:sizeY=1:enable='lt(t,0.17)'");
+            if (p.Letterbox)
+            {
+                string bar = $"ih*0.105*min(1,t/0.45)";
+                v.Add($"drawbox=x=0:y=0:w=iw:h='{bar}':color=black:t=fill,drawbox=x=0:y='ih-{bar}':w=iw:h='{bar}':color=black:t=fill");
+            }
+            if (p.Role == "slow") v.Add("drawbox=x=0:y=0:w=iw:h=ih:color=red@0.28:t=fill:enable='lt(t,0.1)',eq=saturation=0.7:contrast=1.08");
         }
-        if (p.Role == "slow") v.Add("drawbox=x=0:y=0:w=iw:h=ih:color=red@0.28:t=fill:enable='lt(t,0.1)',eq=saturation=0.7:contrast=1.08");
+        if (p.Blur) v.Add("gblur=sigma=22,eq=brightness=-0.1:saturation=0.75");
         v.Add("format=yuv420p");
 
         string audio;
@@ -257,8 +284,10 @@ public static class VodRenderer
         if (plan.Layout is { CanvasW: > 0, Camera: { } cam } lay)
         {
             // your face, big, on the right: the reaction sells the click
-            int cx = (int)(cam.X * 1280 / lay.CanvasW), cy = (int)(cam.Y * 720 / lay.CanvasH), cw = (int)(cam.W * 1280 / lay.CanvasW), ch = (int)(cam.H * 720 / lay.CanvasH);
-            string graph = $"[0:v]{vf}[bg];[0:v]scale=1280:720,crop={Math.Max(16, cw)}:{Math.Max(16, ch)}:{cx}:{cy},scale=-2:430,eq=contrast=1.12:saturation=1.25," +
+            // the camera's spot, kept inside the picture (a layout may run it past the edge)
+            int cx = Math.Clamp((int)(cam.X * 1280 / lay.CanvasW), 0, 1264), cy = Math.Clamp((int)(cam.Y * 720 / lay.CanvasH), 0, 704);
+            int cw = Math.Clamp((int)(cam.W * 1280 / lay.CanvasW), 16, 1280 - cx), ch = Math.Clamp((int)(cam.H * 720 / lay.CanvasH), 16, 720 - cy);
+            string graph = $"[0:v]{vf}[bg];[0:v]scale=1280:720,crop={cw}:{ch}:{cx}:{cy},scale=-2:430,eq=contrast=1.12:saturation=1.25," +
                            "pad=iw+16:ih+16:8:8:color=white[face];[bg][face]overlay=x=W-w-36:y=36";
             await RunAsync(ffmpeg, new[] { "-y", "-v", "error", "-ss", at, "-i", source, "-frames:v", "1", "-filter_complex", graph, "-q:v", "2", output }, ct);
             return;
@@ -285,6 +314,12 @@ public static class VodRenderer
         return sb.ToString();
     }
 
+    /// <summary>Where every failed FFmpeg command is written (with its full output), when set.</summary>
+    public static string? LogPath { get; set; }
+
+    /// <summary>The last failed FFmpeg command and its full error output (for the log).</summary>
+    public static string? LastFailure { get; private set; }
+
     private static async Task RunAsync(string ffmpeg, IEnumerable<string> args, CancellationToken ct)
     {
         var psi = new ProcessStartInfo(ffmpeg) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
@@ -297,7 +332,13 @@ public static class VodRenderer
         if (p.ExitCode != 0)
         {
             string e = (await err).Trim();
-            throw new InvalidOperationException("FFmpeg: " + (e.Length > 400 ? e[^400..] : e));
+            LastFailure = "ffmpeg " + string.Join(' ', args.Select(a => a.Contains(' ') || a.Contains(';') ? $"\"{a}\"" : a)) + Environment.NewLine + e;
+            LastFailure = $"exit code {p.ExitCode}{Environment.NewLine}" + LastFailure;
+            if (LogPath is { } log)
+                try { File.AppendAllText(log, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {LastFailure}{Environment.NewLine}{Environment.NewLine}"); } catch { }
+            string why = e.Length > 0 ? (e.Length > 400 ? e[^400..] : e)
+                : $"FFmpeg stopped without a message (exit code {p.ExitCode}{(p.ExitCode < 0 || p.ExitCode > 255 ? ", it crashed" : "")})";
+            throw new InvalidOperationException("FFmpeg: " + why);
         }
     }
 }
