@@ -40,17 +40,6 @@ public static class Whisper
     public static string ModelPath => Environment.GetEnvironmentVariable("LEAPCAST_WHISPER_MODEL") is { Length: > 0 } m
         ? m : Path.Combine(StateStore.Folder, "models", ModelFile);
 
-    private static string? Vad()
-    {
-        var env = Environment.GetEnvironmentVariable("LEAPCAST_WHISPER_VAD");
-        if (!string.IsNullOrEmpty(env) && File.Exists(env)) return env;
-        foreach (var dir in new[] { Path.GetDirectoryName(Cli() ?? "") ?? "", AppDir })
-        {
-            var p = Path.Combine(dir, VadFile);
-            if (dir.Length > 0 && File.Exists(p)) return p;
-        }
-        return null;
-    }
 
     /// <summary>Whisper can run now (the program is installed and the model downloaded).</summary>
     public static bool Ready => Cli() is not null && File.Exists(ModelPath);
@@ -122,7 +111,8 @@ public static class Whisper
                 "-sns", "-nth", "0.6", "-dtw", "base.en", "-bs", "5", "-bo", "5" };
             // the names to expect (Khrysalis, Krokotopia, yours…), so they come out spelled right
             args.AddRange(new[] { "--prompt", Vocabulary.Prompt() });
-            if (Vad() is { } vad) args.AddRange(new[] { "--vad", "-vm", vad, "-vp", "250" });
+            // (whisper.cpp's own --vad is left off: in this build it times words as if the silences weren't there.
+            // Words Whisper "hears" in silence are dropped below instead, by the sound's own level.)
             var psi = new ProcessStartInfo(cli) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
             foreach (var a in args) psi.ArgumentList.Add(a);
             using var p = Process.Start(psi)!;
@@ -144,9 +134,49 @@ public static class Whisper
             if (p.ExitCode != 0 || !File.Exists(outBase + ".json"))
                 throw new InvalidOperationException($"Whisper failed (exit code {p.ExitCode}): " + Tail(errText.ToString()));
             progress?.Report(1);
-            return Vocabulary.Fix(Parse(await File.ReadAllTextAsync(outBase + ".json", ct)));
+            var words = Parse(await File.ReadAllTextAsync(outBase + ".json", ct));
+            words = DropSilent(words, Envelope(wav));
+            return Vocabulary.Fix(words);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>The sound level (dBFS) every 50 ms of a 16 kHz mono WAV.</summary>
+    internal static float[] Envelope(string wav)
+    {
+        var o = new List<float>();
+        using var f = File.OpenRead(wav);
+        f.Position = 44;
+        var buf = new byte[1600]; // 50 ms
+        int got;
+        while ((got = f.ReadAtLeast(buf, buf.Length, throwOnEndOfStream: false)) >= 2)
+        {
+            double sum = 0; int n = got / 2;
+            for (int i = 0; i < n; i++) { double v = BitConverter.ToInt16(buf, i * 2) / 32768.0; sum += v * v; }
+            o.Add((float)(10 * Math.Log10(sum / n + 1e-10)));
+            if (got < buf.Length) break;
+        }
+        return o.ToArray();
+    }
+
+    /// <summary>
+    /// Leaves out words said where the sound is at its quiet floor (Whisper sometimes "hears" a "thank you" in
+    /// silence): a word stays when anything around it is clearly above the recording's own background level.
+    /// </summary>
+    internal static List<VodWord> DropSilent(List<VodWord> words, float[] env)
+    {
+        if (env.Length < 20 || words.Count == 0) return words;
+        var sorted = env.OrderBy(x => x).ToArray();
+        float floor = sorted[(int)(sorted.Length * 0.1)];
+        float loudest = sorted[^1];
+        if (loudest - floor < 12) return words; // no clear quiet parts to go by
+        float gate = Math.Max(floor + 9, -60);
+        return words.Where(w =>
+        {
+            int a = Math.Max(0, (int)((w.Start - 0.15) / 0.05)), b = Math.Min(env.Length - 1, (int)((w.End + 0.15) / 0.05));
+            for (int i = a; i <= b; i++) if (env[i] > gate) return true;
+            return false;
+        }).ToList();
     }
 
     private static string Tail(string s) { s = s.Trim(); return s.Length > 400 ? s[^400..] : s; }

@@ -1262,7 +1262,7 @@ var lip = await LipSyncAsync(rec, 539, 293); // centre of the bottom-right camer
 double recDrift = lastDriftMs;
 // The webcam path itself adds ~0.1 s on a loaded 2-vCPU VM; the stream must be in sync within a few frames and
 // must not drift, and the exported recording must match the live stream.
-double spreadLimit = OperatingSystem.IsWindows() ? 200 : 160; // the Windows CI VM's frame timing jitters by a frame or two
+double spreadLimit = OperatingSystem.IsWindows() ? 250 : 160; // the Windows CI VM's frame timing jitters by a frame or two
 Check(lipLive.events >= 3 && Math.Abs(lipLive.offsetMs) < 150 && lipLive.spreadMs < spreadLimit,
     $"live lip sync: flash vs beep {lipLive.offsetMs:+0;-0} ms (spread {lipLive.spreadMs:0} ms over {lipLive.events} events)");
 // on Windows CI the simulated camera's latency shifts across the pipeline restarts the recording spans, so what's

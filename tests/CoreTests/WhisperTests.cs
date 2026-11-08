@@ -31,6 +31,12 @@ static class WhisperTests
         check(w.Zip(w.Skip(1)).All(p => p.First.End <= p.Second.Start + 1e-9 && p.First.End > p.First.Start),
             "Whisper JSON: every word ends before the next one starts");
 
+        // ---- words "heard" in silence are left out (by the sound's own level)
+        var env = Enumerable.Repeat(-75f, 200).ToArray();
+        for (int i = 40; i < 60; i++) env[i] = -22f; // speech 2.0–3.0 s
+        var kept = Whisper.DropSilent(new List<VodWord> { new("hello", 2.1, 2.5), new("thank", 7.0, 7.3), new("you", 7.3, 7.5) }, env);
+        check(kept.Count == 1 && kept[0].Text == "hello", "Whisper: words in silence (a hallucinated \"thank you\") are dropped, speech is kept");
+
         // ---- names spelled the game's way
         Vocabulary.SetUser("");
         string F(string t) => Vocabulary.FixText(t);
