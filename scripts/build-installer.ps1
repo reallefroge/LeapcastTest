@@ -124,7 +124,16 @@ if (-not $SkipFfmpeg) {
         $FfmpegZip = Join-Path $CacheDir $asset.name
         if (-not (Test-Path $FfmpegZip)) {
             Write-Host "Downloading $($asset.name) ..." -ForegroundColor Cyan
-            Invoke-WebRequest $asset.browser_download_url -OutFile $FfmpegZip -Headers @{ "User-Agent" = "leapcast-build" }
+            # GitHub's download servers sometimes time out (504): try a few times before giving up
+            for ($try = 1; $try -le 5; $try++) {
+                try { Invoke-WebRequest $asset.browser_download_url -OutFile $FfmpegZip -Headers @{ "User-Agent" = "leapcast-build" } -TimeoutSec 600; break }
+                catch {
+                    Remove-Item $FfmpegZip -ErrorAction SilentlyContinue
+                    if ($try -eq 5) { throw }
+                    Write-Host "FFmpeg download failed ($($_.Exception.Message)); retrying in $($try * 20) s..." -ForegroundColor Yellow
+                    Start-Sleep -Seconds ($try * 20)
+                }
+            }
         } else { Write-Host "Using cached $($asset.name)" }
     }
     $Extract = Join-Path $CacheDir "ffmpeg-extract"
