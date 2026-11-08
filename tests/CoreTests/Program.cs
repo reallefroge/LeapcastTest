@@ -1218,14 +1218,14 @@ if (Environment.GetEnvironmentVariable("LEAPCAST_ONLY_ADAPT") == "1")
 
 async Task SafetySection()
 {
-    Console.WriteLine("Stream safety delay: desktop audio waits 1.5 s in Leapcast, the stream follows in sync, the preview doesn't wait");
+    Console.WriteLine("Stream safety delay: desktop audio waits 2.5 s in Leapcast, the stream follows in sync, the preview doesn't wait");
     var sc = new StudioScene { Name = "safety" };
     sc.Sources.Add(new StudioSource { Name = "Game", Type = SourceTypes.Display, CaptureMethod = testCapture });
     sc.Sources.Add(new StudioSource { Name = "Cam", Type = SourceTypes.Camera, DeviceName = "x", Mirror = true, CameraDenoise = false });
     sc.Sources.Add(new StudioSource { Name = "Desktop", Type = SourceTypes.DesktopAudio });
     sc.Sources.Add(new StudioSource { Name = "Mic", Type = SourceTypes.Microphone });
     var safe = WithEncoder(settings, "libx264");
-    safe.SafetyDelay = true; safe.SafetyDelaySeconds = 1.5;
+    safe.SafetyDelay = true; safe.SafetyDelaySeconds = 2.5; // not a multiple of the 2 s beep, so a mistimed sound would show
     audio.SimulateSafety = true;
     try
     {
@@ -1241,7 +1241,7 @@ async Task SafetySection()
         var srv = RtmpServer.Start(ffmpeg, port, "s", flv);
         await engine.StartRecordingAsync();
         var probs = await engine.StartOutputAsync(o.Id);
-        Check(probs.Count == 0 && Math.Abs(engine.SafetyDelayActive - 1.5) < 1e-6, $"the stream runs with the 1.5 s safety delay ({engine.SafetyDelayActive} s){string.Concat(probs.Select(x => ": " + x))}");
+        Check(probs.Count == 0 && Math.Abs(engine.SafetyDelayActive - 2.5) < 1e-6, $"the stream runs with the 2.5 s safety delay ({engine.SafetyDelayActive} s){string.Concat(probs.Select(x => ": " + x))}");
         int f0 = frames;
         var sw = Stopwatch.StartNew();
         await Task.Delay(14000);
