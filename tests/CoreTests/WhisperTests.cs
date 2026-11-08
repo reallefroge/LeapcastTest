@@ -82,11 +82,55 @@ static class WhisperTests
         var said = line.Split(' ').Where(x => x != "chrysalis").ToArray();
         string got = string.Join(" ", heard.Select(x => x.Text.ToLowerInvariant()));
         int hits = said.Count(s => heard.Any(h => string.Equals(h.Text, s, StringComparison.OrdinalIgnoreCase)));
+        bool good = hits >= said.Length - 1 && heard.Count > 0 && Math.Abs(heard[0].Start - 2.0) < 0.6 && heard.Any(h => h.Text == "Khrysalis");
+        if (!good) await DiagnoseAsync(ffmpeg, wav2: speech, t0);
         check(hits >= said.Length - 1, $"Whisper heard the line ({hits}/{said.Length} words in {sw.ElapsedMilliseconds} ms): “{got}”");
         check(heard.Any(h => h.Text == "Khrysalis"), "Whisper + the name list write the world as Khrysalis (with a K)");
         check(heard.Count > 0 && Math.Abs(heard[0].Start - 2.0) < 0.6,
             $"Whisper places the first word where it's said (2.0 s; got {(heard.Count > 0 ? heard[0].Start : -1):0.00} s)");
         check(heard.Zip(heard.Skip(1)).All(p => p.Second.Start >= p.First.Start) && heard.Count > 0 && heard[^1].End <= 3 + speech.Length / 16000.0,
             "Whisper's word times rise and stay inside the speech");
+    }
+
+    /// <summary>When the live test fails: the same speech with each setting changed, to see which one is at fault.</summary>
+    private static async Task DiagnoseAsync(string ffmpeg, short[] wav2, DateTime t0)
+    {
+        string wav = Path.Combine(Path.GetTempPath(), $"leapcast-whisperdiag-{Guid.NewGuid():N}.wav");
+        using (var mt = new MicTrack(wav))
+        {
+            mt.Write(new short[32000], t0.AddSeconds(2));
+            mt.Write(wav2, t0.AddSeconds(2 + wav2.Length / 16000.0));
+            mt.Write(new short[16000], t0.AddSeconds(3 + wav2.Length / 16000.0));
+            mt.Finish();
+        }
+        List<string> Without(List<string> a, string flag, bool hasValue) { int i = a.IndexOf(flag); if (i >= 0) a.RemoveRange(i, hasValue ? 2 : 1); return a; }
+        var variants = new (string Name, Func<List<string>, List<string>> Hook)[]
+        {
+            ("as shipped", a => a),
+            ("no prompt", a => Without(a, "--prompt", true)),
+            ("no DTW", a => Without(a, "-dtw", true)),
+            ("no prompt, no DTW", a => Without(Without(a, "--prompt", true), "-dtw", true)),
+            ("no -sns/-nth", a => Without(Without(a, "-sns", false), "-nth", true)),
+            ("short prompt", a => { int i = a.IndexOf("--prompt"); if (i >= 0) a[i + 1] = "Khrysalis, Krokotopia, Wizard101."; return a; }),
+        };
+        foreach (var (name, hook) in variants)
+        {
+            Whisper.ArgsHook = hook;
+            try
+            {
+                var w = await Whisper.TranscribeAsync(ffmpeg, wav, null, CancellationToken.None);
+                Console.WriteLine($"    Whisper diag [{name}]: " + string.Join(" ", w.Select(x => $"{x.Text}@{x.Start:0.00}")));
+                var raw = System.Text.RegularExpressions.Regex.Matches(Whisper.LastJson ?? "", "\"text\":\\s*\"([^\"]*)\"").Select(m => m.Groups[1].Value).FirstOrDefault() ?? "";
+                Console.WriteLine($"    Whisper diag [{name}] segment text: {raw}");
+            }
+            catch (Exception ex) { Console.WriteLine($"    Whisper diag [{name}]: failed {ex.Message}"); }
+            finally { Whisper.ArgsHook = null; }
+        }
+        // the shipped run's JSON, trimmed
+        Whisper.ArgsHook = null;
+        await Whisper.TranscribeAsync(ffmpeg, wav, null, CancellationToken.None);
+        string j = Whisper.LastJson ?? "";
+        Console.WriteLine("    Whisper diag json: " + System.Text.RegularExpressions.Regex.Replace(j, "\\s+", " ")[..Math.Min(3000, j.Length)]);
+        try { File.Delete(wav); } catch { }
     }
 }

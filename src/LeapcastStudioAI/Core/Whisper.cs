@@ -42,7 +42,13 @@ public static class Whisper
 
 
     /// <summary>Whisper can run now (the program is installed and the model downloaded).</summary>
-    public static bool Ready => Cli() is not null && File.Exists(ModelPath);
+    public static bool Ready => !Off && Cli() is not null && File.Exists(ModelPath);
+    /// <summary>Tests: use the live recognizer's words instead.</summary>
+    internal static bool Off;
+    /// <summary>Tests: change whisper-cli's arguments (diagnostics).</summary>
+    internal static Func<List<string>, List<string>>? ArgsHook;
+    /// <summary>The last run's raw JSON (diagnostics).</summary>
+    internal static string? LastJson;
     public static bool Installed => Cli() is not null;
 
     private static readonly SemaphoreSlim DownloadLock = new(1, 1);
@@ -113,6 +119,7 @@ public static class Whisper
             args.AddRange(new[] { "--prompt", Vocabulary.Prompt() });
             // (whisper.cpp's own --vad is left off: in this build it times words as if the silences weren't there.
             // Words Whisper "hears" in silence are dropped below instead, by the sound's own level.)
+            if (ArgsHook is { } hook) args = hook(args);
             var psi = new ProcessStartInfo(cli) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
             foreach (var a in args) psi.ArgumentList.Add(a);
             using var p = Process.Start(psi)!;
@@ -134,7 +141,8 @@ public static class Whisper
             if (p.ExitCode != 0 || !File.Exists(outBase + ".json"))
                 throw new InvalidOperationException($"Whisper failed (exit code {p.ExitCode}): " + Tail(errText.ToString()));
             progress?.Report(1);
-            var words = Parse(await File.ReadAllTextAsync(outBase + ".json", ct));
+            LastJson = await File.ReadAllTextAsync(outBase + ".json", ct);
+            var words = Parse(LastJson);
             words = DropSilent(words, Envelope(wav));
             return Vocabulary.Fix(words);
         }

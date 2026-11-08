@@ -43,6 +43,14 @@ static class VodTests
 
     public static async Task RunAsync(string ffmpeg, string work, Action<bool, string> check)
     {
+        // the synthetic stream's "voice" is tones: the session log's words are what this test edits with
+        Whisper.Off = true;
+        try { await RunInnerAsync(ffmpeg, work, check); }
+        finally { Whisper.Off = false; }
+    }
+
+    private static async Task RunInnerAsync(string ffmpeg, string work, Action<bool, string> check)
+    {
         string dir = Path.Combine(work, "vod");
         Directory.CreateDirectory(dir);
         string src = Path.Combine(dir, "stream.mp4");
