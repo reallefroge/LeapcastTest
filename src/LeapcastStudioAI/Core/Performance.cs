@@ -83,6 +83,8 @@ public sealed class PerformanceGovernor
 
     private DateTime? _badSince, _severeSince, _healthySince, _uploadSince;
     private DateTime _lastChange = DateTime.MinValue, _lastBitrate = DateTime.MinValue;
+    /// <summary>When the rung last changed.</summary>
+    public DateTime LastChange => _lastChange;
     private readonly Dictionary<int, DateTime> _failed = new();
 
     /// <summary>Current rung of <see cref="PerfLevel.Ladder"/>.</summary>

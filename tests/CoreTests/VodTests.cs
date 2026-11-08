@@ -71,6 +71,8 @@ static class VodTests
             $"…original music ({string.Join(", ", plan.Music.Select(m => m.Mood).Distinct())}) that tape-stops at the death, {plan.Captions.Count} caption words, {plan.Sfx.Count} sound effects");
         check(plan.Duration is > 50 and < 100, $"…close to the asked length (70 s asked: {plan.Duration:0} s)");
 
+        string editLog = Path.Combine(dir, "vod-edit.log");
+        VodRenderer.LogPath = editLog;
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var res = await VodEditor.MakeAsync(ffmpeg, src, Path.Combine(dir, "out"), opts, (w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "22" }, null, CancellationToken.None);
         var probe = await Captions.ProbeAsync(ffmpeg, res.Video);
@@ -80,5 +82,18 @@ static class VodTests
         string desc = File.ReadAllText(res.Description);
         check(probe is { W: 1280, H: 720 } pr && Math.Abs(pr.Duration - res.Length.TotalSeconds) < 1.0 && File.Exists(res.Thumbnail) && desc.Contains("0:00") && i is > -17 and < -11,
             $"…renders it: {probe?.Duration:0.0} s at {probe?.W}×{probe?.H}, {i:0.0} LUFS (YouTube's -14), thumbnail and chapters written ({sw.Elapsed.TotalSeconds:0} s)");
+        string notes = File.Exists(editLog) ? File.ReadAllText(editLog) : "";
+        check(notes.Contains("watching") && notes.Contains("rendering") && notes.Contains("Done in"),
+            $"…and writes how long each step took to the edit log ({string.Join(" | ", notes.Split('\n').Where(l => l.Contains(':')).Select(l => l.Length > 20 ? l[20..].Trim() : l).Take(6))})");
+
+        // a slow pull-out (zoom from close to normal) and a push-in render at full effect, no crash, no fallback
+        var zplan = new EditPlan { Width = 1280, Height = 720, Fps = 30, Title = "zoom test" };
+        zplan.Pieces.Add(new Piece { Role = "moment", In = 20, Out = 24, Push = -0.06, At = 0 });
+        zplan.Pieces.Add(new Piece { Role = "moment", In = 30, Out = 34, Push = 0.06, At = 4 });
+        var zres = await VodRenderer.RenderAsync(ffmpeg, src, zplan, Path.Combine(dir, "zoom"), "zoom", new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "24" },
+            signals, null, CancellationToken.None);
+        var zp = await Captions.ProbeAsync(ffmpeg, zres.Video);
+        check(VodRenderer.Fallbacks == 0 && zp is { W: 1280, H: 720 } zz && Math.Abs(zz.Duration - 8) < 0.5,
+            $"…slow zoom-outs render cleanly (the crash in your edit log): {zp?.Duration:0.0} s, {VodRenderer.Fallbacks} fallback(s)");
     }
 }

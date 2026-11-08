@@ -952,6 +952,9 @@ public partial class MainWindow : Window
         int liveCount = st.Outputs.Count(o => o.State == OutputState.Live);
         LiveTagText.Text = st.Reconnecting ? "RECONNECTING" : $"LIVE  {Fmt(st.LiveFor)}  ·  {liveCount}/{st.Outputs.Count(o => o.State != OutputState.Error)}";
         RecTag.Visibility = st.Recording ? Visibility.Visible : Visibility.Collapsed;
+        // the VOD editor and other background work slow right down while you're live
+        BackgroundWork.Live = st.Live || st.Recording;
+        LogStreamHealth(st);
         double delay = _engine.SafetyDelayActive;
         SafetyTag.Visibility = delay > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (delay > 0) SafetyTagText.Text = $"🛡 {delay.ToString("0.#", CultureInfo.InvariantCulture)} s delay";
@@ -2056,6 +2059,39 @@ public partial class MainWindow : Window
     private void SettingsMenu_Click(object sender, RoutedEventArgs e) => OpenSettings((sender as FrameworkElement)?.Tag as string);
 
     private void SafetyTag_Click(object sender, MouseButtonEventArgs e) => OpenSettings("Safety");
+
+    private DateTime _healthLogged;
+    private long _healthDup, _healthDrop;
+
+    /// <summary>
+    /// While live: every 10 s, a line in logs\stream-health.log (frame rate, frames repeated or dropped, speed,
+    /// performance level, window capture rate): when a stream looks laggy, this says why.
+    /// </summary>
+    private void LogStreamHealth(EngineStatus st)
+    {
+        if (!st.Live && !st.Recording) { _healthLogged = default; return; }
+        var now = DateTime.Now;
+        if (now - _healthLogged < TimeSpan.FromSeconds(10)) return;
+        bool first = _healthLogged == default;
+        _healthLogged = now;
+        long dup = st.Duplicated - _healthDup, drop = st.Dropped - _healthDrop;
+        _healthDup = st.Duplicated; _healthDrop = st.Dropped;
+        try
+        {
+            string path = Path.Combine(StateStore.Folder, "logs", "stream-health.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var fi = new FileInfo(path);
+            if (fi.Exists && fi.Length > 4_000_000) File.Move(path, path + ".old", true);
+            var s = _state.Settings;
+            string line = first
+                ? $"{now:yyyy-MM-dd HH:mm:ss} START {st.PlanSummary} | {s.Encoder} {s.EncoderPreset} {(s.LowLatencyMode ? "low-latency" : "")} | {Environment.ProcessorCount} CPU threads | skip_frame off: {EncoderCatalog.AmfSkipFrameOption}"
+                : $"{now:HH:mm:ss} fps {st.Fps:0.0} speed {st.Speed:0.00} repeated {dup} dropped {drop} | {st.Health} | {_engine.Performance.Name} | upload {st.RecentKbps:0} kbps"
+                  + (_engine.WindowCaptureStats() is { Length: > 0 } w ? " | windows " + w : "")
+                  + (BackgroundWork.Live && VodEditWindow.Busy ? " | VOD editor running (slowed)" : "");
+            File.AppendAllText(path, line + Environment.NewLine);
+        }
+        catch { }
+    }
 
     // ------------------------------------------------------------------ chat panel + alerts
 

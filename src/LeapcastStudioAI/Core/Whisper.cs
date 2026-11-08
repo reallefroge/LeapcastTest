@@ -94,7 +94,7 @@ public static class Whisper
     /// times in seconds from the start of the file. <paramref name="progress"/> gets 0…1.
     /// </summary>
     public static async Task<List<VodWord>> TranscribeAsync(string ffmpeg, string input, IProgress<double>? progress, CancellationToken ct,
-        double from = 0, double? length = null, IReadOnlyList<VodWord>? anchors = null)
+        double from = 0, double? length = null, IReadOnlyList<VodWord>? anchors = null, bool fast = false)
     {
         string cli = Cli() ?? throw new InvalidOperationException("Whisper isn't installed.");
         if (!File.Exists(ModelPath)) throw new InvalidOperationException("The caption model hasn't been downloaded yet.");
@@ -113,8 +113,9 @@ public static class Whisper
 
             string outBase = Path.Combine(dir, "words");
             var args = new List<string> { "-m", ModelPath, "-f", wav, "-l", "en", "-ojf", "-of", outBase, "-np", "-pp",
-                "-t", Math.Clamp(Environment.ProcessorCount - 2, 2, 8).ToString(CultureInfo.InvariantCulture),
-                "-sns", "-nth", "0.6", "-bs", "5", "-bo", "5" };
+                "-t", Math.Min(8, BackgroundWork.Threads).ToString(CultureInfo.InvariantCulture),
+                // fast (the VOD editor, minutes of speech): one best guess per word instead of five side by side
+                "-sns", "-nth", "0.6", "-bs", fast ? "1" : "5", "-bo", fast ? "1" : "5" };
             // the names to expect (Khrysalis, Krokotopia, yours…), so they come out spelled right
             args.AddRange(new[] { "--prompt", Vocabulary.Prompt() });
             // (whisper.cpp's own --vad is left off: in this build it times words as if the silences weren't there.
@@ -123,7 +124,7 @@ public static class Whisper
             var psi = new ProcessStartInfo(cli) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
             foreach (var a in args) psi.ArgumentList.Add(a);
             using var p = Process.Start(psi)!;
-            try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
+            BackgroundWork.Track(p);
             var errText = new System.Text.StringBuilder();
             var reader = Task.Run(async () =>
             {

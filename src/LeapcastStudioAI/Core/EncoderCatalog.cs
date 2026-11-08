@@ -26,6 +26,9 @@ public static class EncoderCatalog
 
     /// <summary>The FFmpeg build's AMD encoder can make the keyframes it's asked for real IDR frames (FFmpeg 7.1+).</summary>
     public static bool AmfForcedIdr { get; set; } = true;
+    /// <summary>This FFmpeg's AMD encoder has the "skip_frame" switch (the driver's default can drop frames to
+    /// hold the bitrate in fast motion, which looks like a laggy stream at 60 fps): turned off when it does.</summary>
+    public static bool AmfSkipFrameOption { get; set; }
 
     /// <summary>
     /// A keyframe every GOP's worth of seconds, counted from the previous forced one (the pipeline's timestamps
@@ -95,6 +98,7 @@ public static class EncoderCatalog
                 // can only cut at keyframes (no keyframes = no replay or voice clips), so they are requested per frame.
                 a.AddRange(new[] { "-g", gop, "-force_key_frames", ForcedKeyframes(plan) });
                 if (AmfForcedIdr) a.AddRange(new[] { "-forced_idr", "1" });
+                if (AmfSkipFrameOption) a.AddRange(new[] { "-skip_frame", "0" });
                 break;
 
             default: // libx264
@@ -142,6 +146,7 @@ public static class EncoderCatalog
             {
                 var (_, help) = await RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-h", "encoder=h264_amf" }, TimeSpan.FromSeconds(10), ct);
                 AmfForcedIdr = help.Contains("forced_idr", StringComparison.Ordinal);
+                AmfSkipFrameOption = help.Contains("skip_frame", StringComparison.Ordinal);
             }
             foreach (var tier in new[] { EncoderTier.Rich, EncoderTier.Basic })
             {

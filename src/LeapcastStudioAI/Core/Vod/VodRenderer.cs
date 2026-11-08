@@ -16,28 +16,31 @@ public static class VodRenderer
         IReadOnlyList<string> videoArgs, VodSignals signals, IProgress<(double, string)>? progress, CancellationToken ct)
     {
         Directory.CreateDirectory(outputFolder);
-        Fallbacks = 0;
+        _fallbacks = 0;
         string work = Path.Combine(outputFolder, ".work-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(work);
         try
         {
             // ---- every piece with its effects, exactly its number of frames
             var list = new StringBuilder();
-            for (int i = 0; i < plan.Pieces.Count; i++)
-            {
-                ct.ThrowIfCancellationRequested();
-                var p = plan.Pieces[i];
-                string file = Path.Combine(work, $"p{i:0000}.mkv");
-                // full effects; if FFmpeg can't (or crashes), simpler effects; at worst the plain shot: the video always gets made
-                for (int level = 0; ; level++)
+            var files = Enumerable.Range(0, plan.Pieces.Count).Select(i => Path.Combine(work, $"p{i:0000}.mkv")).ToArray();
+            int done = 0;
+            // several pieces at once when you're not live (one, gently, while you are)
+            await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
+                new ParallelOptions { MaxDegreeOfParallelism = BackgroundWork.Parallel, CancellationToken = ct }, async (i, token) =>
                 {
-                    try { await RunAsync(ffmpeg, PieceArgs(source, p, plan, file, level), ct); break; }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception) when (level < 2) { Fallbacks++; }
-                }
-                list.AppendLine($"file '{file.Replace("\\", "/").Replace("'", "'\\''")}'");
-                progress?.Report((0.05 + 0.75 * (i + 1) / plan.Pieces.Count, $"Editing: piece {i + 1} of {plan.Pieces.Count}"));
-            }
+                    var p = plan.Pieces[i];
+                    // full effects; if FFmpeg can't (or crashes), simpler effects; at worst the plain shot: the video always gets made
+                    for (int level = 0; ; level++)
+                    {
+                        try { await RunAsync(ffmpeg, PieceArgs(source, p, plan, files[i], level), token); break; }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception) when (level < 2) { Interlocked.Increment(ref _fallbacks); }
+                    }
+                    int d = Interlocked.Increment(ref done);
+                    progress?.Report((0.05 + 0.75 * d / plan.Pieces.Count, $"Editing: piece {d} of {plan.Pieces.Count}"));
+                });
+            foreach (var file in files) list.AppendLine($"file '{file.Replace("\\", "/").Replace("'", "'\\''")}'");
             string listFile = Path.Combine(work, "pieces.txt");
             await File.WriteAllTextAsync(listFile, list.ToString(), ct);
             string body = Path.Combine(work, "body.mkv");
@@ -84,7 +87,7 @@ public static class VodRenderer
                 args.AddRange(new[] { "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output });
                 try { await RunAsync(ffmpeg, args, ct); break; }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception) when (t + 1 < tries.Length) { Fallbacks++; }
+                catch (Exception) when (t + 1 < tries.Length) { Interlocked.Increment(ref _fallbacks); }
             }
 
             // ---- thumbnail and description
@@ -115,7 +118,8 @@ public static class VodRenderer
 
     /// <summary>The ffmpeg command for one piece: trim, slow motion, face crop, punch-ins, whips, shake, letterbox, blur.</summary>
     /// <summary>How many pieces had to be made with simpler effects (logged).</summary>
-    public static int Fallbacks { get; private set; }
+    private static int _fallbacks;
+    public static int Fallbacks => _fallbacks;
 
     /// <param name="level">0 = every effect; 1 = no frame blending or moving zoom; 2 = just the shot.</param>
     public static List<string> PieceArgs(string source, Piece p, EditPlan plan, string output, int level = 0)
@@ -146,7 +150,10 @@ public static class VodRenderer
 
         // the zoom over time: punch-ins (eased), a slow push, room for whips and shake
         var z = new List<string> { "1" };
-        if (Math.Abs(p.Push) > 0.001) z.Add($"{I(p.Push)}*t/{I(len)}");
+        // a push in grows from 1; a pull out starts in close and eases back to 1 (never smaller than the frame:
+        // a frame smaller than its crop crashes FFmpeg)
+        if (p.Push > 0.001) z.Add($"{I(p.Push)}*t/{I(len)}");
+        else if (p.Push < -0.001) z.Add($"{I(-p.Push)}*(1-t/{I(len)})");
         foreach (var zm in p.Zooms)
         {
             double a = zm.At, b = zm.At + zm.Len, ein = 0.16, eout = 0.22;
@@ -197,6 +204,7 @@ public static class VodRenderer
         }
         string graph = "[0:v]" + string.Join(",", v) + "[v];" + audio + "[a]";
         args.AddRange(new[] { "-filter_complex", graph, "-map", "[v]", "-map", "[a]", "-frames:v", frames.ToString(CultureInfo.InvariantCulture),
+            "-threads", BackgroundWork.Threads.ToString(CultureInfo.InvariantCulture),
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15", "-g", "60", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2",
             "-t", I(len), output });
         return args;
@@ -317,6 +325,13 @@ public static class VodRenderer
         return sb.ToString();
     }
 
+    /// <summary>A line in the edit log (how long each step took, what fell back).</summary>
+    public static void Note(string line)
+    {
+        if (LogPath is not { } log) return;
+        try { Directory.CreateDirectory(Path.GetDirectoryName(log)!); File.AppendAllText(log, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {line}{Environment.NewLine}"); } catch { }
+    }
+
     /// <summary>Where every failed FFmpeg command is written (with its full output), when set.</summary>
     public static string? LogPath { get; set; }
 
@@ -328,7 +343,7 @@ public static class VodRenderer
         var psi = new ProcessStartInfo(ffmpeg) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
-        try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
+        BackgroundWork.Track(p);
         var err = p.StandardError.ReadToEndAsync(ct);
         _ = p.StandardOutput.ReadToEndAsync(ct);
         using (ct.Register(() => { try { p.Kill(true); } catch { } })) await p.WaitForExitAsync(ct);

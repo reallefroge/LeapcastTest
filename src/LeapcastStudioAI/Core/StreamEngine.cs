@@ -137,7 +137,7 @@ public sealed class StreamEngine : IDisposable
     public bool InputThreadQueueSupported { get; private set; } = true;
     /// <summary>FFmpeg 8+ "gfxcapture" (Windows.Graphics.Capture): GPU window capture that works with DirectX games.</summary>
     public bool GpuWindowCaptureSupported { get; private set; }
-    private bool _gpuDisplayFailed;
+    private bool _gpuDisplayFailed, _gpuDisplayScaleFailed;
     private string _runnerCommand = "";
 
     /// <summary>
@@ -149,6 +149,12 @@ public sealed class StreamEngine : IDisposable
     {
         if (ranFor > TimeSpan.FromSeconds(15) || producedFrames) return false;
         if (!_runnerCommand.Contains("ddagrab=", StringComparison.Ordinal) || _gpuDisplayFailed) return false;
+        // first without the GPU scaling (older drivers), then without GPU capture at all
+        if (!_gpuDisplayScaleFailed && Regex.IsMatch(_runnerCommand, "ddagrab=[^ ]*scale_d3d11"))
+        {
+            _gpuDisplayScaleFailed = true;
+            return true;
+        }
         _gpuDisplayFailed = true;
         Message?.Invoke(this, new EngineMessageEventArgs("GPU capture failed. Using compatibility capture (30 FPS).", true));
         return true;
@@ -1197,6 +1203,8 @@ public sealed class StreamEngine : IDisposable
             RenderedImages = rendered,
             MonitorBounds = _platform.MonitorBounds,
             GpuDisplayCapture = !_gpuDisplayFailed,
+            GpuDisplayScale = _windows.GpuScale && !_gpuDisplayScaleFailed,
+            DisplayFullSize = shape.Vertical || shape.Clip,
             AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
             MasterVolumeDb = Settings.MasterVolumeDb,
             WallclockOrigin = origin,
@@ -1539,7 +1547,10 @@ public sealed class StreamEngine : IDisposable
         int before = _governor.Level;
         var d = _governor.Evaluate(new PerformanceGovernor.Sample(speed, backlog, upload, DateTime.UtcNow - r.StartedUtc), DateTime.UtcNow,
             useful: level => adapt && RungEffect(level) != RungEffect(before),
-            mayStepUp: !_outputs.AnyActive && !_cache.IsRecording, // stepping up rebuilds the pipeline: never mid-stream
+            // stepping up rebuilds the pipeline: freely when nothing is live; mid-stream only to a rung with the same
+            // picture size (a brief pause, destinations stay connected: e.g. back from 30 to 60 FPS) after 5 calm minutes
+            mayStepUp: (!_outputs.AnyActive && !_cache.IsRecording)
+                       || (DateTime.UtcNow - _governor.LastChange >= TimeSpan.FromMinutes(5) && SameSizeAbove()),
             adaptBitrate: Settings.AutoAdjustBitrate && _outputs.AnyActive);
 
         // status text: the governor's view, plus which destination is in trouble
@@ -1568,6 +1579,15 @@ public sealed class StreamEngine : IDisposable
             await RestartAsync();
             PerformanceChanged?.Invoke(PerfLevel.At(_governor.Level));
         });
+    }
+
+    /// <summary>Would the next rung up keep the same picture size (so a mid-stream step up keeps destinations connected)?</summary>
+    private bool SameSizeAbove()
+    {
+        int up = Math.Max(_governor.Floor, _governor.Level - 1);
+        if (up == _governor.Level) return false;
+        var (now, then) = (PlansFor(Settings, _governor.Level).Main, PlansFor(Settings, up).Main);
+        return (now.Width, now.Height) == (then.Width, then.Height);
     }
 
     /// <summary>Raised after the governor moved to another rung (the app can show it).</summary>

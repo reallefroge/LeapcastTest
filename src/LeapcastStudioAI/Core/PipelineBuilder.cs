@@ -56,6 +56,13 @@ public sealed class PipelineRequest
     public Func<int, (int X, int Y, int W, int H)?>? MonitorBounds { get; init; }
     /// <summary>False after desktop duplication failed on this PC: display capture falls back to GDI.</summary>
     public bool GpuDisplayCapture { get; init; } = true;
+    /// <summary>
+    /// Screen capture is scaled and converted on the GPU before it's copied to the CPU (a 1920×1200 desktop is ~9 MB
+    /// a frame in BGRA; at the canvas size in NV12 it's a fraction): <see cref="DisplayFullSize"/> keeps the
+    /// screen's own size (the 9:16 canvases want the game big) and only converts.
+    /// </summary>
+    public bool GpuDisplayScale { get; init; }
+    public bool DisplayFullSize { get; init; }
     public int AudioBitrateKbps { get; init; } = 160;
     /// <summary>Master level of the mixed audio (dB; set live through "volume@master").</summary>
     public double MasterVolumeDb { get; init; }
@@ -871,8 +878,20 @@ public static class PipelineBuilder
                     return new InputSpec(a, true);
                 }
                 // Desktop Duplication: GPU capture, works with fullscreen DirectX games, very low CPU.
+                string down = "hwdownload,format=bgra";
+                if (r.GpuDisplayScale && r.MonitorBounds?.Invoke(s.MonitorIndex) is { W: > 0, H: > 0 } mon)
+                {
+                    // shrink to what the canvas can show (covering it), on the GPU, and copy NV12 (1.5 bytes a pixel, not 4)
+                    int tw = mon.W, th = mon.H;
+                    if (!r.DisplayFullSize)
+                    {
+                        double k = Math.Max((double)r.Plan.Width / mon.W, (double)r.Plan.Height / mon.H);
+                        if (k < 1) { tw = (int)Math.Ceiling(mon.W * k / 2) * 2; th = (int)Math.Ceiling(mon.H * k / 2) * 2; }
+                    }
+                    down = $"scale_d3d11=width={tw}:height={th}:format=nv12,hwdownload,format=nv12";
+                }
                 return new InputSpec(new[] { "-thread_queue_size", "512", "-f", "lavfi", "-i",
-                    $"ddagrab=output_idx={Math.Max(0, s.MonitorIndex)}:framerate={F}:draw_mouse={mouse},hwdownload,format=bgra" }, true);
+                    $"ddagrab=output_idx={Math.Max(0, s.MonitorIndex)}:framerate={F}:draw_mouse={mouse},{down}" }, true);
 
             // Windows and webcams are captured by their own reader processes (WindowCaptureBridge / CameraBridge)
             // and arrive as counted pipes; reaching here means there was nothing to capture.

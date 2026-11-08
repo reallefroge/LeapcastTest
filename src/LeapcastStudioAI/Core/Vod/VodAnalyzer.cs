@@ -47,7 +47,7 @@ public static class VodAnalyzer
         var psi = new ProcessStartInfo(ffmpeg) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in args) psi.ArgumentList.Add(a);
         var p = Process.Start(psi)!;
-        try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
+        BackgroundWork.Track(p);
         _ = p.StandardError.ReadToEndAsync();
         return p;
     }

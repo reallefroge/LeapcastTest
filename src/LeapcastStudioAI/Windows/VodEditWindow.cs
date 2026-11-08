@@ -13,6 +13,9 @@ namespace LeapcastStudioAI;
 /// </summary>
 public sealed class VodEditWindow : Window
 {
+    /// <summary>An edit is running (the stream health log notes it).</summary>
+    public static volatile bool Busy;
+
     private static Brush Res(string key) => (Brush)Application.Current.FindResource(key);
 
     private readonly StreamEngine _engine;
@@ -156,7 +159,11 @@ public sealed class VodEditWindow : Window
                 _music.IsChecked == true, _settings.RecapSocials);
             var progress = new Progress<VodEditor.Progress>(x => { _bar.Value = x.Fraction; _step.Text = x.Step; });
             VodRenderer.LogPath = Path.Combine(StateStore.Folder, "logs", "vod-edit.log");
-            var result = await Task.Run(() => VodEditor.MakeAsync(ffmpeg, recording, _settings.VodEditFolder, opts, _engine.VodVideoArgs, progress, _cts.Token));
+            if (BackgroundWork.Live) _step.Text = "You're live: editing slowly in the background so the stream stays smooth (full speed once you stop).";
+            Busy = true;
+            var result = await Task.Run(() => VodEditor.MakeAsync(ffmpeg, recording, _settings.VodEditFolder, opts, _engine.VodVideoArgs,
+                new Progress<VodEditor.Progress>(x => { ((IProgress<VodEditor.Progress>)progress).Report(BackgroundWork.Live ? x with { Step = x.Step + " (slowed while you're live)" } : x); }), _cts.Token))
+                .ContinueWith(t => { Busy = false; return t; }).Unwrap();
             _lastVideo = result.Video;
             _bar.Value = 1;
             _step.Text = $"Done in {(DateTime.Now - started):h\\:mm\\:ss}: {Path.GetFileName(result.Video)} ({result.Length:m\\:ss}), with a thumbnail and a description with chapters next to it."

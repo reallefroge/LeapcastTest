@@ -335,16 +335,28 @@ public static class VodPlanner
         }
 
         // ---------------------------------------------------------------- captions on the timeline
-        if (o.Captions)
-            foreach (var p in plan.Pieces.Where(p => p.Role is "cold" or "moment" or "face"))
-                for (int i = 0; i < words.Count; i++)
-                {
-                    var w = words[i];
-                    if (w.Start < p.In || w.Start >= p.Out) continue;
-                    double st = p.At + (w.Start - p.In), en = p.At + Math.Min(w.End, p.Out) - p.In;
-                    plan.Captions.Add(new CaptionCue(w.Text, st, Math.Max(st + 0.12, en), WordWeight(words, i) >= 1.5));
-                }
+        if (o.Captions) PlaceCaptions(plan, words);
         return plan;
+    }
+
+    /// <summary>Where captions are needed (source seconds): the pieces that keep their own sound.</summary>
+    public static IEnumerable<Piece> CaptionedPieces(EditPlan plan) => plan.Pieces.Where(p => p.Role is "cold" or "moment" or "face");
+
+    /// <summary>Lays the words said in each captioned piece onto the finished video's timeline (replacing any before).</summary>
+    public static void PlaceCaptions(EditPlan plan, IReadOnlyList<VodWord> sourceWords)
+    {
+        var t0 = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var words = Captions.Dedupe(sourceWords.Select(w => new CaptionWord(w.Text, t0.AddSeconds(w.Start), t0.AddSeconds(w.End))))
+            .Select(w => new VodWord(w.Text, (w.StartUtc - t0).TotalSeconds, (w.EndUtc - t0).TotalSeconds)).ToList();
+        plan.Captions.Clear();
+        foreach (var p in CaptionedPieces(plan))
+            for (int i = 0; i < words.Count; i++)
+            {
+                var w = words[i];
+                if (w.Start < p.In || w.Start >= p.Out) continue;
+                double st = p.At + (w.Start - p.In), en = p.At + Math.Min(w.End, p.Out) - p.In;
+                plan.Captions.Add(new CaptionCue(w.Text, st, Math.Max(st + 0.12, en), WordWeight(words, i) >= 1.5));
+            }
     }
 
     private static readonly HashSet<string> Laughs = new() { "haha", "hahaha", "ha", "lol", "lmao", "funny", "hilarious", "laughing", "hehe" };
