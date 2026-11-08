@@ -71,7 +71,7 @@ static class SafetyTests
         var speech = say("the pineapple was sitting on the kitchen table", 0); // 16 kHz
         var pcm16 = new List<short>();
         // a few seconds of quiet first: in the app the filter has been running since the stream started
-        pcm16.AddRange(new short[16000 * 4]); pcm16.AddRange(speech); pcm16.AddRange(new short[16000 * 3]);
+        pcm16.AddRange(new short[16000 * 4]); pcm16.AddRange(speech); pcm16.AddRange(new short[16000 * 4]);
         // where the words really are (the same recognizer, offline)
         double ps = -1, pe = -1, ts = -1, te = -1;
         using (var rec = new VoskApi.Recognizer(VoiceListener.SharedModel(), alternatives: 0))
@@ -94,7 +94,7 @@ static class SafetyTests
         }
         if (ps < 0 || ts < 0) { check(false, $"Slur filter (spoken): the test sentence was recognized (pineapple {ps:0.00}, table {ts:0.00})"); return; }
         // 48 kHz stereo, through the safety stage at real speed
-        var ds = new DesktopSafety(new AudioSafetyConfig(2, true, false, "pineapple", false), () => VoiceListener.SharedModel());
+        var ds = new DesktopSafety(new AudioSafetyConfig(3, true, false, "pineapple", false), () => VoiceListener.SharedModel());
         var trace = new List<string>();
         ds.Trace = t => { lock (trace) trace.Add(t); };
         int chunks = pcm16.Count / 160;
@@ -110,7 +110,7 @@ static class SafetyTests
             while (clock.Elapsed.TotalMilliseconds < (c + 1) * 10.0) await Task.Delay(1);
         }
         ds.Dispose();
-        double Level(double a, double b) { int i0 = (int)((a + 2) * 100), i1 = Math.Min(chunks - 1, (int)((b + 2) * 100)); double m = 0; for (int i = i0; i <= i1; i++) m = Math.Max(m, outRms[i]); return m; }
+        double Level(double a, double b) { int i0 = (int)((a + 3) * 100), i1 = Math.Min(chunks - 1, (int)((b + 3) * 100)); double m = 0; for (int i = i0; i <= i1; i++) m = Math.Max(m, outRms[i]); return m; }
         double inPine = Level(ps + 0.04, pe - 0.04), inTable = Level(ts, te);
         lock (trace) foreach (var t in trace.Take(30)) Console.WriteLine("    spotter " + t);
         check(ds.Muted >= 1 && inPine < 0.002 && inTable > 0.01,

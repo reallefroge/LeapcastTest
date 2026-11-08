@@ -140,7 +140,7 @@ public partial class SettingsWindow : Window
         SafetyDelayBox.IsChecked = current.SafetyDelay;
         string sec = current.SafetyDelaySeconds.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
         SafetyDelaySecondsBox.SelectedItem = SafetyDelaySecondsBox.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Content == sec)
-                                            ?? SafetyDelaySecondsBox.Items[1];
+                                            ?? SafetyDelaySecondsBox.Items[1]; // 3 s
         MuteSlursBox.IsChecked = current.MuteSlurs;
         MuteAbleistBox.IsChecked = current.MuteAbleist;
         MuteWordsBox.Text = current.MuteWords ?? "";

@@ -169,10 +169,10 @@
             <CheckBox x:Name="SafetyDelayBox" Content="Run the stream a little behind so words can be muted" Checked="SafetyChanged" Unchecked="SafetyChanged"/>
             <TextBlock Text="Delay (seconds)" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="SafetyDelaySecondsBox" Width="120" HorizontalAlignment="Left">
-              <ComboBoxItem Content="1.5"/><ComboBoxItem Content="2"/><ComboBoxItem Content="3"/><ComboBoxItem Content="4"/><ComboBoxItem Content="5"/>
+              <ComboBoxItem Content="2"/><ComboBoxItem Content="3"/><ComboBoxItem Content="4"/><ComboBoxItem Content="5"/>
             </ComboBox>
             <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
-                       Text="Desktop audio (the game, Discord) waits this long inside Leapcast, so a slur can be heard and muted before it goes out. Your stream, recordings and clips run this far behind; your preview doesn't. Off: no delay, nothing is behind."/>
+                       Text="Desktop audio (the game, Discord) waits this long inside Leapcast, so a slur can be heard and muted before it goes out (3 s is safest; 2 s works on fast PCs). Your stream, recordings and clips run this far behind; your preview doesn't. Off: no delay, nothing is behind."/>
 
             <TextBlock Text="SLUR FILTER (DESKTOP AUDIO)" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
             <CheckBox x:Name="MuteSlursBox" Content="Mute slurs said in desktop audio"/>
