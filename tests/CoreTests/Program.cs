@@ -54,6 +54,13 @@ if (args.Length > 1 && args[0] == "--music")
         LeapcastStudioAI.Vod.Dsp.WriteWav(Path.Combine(args[1], "sfx-" + k + ".wav"), LeapcastStudioAI.Vod.Sfx.Make(k, 3));
     return 0;
 }
+// quick mode: only chat + alerts
+if (args.Length > 0 && args[0] == "--chat")
+{
+    int cf = 0;
+    await ChatTests.RunAsync((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) cf++; });
+    return cf == 0 ? 0 : 1;
+}
 // quick mode: only stream safety (unit level)
 if (args.Length > 0 && args[0] == "--safety")
 {
@@ -1685,6 +1692,9 @@ await AdaptSection(light);
 
 // ---------------------------------------------------------------- show/hide live, studio mode, rebuilds stay connected
 await LiveSwitchSection(light);
+
+// ---------------------------------------------------------------- chat panel + alerts
+await ChatTests.RunAsync(Check);
 
 // ---------------------------------------------------------------- stream safety delay
 SafetyTests.Run(Check);

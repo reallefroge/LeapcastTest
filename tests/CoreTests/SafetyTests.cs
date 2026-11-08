@@ -76,8 +76,16 @@ static class SafetyTests
         using (var rec = new VoskApi.Recognizer(VoiceListener.SharedModel(), alternatives: 0))
         {
             var all = pcm16.ToArray();
-            rec.Accept(all, all.Length);
-            foreach (var w in VoskApi.Parse(rec.Final()).FirstOrDefault()?.Words ?? new List<VoskApi.Word>())
+            var heard = new List<VoskApi.Word>();
+            // fed like the app does (0.1 s at a time); a finished sentence comes back from Accept, the rest from Final
+            for (int at = 0; at < all.Length; at += 1600)
+            {
+                var chunk = all.Skip(at).Take(1600).ToArray();
+                if (rec.Accept(chunk, chunk.Length) is { } js) heard.AddRange(VoskApi.Parse(js).FirstOrDefault()?.Words ?? new List<VoskApi.Word>());
+            }
+            heard.AddRange(VoskApi.Parse(rec.Final()).FirstOrDefault()?.Words ?? new List<VoskApi.Word>());
+            Console.WriteLine("    spoken test heard: " + string.Join(" ", heard.Select(w => $"{w.Text}@{w.Start:0.00}")));
+            foreach (var w in heard)
             {
                 if (w.Text == "pineapple") { ps = w.Start; pe = w.End; }
                 if (w.Text == "table") { ts = w.Start; te = w.End; }

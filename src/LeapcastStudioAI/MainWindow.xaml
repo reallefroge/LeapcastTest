@@ -442,6 +442,9 @@
                     </Border>
                   </ScrollViewer>
               </ad:LayoutAnchorable>
+              <ad:LayoutAnchorable ContentId="Chat" Title="Chat" CanClose="False" CanHide="True">
+                  <Border x:Name="ChatHost" Margin="2"/>
+              </ad:LayoutAnchorable>
               <ad:LayoutAnchorable ContentId="Activity" Title="Activity" CanClose="False" CanHide="True">
                   <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <Border x:Name="ActivityDock" Style="{StaticResource Card}">

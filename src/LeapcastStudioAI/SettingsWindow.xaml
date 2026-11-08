@@ -190,6 +190,53 @@
           </Border>
         </ScrollViewer>
       </TabItem>
+      <TabItem Header="Chat &amp; alerts" Tag="Chat">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <Border Style="{StaticResource Card}" Margin="0,4,8,0">
+            <StackPanel>
+            <TextBlock Text="CHAT" Style="{StaticResource SectionHeader}"/>
+            <TextBlock Text="Twitch channel" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="ChatTwitchBox"/>
+            <TextBlock Text="YouTube channel (@handle or link)" Style="{StaticResource FieldLabel}"/>
+            <TextBox x:Name="ChatYouTubeBox"/>
+            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="No keys or sign-in: paste the channel and its chat shows up in the Chat panel whenever you're live (YouTube is checked every minute until the stream starts). A live video link works too."/>
+
+            <TextBlock Text="ALERTS" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
+            <WrapPanel>
+              <CheckBox x:Name="AlertFollowsBox" Content="Follows / subscribers" Margin="0,0,16,4"/>
+              <CheckBox x:Name="AlertSubsBox" Content="Subs / memberships" Margin="0,0,16,4"/>
+              <CheckBox x:Name="AlertGiftsBox" Content="Gifts" Margin="0,0,16,4"/>
+              <CheckBox x:Name="AlertRaidsBox" Content="Raids" Margin="0,0,16,4"/>
+              <CheckBox x:Name="AlertSuperChatsBox" Content="Super Chats / Stickers" Margin="0,0,16,4"/>
+              <CheckBox x:Name="AlertDonationsBox" Content="Donations" Margin="0,0,16,4"/>
+            </WrapPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+              <CheckBox x:Name="AlertBitsBox" Content="Bits, from" VerticalAlignment="Center"/>
+              <TextBox x:Name="AlertMinBitsBox" Width="70" Margin="8,0,6,0"/>
+              <TextBlock Text="bits" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+              <TextBlock Text="Each alert shows for" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
+              <ComboBox x:Name="AlertSecondsBox" Width="70" Margin="8,0,6,0">
+                <ComboBoxItem Content="4"/><ComboBoxItem Content="6"/><ComboBoxItem Content="8"/><ComboBoxItem Content="10"/>
+              </ComboBox>
+              <TextBlock Text="seconds" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
+            </StackPanel>
+            <CheckBox x:Name="AlertSoundBox" Content="Play a chime with each alert" Margin="0,8,0,0"/>
+            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="Subs, gifts, bits and raids (Twitch) and Super Chats and memberships (YouTube) come from chat. To put alerts on stream: Chat panel → ＋ → Add alerts to the scene. The chime plays on Windows' sound output, so your desktop audio carries it to the stream."/>
+
+            <TextBlock Text="STREAMLABS (OPTIONAL)" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
+            <TextBlock Text="Socket API token" Style="{StaticResource FieldLabel}"/>
+            <PasswordBox x:Name="StreamlabsTokenBox"/>
+            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="Adds what chat can't see: Twitch follows, YouTube subscribers and Streamlabs donations. streamlabs.com → Settings → API Tokens → Your Socket API Token. Kept encrypted on this PC."/>
+            <TextBlock x:Name="OverlayLinksText" Style="{StaticResource Hint}" TextWrapping="Wrap" Margin="3,12,3,0"/>
+            </StackPanel>
+          </Border>
+        </ScrollViewer>
+      </TabItem>
       <TabItem Header="Recording" Tag="Recording">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">

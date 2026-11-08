@@ -499,6 +499,33 @@ public sealed class StudioSettings
     /// <summary>Turn sudden, very loud desktop audio right down (ear-rape protection). Works with or without the delay.</summary>
     public bool LoudGuard { get; set; } = true;
 
+    // ---- chat panel + alerts
+    /// <summary>Twitch channel for the chat panel (blank: the chat-clips channel).</summary>
+    public string ChatTwitchChannel { get; set; } = "";
+    /// <summary>YouTube channel (@handle or link) or a live video link for the chat panel.</summary>
+    public string ChatYouTube { get; set; } = "";
+    /// <summary>Streamlabs Socket API token (DPAPI-protected): follows, donations, YouTube subscribers.</summary>
+    public string StreamlabsTokenProtected { get; set; } = "";
+    public bool AlertFollows { get; set; } = true;
+    public bool AlertSubs { get; set; } = true;
+    public bool AlertGifts { get; set; } = true;
+    public bool AlertBits { get; set; } = true;
+    public int AlertMinBits { get; set; } = 1;
+    public bool AlertRaids { get; set; } = true;
+    public bool AlertSuperChats { get; set; } = true;
+    public bool AlertDonations { get; set; } = true;
+    public double AlertSeconds { get; set; } = 6;
+    public bool AlertSound { get; set; } = true;
+    public double? ChatPopLeft { get; set; }
+    public double? ChatPopTop { get; set; }
+    public double ChatPopWidth { get; set; }
+    public double ChatPopHeight { get; set; }
+    public bool ChatPopPinned { get; set; } = true;
+    public double ChatPopOpacity { get; set; } = 0.85;
+
+    public AlertOptions AlertOptions() => new(AlertFollows, AlertSubs, AlertGifts, AlertBits, Math.Max(1, AlertMinBits), AlertRaids,
+        AlertSuperChats, AlertDonations, Math.Clamp(AlertSeconds, 3, 20), AlertSound);
+
     public AudioSafetyConfig SafetyConfig() => new(
         SafetyDelay ? Math.Clamp(SafetyDelaySeconds, 1, 5) : 0, MuteSlurs && SafetyDelay, MuteAbleist, MuteWords ?? "", LoudGuard);
     /// <summary>Names captions spell your way, one per line: "Khrysalis = Chrysalis, Crysalis" (Wizard101's are built in).</summary>

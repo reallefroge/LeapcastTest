@@ -341,6 +341,7 @@ public partial class MainWindow : Window
             RegisterHotkeys();
         }
         catch { /* hotkeys are a convenience */ }
+        SetupChatPanel();
         LoadPanelLayout();
         RedrawEditors();
         var ffmpeg = FfmpegLocator.Find(_state.Settings.FfmpegPath);
@@ -398,7 +399,7 @@ public partial class MainWindow : Window
     {
         Save();
         SavePanelLayout();
-        if (_closeConfirmed) { _uiTimer.Stop(); _hotkeys?.Dispose(); StopVoice(); _engine.Dispose(); return; }
+        if (_closeConfirmed) { _uiTimer.Stop(); _hotkeys?.Dispose(); StopVoice(); _chatWindow?.Close(); _chatHub.Dispose(); _engine.Dispose(); return; }
         if (_engine.Live)
         {
             var answer = MessageBox.Show(this, "You're live. End the stream on every platform and quit?", "Leapcast Studio AI",
@@ -2056,6 +2057,64 @@ public partial class MainWindow : Window
 
     private void SafetyTag_Click(object sender, MouseButtonEventArgs e) => OpenSettings("Safety");
 
+    // ------------------------------------------------------------------ chat panel + alerts
+
+    private readonly ChatHub _chatHub = new();
+    private ChatWindow? _chatWindow;
+
+    private void SetupChatPanel()
+    {
+        var view = new ChatView(_chatHub, docked: true);
+        view.PopOutRequested += OpenChatWindow;
+        view.AddAlertsRequested += () => AddOverlaySource("Alerts", _chatHub.Overlay.AlertsUrl, 800, 300, Anchors.Center);
+        view.AddChatOverlayRequested += () => AddOverlaySource("Chat overlay", _chatHub.Overlay.ChatUrl + "?fade=90", 400, 600, Anchors.BottomLeft);
+        view.SettingsRequested += () => OpenSettings("Chat");
+        ChatHost.Child = view;
+        _chatHub.AlertShown += a => Dispatcher.BeginInvoke(() =>
+        {
+            if (_chatHub.Options.Sound) AlertChime.Play();
+            Log("Alert: " + a.Headline, false);
+            _sessionLog?.Mark("alert", a.Utc, a.Headline);
+        });
+        _chatHub.Debug += m =>
+        {
+            if (m.Contains("reading") || m.Contains("connected") || m.Contains("refused")) Dispatcher.BeginInvoke(() => Log(m, m.Contains("refused")));
+        };
+        ConfigureChat();
+    }
+
+    private void ConfigureChat()
+    {
+        var s = _state.Settings;
+        _chatHub.Configure(s.ChatTwitchChannel.Length > 0 ? s.ChatTwitchChannel : s.ChatClipChannel, s.ChatYouTube,
+            SecretStore.Unprotect(s.StreamlabsTokenProtected), s.AlertOptions());
+        SettingsWindow.OverlayLinks = $"Overlay links (any Browser source): alerts {_chatHub.Overlay.AlertsUrl} · chat {_chatHub.Overlay.ChatUrl}";
+    }
+
+    private void OpenChatWindow()
+    {
+        if (_chatWindow is { IsLoaded: true }) { _chatWindow.Activate(); return; }
+        _chatWindow = new ChatWindow(_chatHub, _state.Settings);
+        _chatWindow.View.SettingsRequested += () => OpenSettings("Chat");
+        _chatWindow.Closed += (_, _) => { _chatWindow = null; Save(); };
+        _chatWindow.Show();
+    }
+
+    /// <summary>Puts an overlay (alerts / chat) in the selected scene as a Browser source.</summary>
+    private void AddOverlaySource(string name, string url, int w, int h, string anchor)
+    {
+        if (SelectedScene is null) { Status("Pick a scene first."); return; }
+        var existing = SelectedScene.Sources.FirstOrDefault(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && x.Url.StartsWith(url.Split('?')[0]));
+        if (existing is not null) { SourcesList.SelectedItem = existing; Status($"{existing.Name} is already in this scene."); return; }
+        var src = new StudioSource { Type = SourceTypes.Browser, Name = name, Url = url, BrowserWidth = w, BrowserHeight = h, BrowserFps = 30, Anchor = anchor, SizePercent = 0 };
+        SelectedScene.Sources.Add(src);
+        RefreshSourceRows();
+        SourcesList.SelectedItem = src;
+        SceneEdited();
+        RedrawEditors();
+        Status($"Added {name} to {SelectedScene.Name}. Use the Test button in the Chat panel to see it.");
+    }
+
     private async void OpenSettings(string? tab)
     {
         var window = new SettingsWindow(_state.Settings, _engine, _state.Scenes, tab) { Owner = this };
@@ -2197,6 +2256,7 @@ public partial class MainWindow : Window
     private void Save()
     {
         Vocabulary.SetUser(_state.Settings.CaptionSpellings);
+        ConfigureChat();
         try { StateStore.Save(_state); }
         catch (Exception ex) { Status("Could not save settings: " + ex.Message); }
         RegisterHotkeys();

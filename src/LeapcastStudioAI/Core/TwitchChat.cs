@@ -21,6 +21,8 @@ public sealed class TwitchChat : IDisposable
     /// <summary>Every chat message (the VOD editor uses chat activity to find moments).</summary>
     public event Action<ChatMessage>? Message;
     public event Action<string>? Debug;
+    /// <summary>Every message and event, for the chat panel / overlay (names, colours, badges, emotes, subs, bits, raids).</summary>
+    public event Action<ChatItem>? Item;
 
     public string Host { get; init; } = "irc.chat.twitch.tv";
     public int Port { get; init; } = 6697;
@@ -68,6 +70,104 @@ public sealed class TwitchChat : IDisposable
         return new ChatMessage(user, m.Groups["text"].Value.TrimEnd('\r'), Has("broadcaster"), mod, Has("vip"), now);
     }
 
+    private static Dictionary<string, string> Tags(string raw) =>
+        raw.Split(';').Select(t => t.Split('=', 2)).Where(p => p.Length == 2).GroupBy(p => p[0])
+           .ToDictionary(g => g.Key, g => Unescape(g.First()[1]));
+
+    private static string Unescape(string v)
+    {
+        if (!v.Contains('\\')) return v;
+        var sb = new StringBuilder();
+        for (int i = 0; i < v.Length; i++)
+        {
+            if (v[i] != '\\' || i + 1 >= v.Length) { sb.Append(v[i]); continue; }
+            char n = v[++i];
+            sb.Append(n switch { 's' => ' ', ':' => ';', 'r' => '\r', 'n' => '\n', _ => n });
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// A chat line as the chat panel shows it: PRIVMSG (with emotes as pictures, bits as an alert) or USERNOTICE
+    /// (sub, resub, gifted subs, raid). Null for anything else.
+    /// </summary>
+    public static ChatItem? ParseItem(string line, DateTime now)
+    {
+        var m = Regex.Match(line.TrimEnd('\r'), @"^(?:@(?<tags>\S+) )?:(?<src>\S+) (?<cmd>PRIVMSG|USERNOTICE) #\S+(?: :(?<text>.*))?$");
+        if (!m.Success) return null;
+        var tags = Tags(m.Groups["tags"].Value);
+        string T(string k) => tags.TryGetValue(k, out var v) ? v : "";
+        string login = m.Groups["src"].Value.Split('!')[0];
+        string user = T("display-name") is { Length: > 0 } dn ? dn : T("login") is { Length: > 0 } lg ? lg : login;
+        string text = m.Groups["text"].Value;
+        var badges = T("badges").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(b => b.Split('/')[0])
+            .Select(b => b switch { "founder" => "subscriber", _ => b })
+            .Where(b => b is "broadcaster" or "moderator" or "vip" or "subscriber" or "partner" or "staff").Distinct().ToList();
+        if (T("mod") == "1" && !badges.Contains("moderator")) badges.Add("moderator");
+        string? color = T("color") is { Length: 7 } c ? c : null;
+        string id = T("id") is { Length: > 0 } i ? i : Guid.NewGuid().ToString("N");
+        var parts = Emotes(text, T("emotes"));
+        AlertEvent? alert = null;
+        if (m.Groups["cmd"].Value == "PRIVMSG")
+        {
+            if (int.TryParse(T("bits"), out int bits) && bits > 0)
+                alert = new AlertEvent(ChatPlatform.Twitch, AlertKind.Bits, user, now, $"{bits} bit{(bits == 1 ? "" : "s")}", bits,
+                    Regex.Replace(text, @"(?i)\b[a-z]+\d+\b", "").Trim());
+            return new ChatItem(ChatPlatform.Twitch, id, user, color, badges, parts, now, alert);
+        }
+        int.TryParse(T("msg-param-cumulative-months"), out int months);
+        alert = T("msg-id") switch
+        {
+            "sub" => new AlertEvent(ChatPlatform.Twitch, AlertKind.Sub, user, now, Count: Math.Max(1, months), Message: text),
+            "resub" => new AlertEvent(ChatPlatform.Twitch, AlertKind.Resub, user, now, Count: months, Message: text),
+            "subgift" => new AlertEvent(ChatPlatform.Twitch, AlertKind.GiftSub, user, now, Count: 1, Message: "to " + T("msg-param-recipient-display-name")),
+            "submysterygift" => new AlertEvent(ChatPlatform.Twitch, AlertKind.GiftSub, user, now,
+                Count: int.TryParse(T("msg-param-mass-gift-count"), out int g) ? g : 1),
+            "raid" => new AlertEvent(ChatPlatform.Twitch, AlertKind.Raid, T("msg-param-displayName") is { Length: > 0 } rn ? rn : user, now,
+                Count: int.TryParse(T("msg-param-viewerCount"), out int v) ? v : 0),
+            _ => null,
+        };
+        string sys = T("system-msg");
+        if (alert is null && sys.Length == 0) return null;
+        // what Twitch says happened, then what they wrote with it
+        var shown = new List<ChatPart>();
+        if (sys.Length > 0) shown.Add(new ChatPart(sys + (text.Length > 0 ? " " : "")));
+        shown.AddRange(parts);
+        return new ChatItem(ChatPlatform.Twitch, id, user, color, badges, shown, now, alert);
+    }
+
+    /// <summary>Splits a message at its emotes ("emotes=25:0-4,12-16/1902:6-10", positions in characters).</summary>
+    public static List<ChatPart> Emotes(string text, string emotesTag)
+    {
+        var parts = new List<ChatPart>();
+        if (string.IsNullOrEmpty(emotesTag)) { if (text.Length > 0) parts.Add(new ChatPart(text)); return parts; }
+        // Twitch counts Unicode characters, not UTF-16 units
+        var chars = new List<string>();
+        foreach (var r in text.EnumerateRunes()) chars.Add(r.ToString());
+        var spans = new List<(int From, int To, string Id)>();
+        foreach (var em in emotesTag.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var kv = em.Split(':');
+            if (kv.Length != 2) continue;
+            foreach (var range in kv[1].Split(','))
+            {
+                var ab = range.Split('-');
+                if (ab.Length == 2 && int.TryParse(ab[0], out int a) && int.TryParse(ab[1], out int b) && a <= b && b < chars.Count) spans.Add((a, b, kv[0]));
+            }
+        }
+        spans.Sort((x, y) => x.From.CompareTo(y.From));
+        int at = 0;
+        foreach (var (from, to, eid) in spans)
+        {
+            if (from < at) continue;
+            if (from > at) parts.Add(new ChatPart(string.Concat(chars.Skip(at).Take(from - at))));
+            parts.Add(new ChatPart(string.Concat(chars.Skip(from).Take(to - from + 1)), $"https://static-cdn.jtvnw.net/emoticons/v2/{eid}/default/dark/2.0"));
+            at = to + 1;
+        }
+        if (at < chars.Count) parts.Add(new ChatPart(string.Concat(chars.Skip(at))));
+        return parts;
+    }
+
     public void Start(string channel, string word, ChatClipWho who)
     {
         Stop();
@@ -103,7 +203,7 @@ public sealed class TwitchChat : IDisposable
                 using var reader = new StreamReader(stream, Encoding.UTF8);
                 var writer = new StreamWriter(stream, new UTF8Encoding(false)) { NewLine = "\r\n", AutoFlush = true };
                 // anonymous, read-only: Twitch allows "justinfan" nicknames without a password
-                await writer.WriteLineAsync("CAP REQ :twitch.tv/tags");
+                await writer.WriteLineAsync("CAP REQ :twitch.tv/tags twitch.tv/commands");
                 await writer.WriteLineAsync("PASS SCHMOOPIIE");
                 await writer.WriteLineAsync($"NICK justinfan{Random.Shared.Next(10000, 99999)}");
                 await writer.WriteLineAsync($"JOIN #{Channel}");
@@ -117,6 +217,7 @@ public sealed class TwitchChat : IDisposable
                     if (line.StartsWith("PING", StringComparison.Ordinal)) { await writer.WriteLineAsync("PONG" + line[4..]); continue; }
                     if (line.Contains(" RECONNECT", StringComparison.Ordinal)) break;
                     if (Parse(line, DateTime.UtcNow) is { } any) Message?.Invoke(any);
+                    if (Item is not null && ParseItem(line, DateTime.UtcNow) is { } item) Item.Invoke(item);
                     if (Parse(line, DateTime.UtcNow) is { } msg && IsCommand(msg.Text, Word))
                     {
                         bool ok = Allowed(msg, Who);

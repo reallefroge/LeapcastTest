@@ -29,6 +29,8 @@ public partial class SettingsWindow : Window
     /// <param name="scenes">For the Hotkeys tab (scene switch and source show/hide hotkeys).</param>
     /// <param name="tab">Tab to open on: Stream, Hotkeys, Canvas, Connection, Recording or Advanced.</param>
     public const string LiveLockText = "Unable to Change while Live";
+    /// <summary>Shown under Chat &amp; alerts: the overlay links (set by the main window).</summary>
+    public static string? OverlayLinks { get; set; }
 
     private void UpdateYouTubeSignedIn(StudioSettings s)
     {
@@ -144,6 +146,16 @@ public partial class SettingsWindow : Window
         MuteWordsBox.Text = current.MuteWords ?? "";
         LoudGuardBox.IsChecked = current.LoudGuard;
         SafetyChanged(null, null);
+        ChatTwitchBox.Text = current.ChatTwitchChannel.Length > 0 ? current.ChatTwitchChannel : current.ChatClipChannel;
+        ChatYouTubeBox.Text = current.ChatYouTube;
+        StreamlabsTokenBox.Password = SecretStore.Unprotect(current.StreamlabsTokenProtected);
+        AlertFollowsBox.IsChecked = current.AlertFollows; AlertSubsBox.IsChecked = current.AlertSubs; AlertGiftsBox.IsChecked = current.AlertGifts;
+        AlertRaidsBox.IsChecked = current.AlertRaids; AlertSuperChatsBox.IsChecked = current.AlertSuperChats; AlertDonationsBox.IsChecked = current.AlertDonations;
+        AlertBitsBox.IsChecked = current.AlertBits; AlertMinBitsBox.Text = Math.Max(1, current.AlertMinBits).ToString();
+        string asec = Math.Round(current.AlertSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        AlertSecondsBox.SelectedItem = AlertSecondsBox.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Content == asec) ?? AlertSecondsBox.Items[1];
+        AlertSoundBox.IsChecked = current.AlertSound;
+        if (OverlayLinks is { } links) OverlayLinksText.Text = links;
         ClipHandleBox.Text = current.ClipHandle;
         DeathClipsBox.IsChecked = current.DeathClips;
         ChatClipsBox.IsChecked = current.ChatClips;
@@ -245,6 +257,15 @@ public partial class SettingsWindow : Window
         s.MuteAbleist = MuteAbleistBox.IsChecked == true;
         s.MuteWords = MuteWordsBox.Text.Trim();
         s.LoudGuard = LoudGuardBox.IsChecked == true;
+        s.ChatTwitchChannel = ChatTwitchBox.Text.Trim();
+        s.ChatYouTube = ChatYouTubeBox.Text.Trim();
+        s.StreamlabsTokenProtected = StreamlabsTokenBox.Password.Trim().Length > 0 ? SecretStore.Protect(StreamlabsTokenBox.Password.Trim()) : "";
+        s.AlertFollows = AlertFollowsBox.IsChecked == true; s.AlertSubs = AlertSubsBox.IsChecked == true; s.AlertGifts = AlertGiftsBox.IsChecked == true;
+        s.AlertRaids = AlertRaidsBox.IsChecked == true; s.AlertSuperChats = AlertSuperChatsBox.IsChecked == true; s.AlertDonations = AlertDonationsBox.IsChecked == true;
+        s.AlertBits = AlertBitsBox.IsChecked == true;
+        if (int.TryParse(AlertMinBitsBox.Text.Trim(), out int mb)) s.AlertMinBits = Math.Max(1, mb);
+        if (AlertSecondsBox.SelectedItem is ComboBoxItem ai && double.TryParse((string)ai.Content, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var asecs)) s.AlertSeconds = asecs;
+        s.AlertSound = AlertSoundBox.IsChecked == true;
         s.ClipHandle = ClipHandleBox.Text.Trim();
         s.DeathClips = DeathClipsBox.IsChecked == true;
         s.ChatClips = ChatClipsBox.IsChecked == true;
