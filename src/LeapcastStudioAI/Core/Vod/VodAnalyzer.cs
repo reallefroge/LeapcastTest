@@ -73,7 +73,8 @@ public static class VodAnalyzer
             VoskApi.Recognizer? rec = null;
             try
             {
-                if (!haveWords && !whisper && VoiceListener.Available(out _))
+                // (with Whisper too: its words take the recognizer's exact times)
+                if (!haveWords && VoiceListener.Available(out _))
                     rec = new VoskApi.Recognizer(VoiceListenerModel(), alternatives: 0);
             }
             catch { rec = null; }
@@ -165,7 +166,10 @@ public static class VodAnalyzer
             {
                 string? mic = side?.MicFile is { } mf ? Path.Combine(Path.GetDirectoryName(video) ?? "", mf) : null;
                 bool fromMic = mic is not null && File.Exists(mic);
-                var list = await Whisper.TranscribeAsync(ffmpeg, fromMic ? mic! : video, new Progress<double>(f => { whisperDone = f; Report(); }), ct);
+                // the live recognizer's words time Whisper's: the session log's (your mic, while recording), else this file's
+                IReadOnlyList<VodWord> anchors = haveWords ? side!.Words : (await audioTask).Item2;
+                if (fromMic && side!.MicOffset != 0) anchors = anchors.Select(w => w with { Start = w.Start - side.MicOffset, End = w.End - side.MicOffset }).ToList();
+                var list = await Whisper.TranscribeAsync(ffmpeg, fromMic ? mic! : video, new Progress<double>(f => { whisperDone = f; Report(); }), ct, anchors: anchors);
                 if (fromMic && side!.MicOffset != 0) list = list.Select(w => w with { Start = w.Start + side.MicOffset, End = w.End + side.MicOffset }).ToList();
                 if (side is { Desktop.Count: > 0 })
                 {

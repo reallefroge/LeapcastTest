@@ -800,7 +800,10 @@ public partial class MainWindow : Window
                 t.Write(pcm, from + TimeSpan.FromSeconds(pcm.Length / 16000.0));
                 t.Finish();
             }
-            var words = await Whisper.TranscribeAsync(ffmpeg, wav, null, CancellationToken.None);
+            // the live recognizer's words (exact times) time Whisper's (exact words)
+            var anchors = _transcript.Between(from, end + TimeSpan.FromSeconds(0.3))
+                .Select(w => new LeapcastStudioAI.Vod.VodWord(w.Text, (w.StartUtc - from).TotalSeconds, (w.EndUtc - from).TotalSeconds)).ToList();
+            var words = await Whisper.TranscribeAsync(ffmpeg, wav, null, CancellationToken.None, anchors: anchors);
             VoiceLog($"captions: Whisper heard {words.Count} word(s)");
             return words.Select(w => new CaptionWord(w.Text, from + TimeSpan.FromSeconds(w.Start), from + TimeSpan.FromSeconds(w.End))).ToList();
         }

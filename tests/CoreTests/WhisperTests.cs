@@ -31,11 +31,22 @@ static class WhisperTests
         check(w.Zip(w.Skip(1)).All(p => p.First.End <= p.Second.Start + 1e-9 && p.First.End > p.First.Start),
             "Whisper JSON: every word ends before the next one starts");
 
-        // ---- words "heard" in silence are left out (by the sound's own level)
-        var env = Enumerable.Repeat(-75f, 200).ToArray();
-        for (int i = 40; i < 60; i++) env[i] = -22f; // speech 2.0–3.0 s
-        var kept = Whisper.DropSilent(new List<VodWord> { new("hello", 2.1, 2.5), new("thank", 7.0, 7.3), new("you", 7.3, 7.5) }, env);
-        check(kept.Count == 1 && kept[0].Text == "hello", "Whisper: words in silence (a hallucinated \"thank you\") are dropped, speech is kept");
+        // ---- timing: the recognizer's exact times where it agrees, the voice's level between, silence dropped
+        var env = Enumerable.Repeat(-75f, 240).ToArray();
+        for (int i = 40; i < 100; i++) env[i] = -22f;  // voice 2.0–5.0 s
+        var raw = new List<(VodWord, int, double, double)>
+        {
+            (new("the", 0.0, 1.7), 0, 0, 30), (new("bottom", 2.1, 5.2), 0, 0, 30), (new("feeder", 5.2, 7.0), 0, 0, 30),
+            (new("was", 7.0, 7.5), 0, 0, 30), (new("hiding", 7.5, 9.0), 0, 0, 30),
+            (new("thank", 9.5, 9.8), 1, 9.0, 12.0), (new("you", 9.8, 10.0), 1, 9.0, 12.0),
+        };
+        var timed = Whisper.Retime(raw, null, env);
+        check(timed.Count == 5 && Math.Abs(timed[0].Start - 2.0) < 0.06 && timed[^1].End <= 5.01 && timed.Zip(timed.Skip(1)).All(p => p.First.End <= p.Second.Start + 1e-9),
+            $"Whisper timing: words spread over where the voice actually is (2–5 s), the silent \"thank you\" left out ({string.Join(" ", timed.Select(x => $"{x.Text}@{x.Start:0.00}"))})");
+        var anchored = Whisper.Retime(raw, new List<VodWord> { new("bottom", 2.40, 2.80), new("feeder", 2.85, 3.30), new("hiding", 3.9, 4.5) }, env);
+        check(anchored.Count == 5 && Math.Abs(anchored[1].Start - 2.40) < 1e-6 && Math.Abs(anchored[2].Start - 2.85) < 1e-6 && Math.Abs(anchored[4].Start - 3.9) < 1e-6
+              && anchored[0].Start >= 1.99 && anchored[0].End <= 2.40 + 1e-6 && anchored[3].Start >= 3.30 - 1e-6 && anchored[3].End <= 3.9 + 1e-6,
+            $"Whisper timing: words the live recognizer also heard take its exact times, the rest fit between ({string.Join(" ", anchored.Select(x => $"{x.Text}@{x.Start:0.00}"))})");
 
         // ---- names spelled the game's way
         Vocabulary.SetUser("");
@@ -108,10 +119,7 @@ static class WhisperTests
         {
             ("as shipped", a => a),
             ("no prompt", a => Without(a, "--prompt", true)),
-            ("no DTW", a => Without(a, "-dtw", true)),
-            ("no prompt, no DTW", a => Without(Without(a, "--prompt", true), "-dtw", true)),
             ("no -sns/-nth", a => Without(Without(a, "-sns", false), "-nth", true)),
-            ("short prompt", a => { int i = a.IndexOf("--prompt"); if (i >= 0) a[i + 1] = "Khrysalis, Krokotopia, Wizard101."; return a; }),
         };
         foreach (var (name, hook) in variants)
         {

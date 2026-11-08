@@ -94,7 +94,7 @@ public static class Whisper
     /// times in seconds from the start of the file. <paramref name="progress"/> gets 0…1.
     /// </summary>
     public static async Task<List<VodWord>> TranscribeAsync(string ffmpeg, string input, IProgress<double>? progress, CancellationToken ct,
-        double from = 0, double? length = null)
+        double from = 0, double? length = null, IReadOnlyList<VodWord>? anchors = null)
     {
         string cli = Cli() ?? throw new InvalidOperationException("Whisper isn't installed.");
         if (!File.Exists(ModelPath)) throw new InvalidOperationException("The caption model hasn't been downloaded yet.");
@@ -114,7 +114,7 @@ public static class Whisper
             string outBase = Path.Combine(dir, "words");
             var args = new List<string> { "-m", ModelPath, "-f", wav, "-l", "en", "-ojf", "-of", outBase, "-np", "-pp",
                 "-t", Math.Clamp(Environment.ProcessorCount - 2, 2, 8).ToString(CultureInfo.InvariantCulture),
-                "-sns", "-nth", "0.6", "-dtw", "base.en", "-bs", "5", "-bo", "5" };
+                "-sns", "-nth", "0.6", "-bs", "5", "-bo", "5" };
             // the names to expect (Khrysalis, Krokotopia, yours…), so they come out spelled right
             args.AddRange(new[] { "--prompt", Vocabulary.Prompt() });
             // (whisper.cpp's own --vad is left off: in this build it times words as if the silences weren't there.
@@ -142,8 +142,8 @@ public static class Whisper
                 throw new InvalidOperationException($"Whisper failed (exit code {p.ExitCode}): " + Tail(errText.ToString()));
             progress?.Report(1);
             LastJson = await File.ReadAllTextAsync(outBase + ".json", ct);
-            var words = Parse(LastJson);
-            words = DropSilent(words, Envelope(wav));
+            // Whisper's words, timed by the live recognizer's words (exact) and your voice's own level (between them)
+            var words = Retime(ParseRaw(LastJson), anchors, Envelope(wav));
             return Vocabulary.Fix(words);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
@@ -168,23 +168,159 @@ public static class Whisper
     }
 
     /// <summary>
-    /// Leaves out words said where the sound is at its quiet floor (Whisper sometimes "hears" a "thank you" in
-    /// silence): a word stays when anything around it is clearly above the recording's own background level.
+    /// Times Whisper's words. Whisper is right about WHAT was said but this build's word times can be seconds off,
+    /// so: (1) words the live recognizer (Vosk) also heard take its times, which are exact; (2) the words between
+    /// those are laid over the moments your voice is actually sounding (the level above its quiet floor), in
+    /// proportion to their length; (3) words with no sound under them at all (Whisper "hearing" a "thank you" in
+    /// silence) are left out.
     /// </summary>
-    internal static List<VodWord> DropSilent(List<VodWord> words, float[] env)
+    internal static List<VodWord> Retime(List<(VodWord Word, int Seg, double SegFrom, double SegTo)> raw,
+        IReadOnlyList<VodWord>? anchors, float[] env)
     {
-        if (env.Length < 20 || words.Count == 0) return words;
-        var sorted = env.OrderBy(x => x).ToArray();
-        float floor = sorted[(int)(sorted.Length * 0.1)];
-        float loudest = sorted[^1];
-        if (loudest - floor < 12) return words; // no clear quiet parts to go by
-        float gate = Math.Max(floor + 9, -60);
-        return words.Where(w =>
+        int n = raw.Count;
+        if (n == 0) return new();
+        const double Step = 0.05;
+        double total = env.Length * Step;
+        // the voice's level: what's clearly above the quiet floor is "sounding"
+        bool[] on = new bool[env.Length];
+        if (env.Length > 0)
         {
-            int a = Math.Max(0, (int)((w.Start - 0.15) / 0.05)), b = Math.Min(env.Length - 1, (int)((w.End + 0.15) / 0.05));
-            for (int i = a; i <= b; i++) if (env[i] > gate) return true;
-            return false;
-        }).ToList();
+            var sorted = env.OrderBy(x => x).ToArray();
+            float floor = sorted[(int)(sorted.Length * 0.1)], loudest = sorted[^1];
+            float gate = loudest - floor < 12 ? float.NegativeInfinity : Math.Max(floor + 9, -60);
+            for (int i = 0; i < env.Length; i++) on[i] = env[i] > gate;
+            // close tiny gaps between syllables (≤ 150 ms)
+            for (int i = 0; i < on.Length; i++)
+                if (!on[i])
+                {
+                    int k = i; while (k < on.Length && !on[k]) k++;
+                    if (i > 0 && k < on.Length && k - i <= 3) for (int q = i; q < k; q++) on[q] = true;
+                    i = k;
+                }
+        }
+
+        var start = new double[n]; var end = new double[n]; var known = new bool[n];
+        // (1) match Whisper's words to the recognizer's, in order, a chunk at a time (both lists are in time order)
+        if (anchors is { Count: > 0 })
+        {
+            var a = anchors.OrderBy(x => x.Start).ToList();
+            int aFrom = 0;
+            for (int c = 0; c < n; c += 60)
+            {
+                int cEnd = Math.Min(n, c + 60);
+                double lo = raw[c].Word.Start - 20, hi = raw[cEnd - 1].Word.End + 20;
+                lo = Math.Min(lo, raw[c].SegFrom - 5); hi = Math.Max(hi, raw[cEnd - 1].SegTo + 5);
+                int a0 = aFrom; while (a0 < a.Count && a[a0].Start < lo) a0++;
+                int a1 = a0; while (a1 < a.Count && a[a1].Start <= hi) a1++;
+                int m = cEnd - c, k = a1 - a0;
+                if (k == 0) continue;
+                var dp = new int[m + 1, k + 1];
+                for (int i = m - 1; i >= 0; i--)
+                    for (int j = k - 1; j >= 0; j--)
+                        dp[i, j] = Same(raw[c + i].Word.Text, a[a0 + j].Text) ? dp[i + 1, j + 1] + 1 : Math.Max(dp[i + 1, j], dp[i, j + 1]);
+                int ii = 0, jj = 0, lastJ = -1;
+                while (ii < m && jj < k)
+                {
+                    if (Same(raw[c + ii].Word.Text, a[a0 + jj].Text) && dp[ii, jj] == dp[ii + 1, jj + 1] + 1)
+                    {
+                        start[c + ii] = a[a0 + jj].Start; end[c + ii] = a[a0 + jj].End; known[c + ii] = true;
+                        lastJ = jj; ii++; jj++;
+                    }
+                    else if (dp[ii + 1, jj] >= dp[ii, jj + 1]) ii++;
+                    else jj++;
+                }
+                if (lastJ >= 0) aFrom = a0 + lastJ + 1;
+            }
+            // a lone match far from both neighbours is likely a coincidence ("the", "a"): only trust short words in a run
+            for (int i = 0; i < n; i++)
+                if (known[i] && Norm(raw[i].Word.Text).Length <= 3)
+                {
+                    bool left = i > 0 && known[i - 1], right = i + 1 < n && known[i + 1];
+                    if (!left && !right) known[i] = false;
+                }
+        }
+
+        // (2) the rest: runs of unmatched words in one sentence, laid over the sounding moments around them
+        var keep = new bool[n];
+        for (int i = 0; i < n; i++) keep[i] = known[i];
+        for (int i = 0; i < n;)
+        {
+            if (known[i]) { i++; continue; }
+            int j = i; while (j < n && !known[j] && raw[j].Seg == raw[i].Seg) j++;
+            double prevEnd = 0; for (int q = i - 1; q >= 0; q--) if (known[q]) { prevEnd = end[q]; break; }
+            double nextStart = total > 0 ? total : double.MaxValue; for (int q = j; q < n; q++) if (known[q]) { nextStart = start[q]; break; }
+            double lo = Math.Max(prevEnd, raw[i].SegFrom - 0.5), hi = Math.Min(nextStart, raw[j - 1].SegTo + 0.5);
+            if (hi - lo < 0.1) { lo = prevEnd; hi = Math.Max(prevEnd + 0.1, nextStart); }
+            // the sounding moments in the window
+            var spans = new List<(double A, double B)>();
+            if (env.Length > 0)
+            {
+                int fa = Math.Max(0, (int)(lo / Step)), fb = Math.Min(env.Length, (int)Math.Ceiling(hi / Step));
+                for (int f = fa; f < fb; f++)
+                {
+                    if (!on[f]) continue;
+                    int g = f; while (g < fb && on[g]) g++;
+                    spans.Add((Math.Max(lo, f * Step), Math.Min(hi, g * Step)));
+                    f = g;
+                }
+            }
+            else spans.Add((lo, hi));
+            double sounding = spans.Sum(x => x.B - x.A);
+            if (sounding >= 0.12)
+            {
+                double weightSum = 0;
+                var weight = new double[j - i];
+                for (int q = i; q < j; q++) { weight[q - i] = Norm(raw[q].Word.Text).Length + 1.5; weightSum += weight[q - i]; }
+                double At(double x) // x seconds into the sounding time → clock time
+                {
+                    foreach (var (A, B) in spans) { if (x <= B - A) return A + x; x -= B - A; }
+                    return spans[^1].B;
+                }
+                double acc = 0;
+                for (int q = i; q < j; q++)
+                {
+                    double w = weight[q - i] / weightSum * sounding;
+                    start[q] = At(acc + 0.001); end[q] = At(acc + w); acc += w;
+                    keep[q] = true;
+                }
+            }
+            i = j;
+        }
+
+        var o = new List<VodWord>(n);
+        for (int i = 0; i < n; i++)
+            if (keep[i]) o.Add(raw[i].Word with { Start = start[i], End = Math.Max(start[i] + 0.06, end[i]) });
+        o.Sort((x, y) => x.Start.CompareTo(y.Start));
+        for (int i = 0; i + 1 < o.Count; i++)
+            if (o[i].End > o[i + 1].Start) o[i] = o[i] with { End = Math.Max(o[i].Start + 0.04, o[i + 1].Start) };
+        return o;
+    }
+
+    private static string Norm(string w) => Regex.Replace(w.ToLowerInvariant(), @"[^a-z0-9']", "");
+
+    /// <summary>The same word, allowing a letter or two of difference in longer words (recognizers spell names differently).</summary>
+    private static bool Same(string x, string y)
+    {
+        x = Norm(x); y = Norm(y);
+        if (x.Length == 0 || y.Length == 0) return false;
+        if (x == y) return true;
+        int longer = Math.Max(x.Length, y.Length);
+        if (longer < 5) return false;
+        int allowed = longer >= 8 ? 2 : 1;
+        if (Math.Abs(x.Length - y.Length) > allowed) return false;
+        var d = new int[y.Length + 1];
+        for (int j = 0; j <= y.Length; j++) d[j] = j;
+        for (int i = 1; i <= x.Length; i++)
+        {
+            int prev = d[0]; d[0] = i;
+            for (int j = 1; j <= y.Length; j++)
+            {
+                int tmp = d[j];
+                d[j] = Math.Min(Math.Min(d[j] + 1, d[j - 1] + 1), prev + (x[i - 1] == y[j - 1] ? 0 : 1));
+                prev = tmp;
+            }
+        }
+        return d[y.Length] <= allowed;
     }
 
     private static string Tail(string s) { s = s.Trim(); return s.Length > 400 ? s[^400..] : s; }
@@ -196,11 +332,26 @@ public static class Whisper
     /// </summary>
     public static List<VodWord> Parse(string json)
     {
-        var words = new List<VodWord>();
+        var words = ParseRaw(json).Select(x => x.Word).ToList();
+        // times can run a hair out of order: keep them rising, and each word ending before the next starts
+        words.Sort((a, b) => a.Start.CompareTo(b.Start));
+        for (int i = 0; i + 1 < words.Count; i++)
+            if (words[i].End > words[i + 1].Start) words[i] = words[i] with { End = Math.Max(words[i].Start + 0.06, words[i + 1].Start) };
+        return words;
+    }
+
+    /// <summary>Words in Whisper's order with the segment (sentence window) each came from, in seconds.</summary>
+    internal static List<(VodWord Word, int Seg, double SegFrom, double SegTo)> ParseRaw(string json)
+    {
+        var words = new List<(VodWord Word, int Seg, double SegFrom, double SegTo)>();
         using var doc = JsonDocument.Parse(json);
         if (!doc.RootElement.TryGetProperty("transcription", out var segs)) return words;
+        int segIndex = -1;
         foreach (var seg in segs.EnumerateArray())
         {
+            segIndex++;
+            double segFrom = 0, segTo = 0;
+            if (seg.TryGetProperty("offsets", out var so)) { segFrom = so.GetProperty("from").GetDouble() / 1000.0; segTo = so.GetProperty("to").GetDouble() / 1000.0; }
             if (!seg.TryGetProperty("tokens", out var toks)) continue;
             string cur = "";
             double start = -1, end = -1, minP = 1;
@@ -208,7 +359,7 @@ public static class Whisper
             {
                 string w = Regex.Replace(cur.Trim(), @"^[^\w']+|[^\w'.,!?-]+$", "");
                 if (w.Length > 0 && start >= 0 && minP >= 0.15 && !Regex.IsMatch(w, @"^[\[(].*[\])]$"))
-                    words.Add(new VodWord(w.TrimEnd('.', ',', '!', '?'), start, Math.Max(start + 0.08, end)));
+                    words.Add((new VodWord(w.TrimEnd('.', ',', '!', '?'), start, Math.Max(start + 0.08, end)), segIndex, segFrom, Math.Max(segTo, segFrom)));
                 cur = ""; start = -1; end = -1; minP = 1;
             }
             bool inTag = false;
@@ -231,10 +382,6 @@ public static class Whisper
             }
             Flush();
         }
-        // DTW times can run a hair out of order: keep them rising, and each word ending before the next starts
-        words.Sort((a, b) => a.Start.CompareTo(b.Start));
-        for (int i = 0; i + 1 < words.Count; i++)
-            if (words[i].End > words[i + 1].Start) words[i] = words[i] with { End = Math.Max(words[i].Start + 0.06, words[i + 1].Start) };
         return words;
     }
 }
