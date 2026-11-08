@@ -111,8 +111,27 @@ if (-not $SkipFfmpeg) {
         Write-Host "Finding the latest FFmpeg Windows GPL build (BtbN/FFmpeg-Builds)..." -ForegroundColor Cyan
         $apiHeaders = @{ "User-Agent" = "leapcast-build" }
         if ($env:GITHUB_TOKEN) { $apiHeaders["Authorization"] = "Bearer $env:GITHUB_TOKEN" }   # avoids API rate limits on CI
-        $rel = Invoke-RestMethod "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest" -Headers $apiHeaders
-        $assets = $rel.assets
+        $assets = @()
+        for ($try = 1; $try -le 3 -and $assets.Count -eq 0; $try++) {
+            try { $assets = @((Invoke-RestMethod "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest" -Headers $apiHeaders -TimeoutSec 60).assets) }
+            catch { Write-Host "FFmpeg release lookup failed ($($_.Exception.Message)); trying again..." -ForegroundColor Yellow; Start-Sleep -Seconds ($try * 10) }
+        }
+        if ($assets.Count -eq 0 -and $env:GITHUB_REPOSITORY) {
+            # GitHub's API is down: the copy kept in this repository
+            Write-Host "Using this repository's cached FFmpeg (upstream unreachable)" -ForegroundColor Yellow
+            if (-not $env:GH_TOKEN -and $env:GITHUB_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
+            for ($try = 1; $try -le 3 -and -not $FfmpegZip; $try++) {
+                $pick = gh release view ffmpeg-cache -R $env:GITHUB_REPOSITORY --json assets -q ".assets[].name" 2>$null | Where-Object { $_ -like "*win64-gpl*.zip" } | Select-Object -First 1
+                if ($pick) {
+                    gh release download ffmpeg-cache -R $env:GITHUB_REPOSITORY -p $pick -D $CacheDir --clobber 2>&1 | Out-Host
+                    if (Test-Path (Join-Path $CacheDir $pick)) { $FfmpegZip = Join-Path $CacheDir $pick }
+                }
+                if (-not $FfmpegZip) { Start-Sleep -Seconds ($try * 15) }
+            }
+            if (-not $FfmpegZip) { throw "Couldn't get FFmpeg: GitHub is unreachable and there's no cached copy." }
+        }
+    }
+    if (-not $FfmpegZip) {
         # Prefer the stable 7.1 branch the engine was tested against, then the newest release branch, then master.
         $asset = $assets | Where-Object { $_.name -match '^ffmpeg-n7\.1.*-win64-gpl-7\.1\.zip$' } | Select-Object -First 1
         if (-not $asset) {
