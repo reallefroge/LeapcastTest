@@ -12,8 +12,7 @@ permissions:
   contents: write
 
 env:
-  WHISPER_TAG: v1.9.5
-  RELEASE_TAG: speech-whisper-v1.9.5
+  RELEASE_TAG: speech-whisper
 
 jobs:
   fetch:
@@ -25,16 +24,25 @@ jobs:
         run: |
           set -euo pipefail
           mkdir out && cd out
-          gh release view "$WHISPER_TAG" -R ggml-org/whisper.cpp --json assets -q '.assets[].name' | tee ../assets.txt
+          # the newest release that has the Windows x64 build attached
+          WHISPER_TAG=""
+          for tag in $(gh release list -R ggml-org/whisper.cpp -L 20 --json tagName -q '.[].tagName'); do
+            gh release view "$tag" -R ggml-org/whisper.cpp --json assets -q '.assets[].name' > ../assets.txt || continue
+            if grep -qx "whisper-bin-x64.zip" ../assets.txt; then WHISPER_TAG=$tag; break; fi
+          done
+          test -n "$WHISPER_TAG"
+          echo "whisper.cpp release: $WHISPER_TAG" | tee WHISPER_TAG.txt
+          cat ../assets.txt
           # the OpenBLAS build is faster on CPUs; the plain one otherwise
           if grep -qx "whisper-blas-bin-x64.zip" ../assets.txt; then zip=whisper-blas-bin-x64.zip; else zip=whisper-bin-x64.zip; fi
+          echo "build: $zip" | tee -a WHISPER_TAG.txt
           gh release download "$WHISPER_TAG" -R ggml-org/whisper.cpp -p "$zip"
           mv "$zip" whisper-bin-x64.zip
           unzip -l whisper-bin-x64.zip
           curl -fL --retry 4 -o ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
           curl -fL --retry 4 -o ggml-tiny.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
           curl -fL --retry 4 -o ggml-silero-v5.1.2.bin https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
-          sha256sum * | tee SHA256SUMS.txt
+          sha256sum whisper-bin-x64.zip ggml-*.bin | tee SHA256SUMS.txt
           ls -la
       - name: Publish as a release
         env:
@@ -42,6 +50,6 @@ jobs:
         run: |
           cd out
           gh release delete "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -y --cleanup-tag || true
-          gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Whisper $WHISPER_TAG (captions)" \
-            --notes "Official whisper.cpp $WHISPER_TAG Windows build and ggml models (Hugging Face ggerganov/whisper.cpp, ggml-org/whisper-vad). See SHA256SUMS.txt." \
-            whisper-bin-x64.zip ggml-base.en.bin ggml-tiny.en.bin ggml-silero-v5.1.2.bin SHA256SUMS.txt
+          gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Whisper (captions)" \
+            --notes "$(cat WHISPER_TAG.txt) — official whisper.cpp Windows build and ggml models (Hugging Face ggerganov/whisper.cpp, ggml-org/whisper-vad). See SHA256SUMS.txt." \
+            whisper-bin-x64.zip ggml-base.en.bin ggml-tiny.en.bin ggml-silero-v5.1.2.bin SHA256SUMS.txt WHISPER_TAG.txt
