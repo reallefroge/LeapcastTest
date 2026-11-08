@@ -124,17 +124,44 @@ if (-not $SkipFfmpeg) {
         $FfmpegZip = Join-Path $CacheDir $asset.name
         if (-not (Test-Path $FfmpegZip)) {
             Write-Host "Downloading $($asset.name) ..." -ForegroundColor Cyan
-            # GitHub's download servers sometimes time out (504): try a few times before giving up
-            for ($try = 1; $try -le 5; $try++) {
-                try { Invoke-WebRequest $asset.browser_download_url -OutFile $FfmpegZip -Headers @{ "User-Agent" = "leapcast-build" } -TimeoutSec 600; break }
-                catch {
-                    Remove-Item $FfmpegZip -ErrorAction SilentlyContinue
-                    if ($try -eq 5) { throw }
-                    Write-Host "FFmpeg download failed ($($_.Exception.Message)); retrying in $($try * 20) s..." -ForegroundColor Yellow
-                    Start-Sleep -Seconds ($try * 20)
+            # GitHub's download servers sometimes time out (504): try both download routes a few times
+            $routes = @(
+                @{ Url = $asset.browser_download_url; Headers = @{ "User-Agent" = "leapcast-build" } },
+                @{ Url = $asset.url; Headers = ($apiHeaders + @{ "Accept" = "application/octet-stream" }) }
+            )
+            $ok = $false
+            for ($try = 1; $try -le 3 -and -not $ok; $try++) {
+                foreach ($r in $routes) {
+                    try { Invoke-WebRequest $r.Url -OutFile $FfmpegZip -Headers $r.Headers -TimeoutSec 600; $ok = $true; break }
+                    catch {
+                        Remove-Item $FfmpegZip -ErrorAction SilentlyContinue
+                        Write-Host "FFmpeg download failed ($($_.Exception.Message)); trying again..." -ForegroundColor Yellow
+                        Start-Sleep -Seconds ($try * 10)
+                    }
                 }
             }
-        } else { Write-Host "Using cached $($asset.name)" }
+            $cacheTag = "ffmpeg-cache"
+            if ($ok -and $env:GITHUB_REPOSITORY) {
+                # keep a copy in this repository, so an outage upstream can't stop a build
+                if (-not $env:GH_TOKEN -and $env:GITHUB_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
+                try {
+                    $have = gh release view $cacheTag -R $env:GITHUB_REPOSITORY --json assets -q ".assets[].name" 2>$null
+                    if ($LASTEXITCODE -ne 0) { gh release create $cacheTag -R $env:GITHUB_REPOSITORY --title "FFmpeg cache (build fallback)" --notes "Copy of the FFmpeg build the installer bundles, used when the upstream download is down." --prerelease 2>&1 | Out-Host; $have = @() }
+                    if (-not ($have -contains $asset.name)) { gh release upload $cacheTag $FfmpegZip -R $env:GITHUB_REPOSITORY --clobber 2>&1 | Out-Host }
+                } catch { Write-Host "FFmpeg cache not updated: $($_.Exception.Message)" -ForegroundColor Yellow }
+            }
+            if (-not $ok -and $env:GITHUB_REPOSITORY) {
+                Write-Host "Upstream FFmpeg download is down: using this repository's cached copy" -ForegroundColor Yellow
+                if (-not $env:GH_TOKEN -and $env:GITHUB_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
+                $names = gh release view $cacheTag -R $env:GITHUB_REPOSITORY --json assets -q ".assets[].name" 2>$null
+                $pick = $names | Where-Object { $_ -like "*win64-gpl*.zip" } | Select-Object -First 1
+                if ($pick) {
+                    gh release download $cacheTag -R $env:GITHUB_REPOSITORY -p $pick -D $CacheDir --clobber 2>&1 | Out-Host
+                    $FfmpegZip = Join-Path $CacheDir $pick
+                    $ok = Test-Path $FfmpegZip
+                }
+            }
+            if (-not $ok) { throw "Couldn't download FFmpeg ($($asset.name)); GitHub's download servers may be down. Try again later." }
     }
     $Extract = Join-Path $CacheDir "ffmpeg-extract"
     if (Test-Path $Extract) { Remove-Item $Extract -Recurse -Force }
