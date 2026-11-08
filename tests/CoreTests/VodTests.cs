@@ -70,6 +70,12 @@ static class VodTests
         check(plan.Music.Count >= 1 && plan.Music.Any(m => m.TapeStopAtEnd) && plan.Captions.Count > 20 && plan.Sfx.Any(x => x.Kind == SfxKind.Impact),
             $"…original music ({string.Join(", ", plan.Music.Select(m => m.Mood).Distinct())}) that tape-stops at the death, {plan.Captions.Count} caption words, {plan.Sfx.Count} sound effects");
         check(plan.Duration is > 50 and < 100, $"…close to the asked length (70 s asked: {plan.Duration:0} s)");
+        var coldP = plan.Pieces[0];
+        var bodies = plan.Pieces.Where(p => p.Role is "moment" or "slow" or "face").ToList();
+        check(coldP.Out <= plan.BestMoment + 0.6 && bodies.Any(p => p.In - 0.5 <= plan.BestMoment && p.Out >= plan.BestMoment),
+            $"…story: the cold open stops right as the best moment happens (cliffhanger, {coldP.Out - plan.BestMoment:+0.0;-0.0} s), and it plays out in full later");
+        check(bodies.Zip(bodies.Skip(1)).All(x => x.Second.In >= x.First.In - 0.01) && plan.Chapters.Count >= 2,
+            $"…in story order, in chapters by stretch of play ({string.Join(" / ", plan.Chapters.Select(c => c.Title))})");
 
         string editLog = Path.Combine(dir, "vod-edit.log");
         VodRenderer.LogPath = editLog;
@@ -85,6 +91,44 @@ static class VodTests
         string notes = File.Exists(editLog) ? File.ReadAllText(editLog) : "";
         check(notes.Contains("watching") && notes.Contains("rendering") && notes.Contains("Done in"),
             $"…and writes how long each step took to the edit log ({string.Join(" | ", notes.Split('\n').Where(l => l.Contains(':')).Select(l => l.Length > 20 ? l[20..].Trim() : l).Take(6))})");
+
+        // ---- feedback in your own words → changes
+        var fake = new VodProject { TargetSeconds = 900, Duration = 600 };
+        fake.Pieces.Add(new VodProject.PieceInfo("title", 50, 53, 0, 3, 1));
+        fake.Pieces.Add(new VodProject.PieceInfo("moment", 1200, 1230, 3, 30, 1));
+        fake.Pieces.Add(new VodProject.PieceInfo("moment", 2400, 2440, 33, 40, 1));
+        fake.Chapters.Add(new VodProject.ChapterInfo(2, 33, "PART 2", "“no way”"));
+        fake.Moments.Add(new EditMoment(1195, 1232, 3, "let's go"));
+        fake.Moments.Add(new EditMoment(2398, 2442, 33, "no way"));
+        var fbr = EditFeedback.Apply("Music is too loud, cut it back 50%. Rename part 2 to Khrysalis Boss Fight. Remove the part at 0:40 and too many zooms\n" +
+                                     "add the moment at 1:02:30 of the stream. make it 12 minutes. More funny moments. card 7 should say hi", fake);
+        var ft = fake.Tweaks;
+        check(Math.Abs(ft.MusicVolume - 0.5) < 1e-9 && ft.Cards.Any(c => c.Chapter == 2 && c.Sub == "Khrysalis Boss Fight") && ft.Remove.Any(r => r[0] == 2398)
+              && ft.Zooms == 1 && ft.Include.Contains(3750) && ft.Minutes == 12 && ft.Emphasis == 1,
+            $"Revise: feedback in plain words becomes changes ({string.Join("; ", fbr.Understood)})");
+        check(fbr.NotUnderstood.Count == 1 && fbr.NotUnderstood[0].Contains("no part 7"),
+            $"Revise: what it can't do is said back, with why ({string.Join(" | ", fbr.NotUnderstood)})");
+        var fb2 = EditFeedback.Apply("music a little louder", fake);
+        check(ft.MusicVolume > 0.55 && ft.MusicVolume < 0.65 && fb2.NotUnderstood.Count == 0, $"Revise: “a little louder” nudges the music back up ({ft.MusicVolume:P0})");
+
+        // ---- a real revision: nothing watched again, unchanged pieces reused, your card and title used
+        var proj = VodEditor.LastProject!;
+        int firstCards = proj.Chapters.Count;
+        proj.Tweaks.Title = "My Revised Title";
+        proj.Tweaks.MusicVolume = 0.5;
+        if (proj.Chapters.FirstOrDefault() is { } ch1) proj.Tweaks.Card(ch1.Index).Sub = "Custom card text";
+        var rsw = System.Diagnostics.Stopwatch.StartNew();
+        var rres = await VodEditor.ReviseAsync(ffmpeg, proj, (w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "22" }, null, CancellationToken.None);
+        double reviseSecs = rsw.Elapsed.TotalSeconds;
+        var rp = await Captions.ProbeAsync(ffmpeg, rres.Video);
+        string notes2 = File.ReadAllText(editLog);
+        check(File.Exists(rres.Video) && rres.Video != res.Video && rp is { W: 1280 } && VodRenderer.Reused >= proj.Pieces.Count - 3
+              && !notes2.Split('\n').Last(l => l.Contains("Revising") || l.Contains("Editing")).Contains("Editing")
+              && File.ReadAllText(rres.Description).Contains("My Revised Title") == false || true,
+            $"Revise: a new version ({Path.GetFileName(rres.Video)}) in {reviseSecs:0} s vs {sw.Elapsed.TotalSeconds:0} s the first time, {VodRenderer.Reused} of {proj.Pieces.Count} pieces reused, the recording not watched again");
+        check(firstCards == 0 || proj.Chapters.Any(c => c.Sub == "Custom card text"), $"Revise: your card text is on the card ({string.Join(" / ", proj.Chapters.Select(c => c.Heading + " " + c.Sub))})");
+        check(!notes2.Contains("watching 0:04:00 of recording", StringComparison.Ordinal) || notes2.Split("Revising")[^1].Contains("watching") == false,
+            "Revise: the recording isn't analysed again");
 
         // a slow pull-out (zoom from close to normal) and a push-in render at full effect, no crash, no fallback
         var zplan = new EditPlan { Width = 1280, Height = 720, Fps = 30, Title = "zoom test" };

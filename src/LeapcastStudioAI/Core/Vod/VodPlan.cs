@@ -47,6 +47,11 @@ public sealed class EditPlan
     public List<TextCue> Texts { get; } = new();
     public List<CaptionCue> Captions { get; } = new();
     public List<(double At, string Title)> Chapters { get; } = new();
+    /// <summary>The stretches of the recording in the edit (for the review panel).</summary>
+    public List<EditMoment> Moments { get; } = new();
+    /// <summary>Music and sound-effect levels (1 = as made).</summary>
+    public double MusicVolume { get; set; } = 1;
+    public double SfxVolume { get; set; } = 1;
     /// <summary>The best moment (source seconds): the thumbnail's frame.</summary>
     public double BestMoment { get; set; }
     public ClipLayout? Layout { get; init; }

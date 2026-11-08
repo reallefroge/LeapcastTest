@@ -316,7 +316,31 @@ public static class Whisper
         o.Sort((x, y) => x.Start.CompareTo(y.Start));
         for (int i = 0; i + 1 < o.Count; i++)
             if (o[i].End > o[i + 1].Start) o[i] = o[i] with { End = Math.Max(o[i].Start + 0.04, o[i + 1].Start) };
+        // (3) a name the recognizer got where Whisper wrote a lookalike ("chrysalis" heard, "Christmas" written):
+        // the name, which is what you said in a Wizard101 stream
+        if (anchors is { Count: > 0 })
+            for (int i = 0; i < o.Count; i++)
+            {
+                if (Vocabulary.NameOf(o[i].Text) is not null) continue;
+                foreach (var an in anchors)
+                {
+                    if (o[i].Start > an.End + 0.35 || o[i].End < an.Start - 0.35) continue;
+                    if (Vocabulary.NameOf(an.Text) is not { } name || !SoundsAlike(o[i].Text, an.Text)) continue;
+                    string tail = Regex.Match(o[i].Text, @"[^\w']+$").Value;
+                    o[i] = o[i] with { Text = name + tail };
+                    break;
+                }
+            }
         return o;
+    }
+
+    /// <summary>Two words that start with the same sounds and are about as long (Christmas / chrysalis, Crown / Krok…).</summary>
+    internal static bool SoundsAlike(string a, string b)
+    {
+        static string K(string w) => Norm(w).Replace("ch", "k").Replace("kh", "k").Replace("ph", "f").Replace('c', 'k').Replace('q', 'k').Replace('y', 'i');
+        string x = K(a), y = K(b);
+        if (x.Length < 3 || y.Length < 3 || x == y) return x == y;
+        return x[..2] == y[..2] && Math.Abs(x.Length - y.Length) <= 4;
     }
 
     private static string Norm(string w) => Regex.Replace(w.ToLowerInvariant(), @"[^a-z0-9']", "");

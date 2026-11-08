@@ -13,7 +13,7 @@ public static class VodRenderer
 
     /// <param name="videoArgs">The final encode's video settings (the stream's encoder); intermediates use x264.</param>
     public static async Task<Result> RenderAsync(string ffmpeg, string source, EditPlan plan, string outputFolder, string baseName,
-        IReadOnlyList<string> videoArgs, VodSignals signals, IProgress<(double, string)>? progress, CancellationToken ct)
+        IReadOnlyList<string> videoArgs, VodSignals signals, IProgress<(double, string)>? progress, CancellationToken ct, string? pieceCache = null)
     {
         Directory.CreateDirectory(outputFolder);
         _fallbacks = 0;
@@ -23,23 +23,36 @@ public static class VodRenderer
         {
             // ---- every piece with its effects, exactly its number of frames
             var list = new StringBuilder();
-            var files = Enumerable.Range(0, plan.Pieces.Count).Select(i => Path.Combine(work, $"p{i:0000}.mkv")).ToArray();
+            // pieces are kept between revisions (named after exactly how they're made): an unchanged one isn't made again
+            if (pieceCache is not null) Directory.CreateDirectory(pieceCache);
+            var files = Enumerable.Range(0, plan.Pieces.Count).Select(i => pieceCache is null ? Path.Combine(work, $"p{i:0000}.mkv")
+                : Path.Combine(pieceCache, "p-" + PieceKey(source, plan.Pieces[i], plan) + ".mkv")).ToArray();
+            int reused = 0;
             int done = 0;
             // several pieces at once when you're not live (one, gently, while you are)
             await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
                 new ParallelOptions { MaxDegreeOfParallelism = BackgroundWork.Parallel, CancellationToken = ct }, async (i, token) =>
                 {
                     var p = plan.Pieces[i];
+                    if (pieceCache is not null && File.Exists(files[i]) && new FileInfo(files[i]).Length > 0)
+                    {
+                        Interlocked.Increment(ref reused);
+                        int dd = Interlocked.Increment(ref done);
+                        progress?.Report((0.05 + 0.75 * dd / plan.Pieces.Count, $"Editing: piece {dd} of {plan.Pieces.Count} (unchanged)"));
+                        return;
+                    }
+                    string partial = files[i] + ".part.mkv";
                     // full effects; if FFmpeg can't (or crashes), simpler effects; at worst the plain shot: the video always gets made
                     for (int level = 0; ; level++)
                     {
-                        try { await RunAsync(ffmpeg, PieceArgs(source, p, plan, files[i], level), token); break; }
+                        try { await RunAsync(ffmpeg, PieceArgs(source, p, plan, partial, level), token); File.Move(partial, files[i], true); break; }
                         catch (OperationCanceledException) { throw; }
                         catch (Exception) when (level < 2) { Interlocked.Increment(ref _fallbacks); }
                     }
                     int d = Interlocked.Increment(ref done);
                     progress?.Report((0.05 + 0.75 * d / plan.Pieces.Count, $"Editing: piece {d} of {plan.Pieces.Count}"));
                 });
+            Reused = reused;
             foreach (var file in files) list.AppendLine($"file '{file.Replace("\\", "/").Replace("'", "'\\''")}'");
             string listFile = Path.Combine(work, "pieces.txt");
             await File.WriteAllTextAsync(listFile, list.ToString(), ct);
@@ -239,6 +252,7 @@ public static class VodRenderer
             if (span.TapeStopAtEnd) Sfx.TapeStop(music, Dsp.Frames(span.To - 0.6), 0.6);
         }
 
+        // (MusicLevel: everything below, halved again on request: the music is a backdrop, not the show)
         // the music serves the story: a quiet bed under your voice (≈ -22 dB), almost gone once you've been talking a
         // while, a little more under game sound, and only up front on its own (title, end card)
         var spoken = new bool[(int)(dur * 20) + 1];
@@ -263,8 +277,8 @@ public static class VodRenderer
             for (int k = 0; k < step && i + k < music.Length; k++)
             {
                 gain += (target - gain) * coef / step * 4;
-                music.L[i + k] *= (float)gain;
-                music.R[i + k] *= (float)gain;
+                music.L[i + k] *= (float)(gain * MusicLevel * plan.MusicVolume);
+                music.R[i + k] *= (float)(gain * MusicLevel * plan.MusicVolume);
             }
         }
         bed.Mix(music, 0);
@@ -272,7 +286,8 @@ public static class VodRenderer
         foreach (var cue in plan.Sfx)
         {
             var fx = Sfx.Make(cue.Kind, seed++);
-            bed.Mix(fx, Dsp.Frames(cue.At), cue.Gain * 0.75f); // accents, not punches
+            if (plan.SfxVolume <= 0.01) continue;
+            bed.Mix(fx, Dsp.Frames(cue.At), cue.Gain * 0.75f * (float)plan.SfxVolume); // accents, not punches
         }
         return bed;
     }
@@ -324,6 +339,22 @@ public static class VodRenderer
         sb.AppendLine("Edited with Leapcast Studio AI. Music: original, generated for this video (no copyright).");
         return sb.ToString();
     }
+
+    /// <summary>The music's overall level (0.5 = half of the original mix: about −6 dB everywhere).</summary>
+    public const double MusicLevel = 0.5;
+
+    /// <summary>A name for a piece made exactly this way (source, timing, every effect).</summary>
+    private static string PieceKey(string source, Piece p, EditPlan plan)
+    {
+        var args = PieceArgs(source, p, plan, "OUT", 0).ToList();
+        int th = args.IndexOf("-threads"); // how many threads made it doesn't change the picture
+        if (th >= 0) args.RemoveRange(th, 2);
+        string recipe = string.Join("\u0001", args) + $"|{new FileInfo(source).Length}";
+        return Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(Encoding.UTF8.GetBytes(recipe)))[..20].ToLowerInvariant();
+    }
+
+    /// <summary>Pieces reused from the last render (a revision).</summary>
+    public static int Reused { get; private set; }
 
     /// <summary>A line in the edit log (how long each step took, what fell back).</summary>
     public static void Note(string line)

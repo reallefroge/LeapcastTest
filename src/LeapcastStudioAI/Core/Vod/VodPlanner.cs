@@ -33,8 +33,10 @@ public static class VodPlanner
         return best;
     }
 
-    public static EditPlan Plan(VodSignals s, VodEditOptions o)
+    public static EditPlan Plan(VodSignals s, VodEditOptions o, EditTweaks? tw = null)
     {
+        tw ??= new EditTweaks();
+        bool Removed(double a, double b) => tw.Remove.Any(r => a < r[1] && b > r[0]);
         int n = Math.Max(1, (int)Math.Ceiling(s.Duration / Bin));
         var t0 = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var words = Captions.Dedupe(s.Words.Select(w => new CaptionWord(w.Text, t0.AddSeconds(w.Start), t0.AddSeconds(w.End))))
@@ -87,53 +89,190 @@ public static class VodPlanner
         for (int b = 0; b < n; b++)
         {
             double lz = Math.Max(0, (loud[b] - medLoud) / 6.0);
-            raw[b] = 1.0 * speech[b] + 1.3 * Math.Min(3, lz) + 2.2 * Math.Min(3, excite[b]) + marker[b]
-                     + 0.8 * Math.Max(0, (chat[b] - chatMean) / chatSd) + 0.7 * Math.Min(1, motion[b] * 6)
-                     - (still[b] ? 3 : 0) - (speech[b] == 0 && motion[b] < 0.02 ? 1.2 : 0);
+            // what you asked for more of: the funny moments (talk, laughs) or the action (loud, moving)
+            double talkW = tw.Emphasis > 0 ? 1.5 : tw.Emphasis < 0 ? 0.7 : 1, actW = tw.Emphasis < 0 ? 1.6 : tw.Emphasis > 0 ? 0.7 : 1;
+            raw[b] = talkW * (1.0 * speech[b] + 2.2 * Math.Min(3, excite[b])) + actW * (1.3 * Math.Min(3, lz) + 0.7 * Math.Min(1, motion[b] * 6)) + marker[b]
+                     + 0.8 * Math.Max(0, (chat[b] - chatMean) / chatSd)
+                     - (still[b] ? 3 : 0) - (speech[b] == 0 && motion[b] < 0.02 ? 1.2 : 0)
+                     - (Removed(b * Bin, b * Bin + Bin) ? 50 : 0);
         }
         var smooth = MovingAverage(raw, 12);
 
-        // ---------------------------------------------------------------- moments around the peaks
-        var peaks = new List<int>();
-        int sep = (int)(25 / Bin);
-        for (int b = 0; b < n; b++)
+        // ---------------------------------------------------------------- episodes: the stream's own scenes
+        // A loading screen (a zone change in Wizard101) or a long lull ends one stretch of play and starts the next:
+        // each is a little story of its own (going in, the build-up, the big moment, the reaction).
+        var episodes = new List<(int A, int B)>();
         {
-            bool top = true;
-            for (int k = Math.Max(0, b - sep); k <= Math.Min(n - 1, b + sep) && top; k++) if (smooth[k] > smooth[b] || smooth[k] == smooth[b] && k < b) top = false;
-            if (top && !still[b]) peaks.Add(b);
+            int start = 0, lull = 0;
+            for (int b = 0; b < n; b++)
+            {
+                bool quiet = still[b] || (speech[b] == 0 && motion[b] < 0.02 && excite[b] == 0 && marker[b] == 0);
+                lull = quiet ? lull + 1 : 0;
+                if ((still[b] && lull >= 8) || lull >= 40)
+                {
+                    int end = b - lull + 1;
+                    if (end - start >= 20) episodes.Add((start, end));
+                    start = b + 1;
+                }
+            }
+            if (n - start >= 20) episodes.Add((start, n));
+            if (episodes.Count == 0) episodes.Add((0, n));
+            // very long ones (a 20-minute dungeon) split at their quietest point, so each part is one push
+            for (int e = 0; e < episodes.Count; e++)
+            {
+                var (a, b) = episodes[e];
+                if ((b - a) * Bin <= 360) continue;
+                int lo = a + (int)(90 / Bin), hi = b - (int)(90 / Bin), cut = lo;
+                for (int k = lo; k < hi; k++) if (smooth[k] < smooth[cut]) cut = k;
+                episodes[e] = (a, cut); episodes.Insert(e + 1, (cut, b)); e--;
+            }
         }
-        // also every sizeable local high, for long or calm videos
-        for (int b = 1; b < n - 1; b++)
-            if (smooth[b] >= smooth[b - 1] && smooth[b] > smooth[b + 1] && !still[b] && !peaks.Contains(b) && peaks.All(p => Math.Abs(p - b) > 12 / Bin)) peaks.Add(b);
-        peaks = peaks.OrderByDescending(b => smooth[b]).ToList();
+        int EpisodeOf(double t) { int b = (int)(t / Bin); int e = episodes.FindIndex(x => b >= x.A && b < x.B); return e < 0 ? 0 : e; }
 
-        double overhead = 8 + 3 + 10; // cold open, title, end card
-        double budget = Math.Max(20, target - overhead);
-        var chosen = new List<(double From, double To, double Peak, double Value)>();
-        double have = 0;
-        foreach (var pb in peaks)
+        // how much each is worth: its big moment, plus what happened in it (deaths, clips you saved, hype)
+        var epPeak = new int[episodes.Count];
+        var epValue = new double[episodes.Count];
+        var epFun = new double[episodes.Count];
+        for (int e = 0; e < episodes.Count; e++)
         {
-            if (have >= budget) break;
-            double pt = pb * Bin;
-            bool clipNear = s.Markers.Any(m => m.Kind is "clip" or "death" && m.At >= pt - 5 && m.At <= pt + 30);
-            double from = pt - (clipNear ? 22 : 14), to = pt + 8;
-            from = SentenceStart(words, Math.Max(0, from));
-            to = SentenceEnd(words, Math.Min(s.Duration, to), s.Duration);
-            // don't start or end on a loading screen
+            var (a, b) = episodes[e];
+            int pk = a;
+            for (int k = a; k < b; k++) if (!still[k] && smooth[k] > smooth[pk]) pk = k;
+            double ea = a * Bin, eb = b * Bin;
+            // the climax of a stretch is what happened in it, when something did: the death, or the clip you saved
+            var ev = s.Markers.Where(m => m.Kind is "death" or "clip" && m.At >= ea && m.At < eb).OrderByDescending(m => m.Kind == "death" ? 2 : 1).ThenByDescending(m => smooth[Math.Clamp((int)(m.At / Bin), 0, n - 1)]).FirstOrDefault();
+            if (ev is not null) pk = Math.Clamp((int)((ev.Kind == "clip" ? ev.At - 4 : ev.At) / Bin), a, b - 1);
+            epPeak[e] = pk;
+            int events = s.Markers.Count(m => m.Kind is "death" or "clip" && m.At >= ea && m.At < eb);
+            var top = Enumerable.Range(a, b - a).Select(k => smooth[k]).OrderByDescending(x => x).Take((int)(20 / Bin)).DefaultIfEmpty(0).Average();
+            epValue[e] = smooth[pk] + 0.6 * Math.Min(3, events) + 0.35 * top;
+            epFun[e] = words.Count(w => w.Start >= ea && w.Start < eb && Laughs.Contains(w.Text.ToLowerInvariant()))
+                       + 0.4 * Enumerable.Range(a, b - a).Sum(k => excite[k]) / Math.Max(1, (b - a) * Bin / 60);
+        }
+
+        // the pieces of one episode's story (source seconds); value orders what's dropped first when it's too long
+        var chosen = new List<(double From, double To, double Peak, double Value)>();
+        var segEpisode = new List<int>();
+        bool AddSeg(double from, double to, double peak, double value, int ep)
+        {
+            from = Math.Max(episodes[ep].A * Bin, from);
+            to = Math.Min(Math.Min(s.Duration, episodes[ep].B * Bin + 2), to);
             while (from < to - 4 && still[Math.Clamp((int)(from / Bin), 0, n - 1)]) from += Bin;
             while (to > from + 4 && still[Math.Clamp((int)(to / Bin) - 1, 0, n - 1)]) to -= Bin;
-            if (to - from < 6) continue;
-            if (to - from > 75) { from = Math.Max(from, pt - 50); to = Math.Min(to, pt + 25); }
-            if (chosen.Any(c => from < c.To + 4 && to > c.From - 4)) continue;
-            chosen.Add((from, to, pt, smooth[pb]));
-            have += (to - from) * 0.85;
+            if (to - from < 4) return false;
+            // a stretch you asked to leave out: keep only the side of it that's long enough
+            foreach (var r in tw.Remove.Where(r => from < r[1] && to > r[0]))
+            {
+                if (r[0] - from >= to - r[1]) to = Math.Min(to, r[0]); else from = Math.Max(from, r[1]);
+                if (to - from < 4) return false;
+            }
+            // overlapping or nearly touching another piece: join them (one continuous shot reads better)
+            for (int k = 0; k < chosen.Count; k++)
+            {
+                var c = chosen[k];
+                if (from < c.To + 3 && to > c.From - 3)
+                {
+                    chosen[k] = (Math.Min(c.From, from), Math.Max(c.To, to), value > c.Value ? peak : c.Peak, Math.Max(c.Value, value));
+                    return true;
+                }
+            }
+            chosen.Add((from, to, peak, value));
+            segEpisode.Add(ep);
+            return true;
         }
-        // close to the target: drop the weakest moments while well over, then trim the longest ones
-        while (chosen.Count > 1 && chosen.Sum(c => (c.To - c.From) * 0.85) > budget * 1.06)
+        double Len() => chosen.Sum(c => (c.To - c.From) * 0.85);
+
+        double PaceScale = tw.Pace < 0 ? 0.7 : tw.Pace > 0 ? 1.35 : 1;
+        double overhead = (tw.ColdOpen ? 8 : 0) + 3 + 10; // cold open, title, end card
+        double budget = Math.Max(20, target - overhead);
+        var byValue = Enumerable.Range(0, episodes.Count).OrderByDescending(e => epValue[e]).ToList();
+        var picked = new List<int>();
+
+        // 1. the big moment of the best episodes (with the lead-up that makes it land); a stretch with a death or a
+        //    clip you saved always gets its moment if there's any room
+        foreach (int e in byValue)
         {
-            var weakest = chosen.OrderBy(c => c.Value).First();
-            double over = chosen.Sum(c => (c.To - c.From) * 0.85) - budget;
-            if ((weakest.To - weakest.From) * 0.85 <= over * 1.5) { chosen.Remove(weakest); continue; }
+            bool eventful = s.Markers.Any(m => m.Kind is "death" or "clip" && m.At >= episodes[e].A * Bin && m.At < episodes[e].B * Bin);
+            if (Len() >= budget * (eventful ? 0.9 : 0.62)) continue;
+            double pt = epPeak[e] * Bin;
+            bool clipNear = s.Markers.Any(m => m.Kind is "clip" or "death" && m.At >= pt - 5 && m.At <= pt + 30);
+            double lead = (clipNear ? 22 : 14) * PaceScale, tail = 8 * PaceScale;
+            double from = SentenceStart(words, Math.Max(0, pt - lead));
+            double to = SentenceEnd(words, Math.Min(s.Duration, pt + tail), s.Duration);
+            if (to - from > 75) { from = Math.Max(from, pt - 50); to = Math.Min(to, pt + 25); }
+            if (AddSeg(from, to, pt, epValue[e] + 10, e)) picked.Add(e);
+        }
+        // moments you asked for are always in
+        foreach (var inc in tw.Include)
+        {
+            int e = EpisodeOf(inc);
+            if (AddSeg(SentenceStart(words, Math.Max(0, inc - 10 * PaceScale)), SentenceEnd(words, Math.Min(s.Duration, inc + 8 * PaceScale), s.Duration), inc, 1000, e)
+                && !picked.Contains(e)) picked.Add(e);
+        }
+        // 2. a breather: the funniest calm stretch not already in, between the intense ones
+        if (episodes.Count > 2)
+        {
+            int fun = Enumerable.Range(0, episodes.Count).Where(e => !picked.Contains(e)).OrderByDescending(e => epFun[e]).FirstOrDefault(-1);
+            if (fun >= 0 && epFun[fun] >= 2)
+            {
+                var (a, b) = episodes[fun];
+                int best2 = a;
+                double bestScore = -1;
+                for (int k = a; k < b; k++)
+                {
+                    double sc = 0;
+                    for (int q = k; q < Math.Min(b, k + 24); q++) sc += excite[q] + speech[q] * 0.3;
+                    if (sc > bestScore) { bestScore = sc; best2 = k; }
+                }
+                double f0 = SentenceStart(words, best2 * Bin), f1 = SentenceEnd(words, Math.Min(s.Duration, best2 * Bin + 11), s.Duration);
+                if (AddSeg(f0, f1, best2 * Bin + 4, epValue[fun] + 4, fun)) picked.Add(fun);
+            }
+        }
+        // 3. each picked episode gets its story: what you said going in, the reaction after
+        foreach (int e in picked.OrderByDescending(e => epValue[e]))
+        {
+            if (Len() >= budget) break;
+            var (a, b) = episodes[e];
+            double ea = a * Bin, pt = epPeak[e] * Bin;
+            var climax = chosen.FirstOrDefault(c => pt >= c.From - 1 && pt <= c.To + 1);
+            // going in: the first thing you said in this stretch (the plan, the goal, the joke)
+            var first = words.FirstOrDefault(w => w.Start >= ea + 1 && w.Start < climax.From - 10 && w.Text.Length > 1);
+            if (first is not null)
+            {
+                double s0 = SentenceStart(words, first.Start), s1 = SentenceEnd(words, Math.Min(climax.From - 2, first.Start + 7), s.Duration);
+                if (s1 - s0 >= 3) AddSeg(s0, Math.Min(s1, s0 + 12), s0 + 1, epValue[e] + 2, e);
+            }
+            // after: the reaction (a few more seconds of you, if you kept talking)
+            double after = climax.To;
+            if (after > 0 && words.Any(w => w.Start >= after && w.Start < after + 6))
+                AddSeg(after - 0.5, SentenceEnd(words, Math.Min(after + 6, b * Bin), s.Duration), after, epValue[e] + 3, e);
+        }
+        // 4. the build-up: a quick beat between going in and the big moment, best episodes first
+        foreach (int e in picked.OrderByDescending(e => epValue[e]))
+        {
+            if (Len() >= budget) break;
+            var (a, b) = episodes[e];
+            var mine = chosen.Where((c, k) => segEpisode[k] == e).OrderBy(c => c.From).ToList();
+            if (mine.Count < 2) continue;
+            for (int g = 0; g + 1 < mine.Count && Len() < budget; g++)
+            {
+                double ga = mine[g].To + 6, gb = mine[g + 1].From - 6;
+                if (gb - ga < 8) continue;
+                int pk = (int)(ga / Bin);
+                for (int k = (int)(ga / Bin); k < (int)(gb / Bin) && k < n; k++) if (!still[k] && smooth[k] > smooth[pk]) pk = k;
+                if (smooth[pk] < smooth[epPeak[e]] * 0.45) continue;
+                double bt = pk * Bin;
+                AddSeg(SentenceStart(words, bt - 3), SentenceEnd(words, bt + 4, s.Duration), bt, epValue[e] + 1, e);
+            }
+        }
+        // close to the target: drop the weakest pieces (build-ups and set-ups go before big moments) while well over,
+        // then trim the longest
+        while (chosen.Count > 1 && Len() > budget * 1.06)
+        {
+            int wi = Enumerable.Range(0, chosen.Count).OrderBy(k => chosen[k].Value).First();
+            var weakest = chosen[wi];
+            double over = Len() - budget;
+            if ((weakest.To - weakest.From) * 0.85 <= over * 1.5) { chosen.RemoveAt(wi); segEpisode.RemoveAt(wi); continue; }
             var longest = chosen.OrderByDescending(c => c.To - c.From).First();
             int li = chosen.IndexOf(longest);
             double cut = Math.Min(over / 0.85, (longest.To - longest.From) - 12);
@@ -143,42 +282,55 @@ public static class VodPlanner
                 ? (Math.Min(longest.Peak - 6, longest.From + cut), longest.To, longest.Peak, longest.Value)
                 : (longest.From, Math.Max(longest.Peak + 6, longest.To - cut), longest.Peak, longest.Value);
         }
-        chosen.Sort((a, b) => a.From.CompareTo(b.From));
+        // the story plays in order
+        var order = Enumerable.Range(0, chosen.Count).OrderBy(k => chosen[k].From).ToList();
+        chosen = order.Select(k => chosen[k]).ToList();
+        segEpisode = order.Select(k => segEpisode[k]).ToList();
         var plan = new EditPlan { Width = s.Width, Height = s.Height, Fps = s.Fps, Title = o.Title, Layout = s.Layout };
-        if (chosen.Count == 0) chosen.Add((0, Math.Min(s.Duration, Math.Max(10, target - overhead)), Math.Min(s.Duration, 5), 0));
+        if (chosen.Count == 0) { chosen.Add((0, Math.Min(s.Duration, Math.Max(10, target - overhead)), Math.Min(s.Duration, 5), 0)); segEpisode.Add(0); }
         var best = chosen.OrderByDescending(c => c.Value).First();
         plan.BestMoment = best.Peak;
 
         // ---------------------------------------------------------------- cold open + title
-        double coldFrom = Math.Clamp(best.Peak - 5.5, best.From, Math.Max(best.From, best.To - 8));
-        double coldTo = Math.Min(best.To, coldFrom + 8);
-        var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = true, Push = 0.07 };
-        plan.Pieces.Add(cold);
+        // a cliffhanger: the run-up to the best moment, cut right as it happens (the payoff comes later, in its place)
+        double coldTo = Math.Min(best.To, best.Peak + 0.5);
+        double coldFrom = Math.Max(best.From, coldTo - 7.5);
+        if (coldTo - coldFrom < 4) { coldFrom = Math.Clamp(best.Peak - 5.5, best.From, Math.Max(best.From, best.To - 8)); coldTo = Math.Min(best.To, coldFrom + 8); }
+        var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = true, Push = tw.Zooms > 0 ? 0.07 : 0 };
+        if (tw.ColdOpen) plan.Pieces.Add(cold);
         double titleSrc = Math.Min(Math.Max(0, s.Duration - 3.2), coldTo);
-        plan.Pieces.Add(new Piece { Role = "title", In = titleSrc, Out = titleSrc + 3.0, Blur = true, Mute = true, Push = 0.05 });
+        plan.Pieces.Add(new Piece { Role = "title", In = titleSrc, Out = titleSrc + 3.0, Blur = true, Mute = true, Push = tw.Zooms > 0 ? 0.05 : 0 });
 
-        // ---------------------------------------------------------------- chapters
-        double totalLen = chosen.Sum(c => (c.To - c.From) * 0.85);
-        int chapters = Math.Clamp((int)Math.Round(totalLen / 150), 1, 7);
+        // ---------------------------------------------------------------- chapters: one per stretch of play (at most 7)
         var chapterOf = new int[chosen.Count];
-        { double acc = 0; int ch = 0; double per = totalLen / chapters;
-          for (int i = 0; i < chosen.Count; i++)
-          {
-              if (acc >= per * (ch + 1) && ch < chapters - 1) ch++;
-              chapterOf[i] = ch;
-              acc += (chosen[i].To - chosen[i].From) * 0.85;
-          } }
-        chapters = chapterOf.Length == 0 ? 1 : chapterOf.Max() + 1;
+        {
+            var eps = segEpisode.Distinct().ToList(); // in story order
+            int groups = Math.Min(7, eps.Count);
+            double totalLen = chosen.Sum(c => (c.To - c.From) * 0.85), per = totalLen / Math.Max(1, groups), acc = 0;
+            var epChapter = new Dictionary<int, int>();
+            int ch = 0;
+            foreach (int e in eps)
+            {
+                if (eps.Count > 7 && acc >= per * (ch + 1) && ch < groups - 1) ch++;
+                else if (eps.Count <= 7 && epChapter.Count > 0) ch = epChapter.Values.Max() + 1;
+                epChapter[e] = ch;
+                acc += chosen.Where((c, k) => segEpisode[k] == e).Sum(c => (c.To - c.From) * 0.85);
+            }
+            for (int k = 0; k < chosen.Count; k++) chapterOf[k] = epChapter[segEpisode[k]];
+        }
+        int chapters = chapterOf.Length == 0 ? 1 : chapterOf.Max() + 1;
 
         // ---------------------------------------------------------------- moments → pieces (jump cuts, zooms, slow motion)
         double lastFace = -999;
         int punches = 0;
-        var cam = s.Layout?.Camera;
+        var cam = tw.FaceCam ? s.Layout?.Camera : null;
+        double zoomGap = tw.Zooms switch { 0 => double.MaxValue, 1 => 14, 3 => 3.5, _ => 6 };
+        double zoomAdd = tw.Zooms switch { 1 => -0.04, 3 => 0.04, _ => 0 };
         for (int i = 0; i < chosen.Count; i++)
         {
             var (from, to, peak, _) = chosen[i];
-            var spans = JumpCuts(from, to, words, s, s.Markers, peak);
-            var deaths = s.Markers.Where(m => m.Kind == "death" && m.At > from + 2 && m.At < to).Select(m => m.At).ToList();
+            var spans = JumpCuts(from, to, words, s, s.Markers, peak, tw.Pace < 0 ? 0.5 : tw.Pace > 0 ? 1.6 : 0.8);
+            var deaths = tw.SlowMotion ? s.Markers.Where(m => m.Kind == "death" && m.At > from + 2 && m.At < to).Select(m => m.At).ToList() : new List<double>();
             var momentPieces = new List<Piece>();
             foreach (var (a, b) in spans)
             {
@@ -219,10 +371,11 @@ public static class VodPlanner
                     var mp = new Piece { Role = "moment", In = pos, Out = cb };
                     foreach (var (rt, _) in reacts.Where(r => r.Time > pos + 0.3 && r.Time < cb - 0.8))
                     {
-                        if (mp.Zooms.Count > 0 && rt - (pos + mp.Zooms[^1].At) < 6) continue;
-                        mp.Zooms.Add(new Zoom(rt - pos - 0.08, Math.Min(2.4, cb - rt), 1.12 + 0.04 * (punches++ % 3)));
+                        if (tw.Zooms == 0) break;
+                        if (mp.Zooms.Count > 0 && rt - (pos + mp.Zooms[^1].At) < zoomGap) continue;
+                        mp.Zooms.Add(new Zoom(rt - pos - 0.08, Math.Min(2.4, cb - rt), 1.12 + zoomAdd + 0.04 * (punches++ % 3)));
                     }
-                    if (mp.Zooms.Count == 0 && mp.Out - mp.In > 10) mp.Push = rng.NextDouble() < 0.6 ? 0.07 : -0.06;
+                    if (tw.Zooms > 0 && mp.Zooms.Count == 0 && mp.Out - mp.In > 10) mp.Push = rng.NextDouble() < 0.6 ? 0.07 : -0.06;
                     momentPieces.Add(mp);
                 }
             }
@@ -255,20 +408,29 @@ public static class VodPlanner
         foreach (var p in plan.Pieces) { p.At = at; at += plan.FramesOf(p) / plan.Fps; } // whole frames, so nothing drifts
 
         // title, chapters, "later" tags
-        var titlePiece = plan.Pieces[1];
+        var titlePiece = plan.Pieces.First(p => p.Role == "title");
         plan.Texts.Add(new TextCue("title", titlePiece.At, titlePiece.Length, o.Title, DateTime.Now.ToString("MMMM d, yyyy")));
         plan.Chapters.Add((0, "Intro"));
         int[] chapterStartMoment = Enumerable.Range(0, chapters).Select(c => Array.IndexOf(chapterOf, c)).ToArray();
+        var usedTopics = new List<string>();
         var chapterStart = new double[chapters];
         for (int c = 0; c < chapters; c++)
         {
             var firstPiece = plan.Pieces.FirstOrDefault(p => _momentIndex.TryGetValue(p, out var mi) && mi == chapterStartMoment[c]);
             chapterStart[c] = firstPiece?.At ?? titlePiece.At + titlePiece.Length;
-            string quote = BestQuote(words, chosen.Where((_, k) => chapterOf[k] == c).Select(x => (x.From, x.To)).ToList());
-            string name = quote.Length > 0 ? $"“{quote}”" : $"Part {c + 1}";
-            if (c == 0) { plan.Chapters.Add((chapterStart[0], quote.Length > 0 ? name : "Part 1")); continue; }
-            plan.Chapters.Add((chapterStart[c], name));
-            plan.Texts.Add(new TextCue("chapter", chapterStart[c] + 0.15, 2.6, $"PART {c + 1}", quote.Length > 0 ? name : null));
+            var ranges = chosen.Where((_, k) => chapterOf[k] == c).Select(x => (x.From, x.To)).ToList();
+            string quote = BestQuote(words, ranges);
+            // named after where you are when you keep saying it (Khrysalis, Darkmoor…), else your best line
+            string? place = Topic(words, ranges, c > 0 ? usedTopics : null);
+            if (place is not null) usedTopics.Add(place);
+            string name = place ?? (quote.Length > 0 ? $"“{quote}”" : $"Part {c + 1}");
+            if (c == 0) { plan.Chapters.Add((chapterStart[0], place is not null || quote.Length > 0 ? name : "Part 1")); continue; }
+            // your own card text when you changed it
+            var card = tw.Cards.FirstOrDefault(x => x.Chapter == c + 1);
+            string? sub = !string.IsNullOrWhiteSpace(card?.Sub) ? card!.Sub!.Trim() : place is not null || quote.Length > 0 ? name : null;
+            string head = !string.IsNullOrWhiteSpace(card?.Heading) ? card!.Heading!.Trim().ToUpperInvariant() : $"PART {c + 1}";
+            plan.Chapters.Add((chapterStart[c], sub ?? name));
+            plan.Texts.Add(new TextCue("chapter", chapterStart[c] + 0.15, 2.6, head, sub));
             plan.Sfx.Add(new SfxCue(chapterStart[c] - 0.05, SfxKind.SoftWhoosh, 0.7f));
             plan.Sfx.Add(new SfxCue(chapterStart[c] + 0.25, SfxKind.Pop, 0.6f));
         }
@@ -283,6 +445,15 @@ public static class VodPlanner
             if (!fp.WhipIn) plan.Sfx.Add(new SfxCue(fp.At, SfxKind.SoftWhoosh, 0.6f));
         }
         plan.Texts.Add(new TextCue("end", plan.Pieces[^1].At + 0.3, plan.Pieces[^1].Length - 0.3, "THANKS FOR WATCHING", o.Socials));
+        plan.MusicVolume = tw.MusicVolume;
+        plan.SfxVolume = tw.SfxVolume;
+        for (int i = 0; i < chosen.Count; i++)
+        {
+            var fp = plan.Pieces.FirstOrDefault(p => _momentIndex.TryGetValue(p, out var mi) && mi == i);
+            if (fp is null) continue;
+            plan.Moments.Add(new EditMoment(chosen[i].From, chosen[i].To, fp.At, BestQuote(words, new() { (chosen[i].From, chosen[i].To) }) is { Length: > 0 } q ? q
+                : Captions.Tidy(string.Join(' ', words.Where(w => w.Start >= chosen[i].From && w.Start < chosen[i].To).Take(8).Select(w => w.Text)))));
+        }
 
         // ---------------------------------------------------------------- sound design
         plan.Sfx.Add(new SfxCue(titlePiece.At - 1.35, SfxKind.Riser, 0.75f));
@@ -378,7 +549,7 @@ public static class VodPlanner
 
     /// <summary>Where to cut inside a moment: drop stretches with nobody talking, little happening and nothing
     /// marked, leaving a beat either side so it doesn't feel chopped.</summary>
-    private static List<(double, double)> JumpCuts(double from, double to, List<VodWord> words, VodSignals s, List<VodMarker> markers, double peak)
+    private static List<(double, double)> JumpCuts(double from, double to, List<VodWord> words, VodSignals s, List<VodMarker> markers, double peak, double minGap = 0.8)
     {
         var inside = words.Where(w => w.End > from && w.Start < to).OrderBy(w => w.Start).ToList();
         var spans = new List<(double, double)>();
@@ -387,7 +558,7 @@ public static class VodPlanner
         foreach (var w in inside.Append(new VodWord("", to, to)))
         {
             double gapA = prevEnd + 0.2, gapB = w.Start - 0.2;
-            if (gapB - gapA > 0.8)
+            if (gapB - gapA > minGap)
             {
                 double still = 0; int k = 0;
                 for (double t = gapA; t < gapB; t += 0.5) { still += s.MotionAt(t); k++; }
@@ -419,6 +590,22 @@ public static class VodPlanner
             if (wt >= 2 || wt >= 1 && lz > 1.2 || lz > 2.2) list.Add((w.Start, wt >= 2.5 || lz > 2.4));
         }
         return list;
+    }
+
+    private static readonly HashSet<string> NotTopics = new(StringComparer.OrdinalIgnoreCase) { "Wizard101", "tasks", "task", "crew", "crewmate", "imp" };
+
+    /// <summary>The place or name said most in these stretches (at least twice), if it's one Leapcast knows.</summary>
+    private static string? Topic(List<VodWord> words, List<(double From, double To)> ranges, List<string>? avoidRepeat)
+    {
+        var counts = new Dictionary<string, int>();
+        foreach (var w in words)
+        {
+            if (!ranges.Any(r => w.Start >= r.From - 20 && w.Start <= r.To + 20)) continue;
+            if (Vocabulary.NameOf(w.Text) is { Length: >= 4 } name && !NotTopics.Contains(name)) counts[name] = counts.GetValueOrDefault(name) + 1;
+        }
+        var top = counts.Where(x => x.Value >= 2).OrderByDescending(x => x.Value).Select(x => x.Key).ToList();
+        if (avoidRepeat is { Count: > 0 } && top.FirstOrDefault() is { } t0 && avoidRepeat[^1] == t0) return null; // same place as the last chapter: a quote reads better
+        return top.FirstOrDefault();
     }
 
     private static string BestQuote(List<VodWord> words, List<(double From, double To)> ranges)

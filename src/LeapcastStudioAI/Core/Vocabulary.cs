@@ -45,9 +45,18 @@ public static class Vocabulary
     /// <summary>What Whisper is told first, so it writes these names the right way (kept short: Whisper reads ~200 tokens).</summary>
     public static string Prompt()
     {
-        var names = _table.Names;
-        var s = "Wizard101 stream. " + string.Join(", ", names.Take(40)) + ".";
+        // yours first (Whisper pays most attention to the start), then Wizard101's
+        var names = _table.UserNames.Concat(_table.Names.Except(_table.UserNames)).ToList();
+        var s = "Wizard101 stream, questing in Khrysalis. " + string.Join(", ", names.Take(40)) + ".";
         return s.Length > 600 ? s[..600] : s;
+    }
+
+    /// <summary>The proper name this word is (a Wizard101 place or one of yours), or null.</summary>
+    public static string? NameOf(string word)
+    {
+        var t = _table;
+        string k = Norm(word.Trim().TrimEnd('.', ',', '!', '?'));
+        return k.Length > 0 && t.Map.TryGetValue(k, out var v) && t.Names.Contains(v) ? v : null;
     }
 
     public static List<CaptionWord> Fix(IReadOnlyList<CaptionWord> words) =>
@@ -83,8 +92,27 @@ public static class Vocabulary
             }
             if (!done) o.Add(words[i]);
         }
+        // a name heard as an ordinary word only where the ordinary word makes no sense: "in Christmas" is Khrysalis
+        // (people say "for/at/on Christmas"), and so on
+        for (int i = 1; i < o.Count; i++)
+            foreach (var (heard, name, after) in Context)
+            {
+                var (key, tail) = Key(new[] { text(o[i]) }, 1);
+                if (key != heard) continue;
+                string p1 = Norm(text(o[i - 1])), p2 = i >= 2 ? Norm(text(o[i - 2])) + " " + p1 : "";
+                if (!after.Contains(p1) && !after.Contains(p2)) continue;
+                string lead = Regex.Match(text(o[i]), @"^[^\w]*").Value;
+                o[i] = make(o[i], o[i], lead + name + tail);
+            }
         return o;
     }
+
+    private static readonly (string Heard, string Name, HashSet<string> After)[] Context =
+    {
+        ("christmas", "Khrysalis", new HashSet<string> { "in", "into", "through", "from", "back to", "go to", "going to", "get to", "got to",
+            "went to", "head to", "heading to", "off to", "over to", "teleport to", "in the", "of" }),
+        ("christmas's", "Khrysalis's", new HashSet<string> { "in", "into", "through", "from" }),
+    };
 
     /// <summary>The lookup key for a run of words (lowercase, punctuation out) and what to put back after the name ("'s", "!").</summary>
     private static (string Key, string Tail) Key(IEnumerable<string> parts, int n)
@@ -99,7 +127,7 @@ public static class Vocabulary
         return (key, tail);
     }
 
-    private sealed record Table(Dictionary<string, string> Map, List<string> Names, int MaxWords);
+    private sealed record Table(Dictionary<string, string> Map, List<string> Names, int MaxWords, List<string> UserNames);
 
     private static Table Build(string user)
     {
@@ -130,8 +158,10 @@ public static class Vocabulary
         foreach (var l in BuiltIn) Add(l, false);
         // yours come last, so they win
         foreach (var l in user.Split('\n')) Add(l, true);
+        var userNames = user.Split('\n').SelectMany(l => (l.Contains('=') ? l[..l.IndexOf('=')] : l).Split(','))
+            .Select(x => x.Trim()).Where(x => x.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         int max = map.Keys.Select(k => k.Count(c => c == ' ') + 1).DefaultIfEmpty(1).Max();
-        return new Table(map, names, Math.Min(4, max));
+        return new Table(map, names, Math.Min(4, max), userNames);
     }
 
     private static string Norm(string s) => Regex.Replace(Regex.Replace(s.ToLowerInvariant(), @"[^\w' -]", ""), @"\s+", " ").Trim();

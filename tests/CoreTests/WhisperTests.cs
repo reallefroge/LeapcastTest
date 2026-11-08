@@ -73,8 +73,18 @@ static class WhisperTests
         var fixedWords = Vocabulary.Fix(new List<CaptionWord> { new("dragon", t0w, t0w.AddSeconds(0.3)), new("spire!", t0w.AddSeconds(0.35), t0w.AddSeconds(0.7)) });
         check(fixedWords.Count == 1 && fixedWords[0].Text == "Dragonspyre!" && fixedWords[0].EndUtc == t0w.AddSeconds(0.7),
             "Captions: a joined name takes the first word's start and the last word's end");
+        check(F("we're going to Christmas now") == "we're going to Khrysalis now" && F("back in Christmas!") == "back in Khrysalis!"
+              && F("presents for Christmas") == "presents for Christmas" && F("merry Christmas") == "merry Christmas",
+            $"Captions: “in / going to Christmas” is Khrysalis, “for Christmas” stays Christmas ({F("we're going to Christmas now")})");
+        var rescued = Whisper.Retime(new List<(VodWord, int, double, double)> { (new("going", 1.0, 1.3), 0, 0, 5), (new("Christmas", 1.3, 1.9), 0, 0, 5) },
+            new List<VodWord> { new("going", 1.0, 1.3), new("chrysalis", 1.35, 1.95) }, new float[0]);
+        check(rescued.Count == 2 && rescued[1].Text == "Khrysalis",
+            $"Captions: where the live recognizer heard “chrysalis” and Whisper wrote “Christmas”, it's Khrysalis ({string.Join(" ", rescued.Select(x => x.Text))})");
+        check(!Whisper.SoundsAlike("table", "Khrysalis") && Whisper.SoundsAlike("Christmas", "chrysalis") && Whisper.SoundsAlike("crystals", "Khrysalis"),
+            "Captions: only lookalike words are swapped for a name");
         Vocabulary.SetUser("Leapfrog = leap frog, leapfrogg\nKhrysalis = crisis alice");
-        check(F("hi leap frog") == "hi Leapfrog" && F("crisis alice") == "Khrysalis" && Vocabulary.Prompt().Contains("Leapfrog") && Vocabulary.Prompt().Contains("Khrysalis"),
+        check(F("hi leap frog") == "hi Leapfrog" && F("crisis alice") == "Khrysalis" && Vocabulary.Prompt().Contains("Leapfrog") && Vocabulary.Prompt().Contains("Khrysalis")
+              && Vocabulary.Prompt().IndexOf("Leapfrog") < Vocabulary.Prompt().IndexOf("Krokotopia"),
             $"Captions: your own spellings from Settings work and reach Whisper's prompt ({Vocabulary.Prompt().Length} chars)");
         Vocabulary.SetUser("");
 
