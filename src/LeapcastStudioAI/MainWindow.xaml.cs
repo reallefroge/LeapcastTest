@@ -177,6 +177,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         _death.Died += (start, at) => Dispatcher.BeginInvoke(() => SaveDeathClip(start, at));
         _chat.Command += m => Dispatcher.BeginInvoke(() => SaveChatClip(m));
+        _chat.Message += m => _sessionLog?.Mark("chat", m.ReceivedUtc);
         _chat.Debug += VoiceLog;
         _death.Debug += VoiceLog;
         // CPU/RAM of Leapcast and everything it runs (encoder, capture, destinations, browser sources), every 2 s
@@ -539,6 +540,7 @@ public partial class MainWindow : Window
                 TranscribeOnly = !s.VoiceClipEnabled,
             };
             listener.Transcribed += _transcript.Add;
+            listener.Transcribed += w => _sessionLog?.AddWords(w);
             var feed = new BlockingAudioStream();
             if (micId is not null) _audio.SetSpeechTap(micId, feed.Write);
             listener.Heard += (text, conf, spokenUtc) =>
@@ -613,6 +615,7 @@ public partial class MainWindow : Window
             var feed = new BlockingAudioStream();
             var listener = new VoiceListener { TranscribeOnly = true };
             listener.Transcribed += _deskTranscript.Add;
+            listener.Transcribed += w => _sessionLog?.AddDesktop(w);
             listener.Start("clip", feed, "Normal");
             if (deskId is not null) _audio.SetDesktopSpeechTap(deskId, feed.Write);
             else _deskCapture = WasapiAudioBridge.CaptureDefaultOutputForSpeech(feed.Write);
@@ -698,6 +701,7 @@ public partial class MainWindow : Window
     /// name), logged, and added to this session's recap.
     /// </summary>
     private readonly Transcript _transcript = new();
+    private volatile LeapcastStudioAI.Vod.SessionLog? _sessionLog;
 
     private async void ClipSaved(string path, ClipLayout? layout, DateTime? endUtc = null)
     {
@@ -719,6 +723,7 @@ public partial class MainWindow : Window
                 VoiceLog("9:16 failed: " + ex.Message);
             }
         }
+        _sessionLog?.Mark("clip", endUtc ?? savedUtc, Path.GetFileName(path));
         if (_state.Settings.ClipCaptions) await AddCaptionsAsync(path, endUtc ?? savedUtc);
         VoiceLog("saved " + path);
         Log($"Clip saved: {Path.GetFileName(path)}", false);
@@ -843,6 +848,8 @@ public partial class MainWindow : Window
 
     private async void SaveDeathClip(DateTime fightStartUtc, DateTime deathUtc)
     {
+        _sessionLog?.Mark("fight", fightStartUtc);
+        _sessionLog?.Mark("death", deathUtc);
         if (_deathSaving || !_engine.CanClip) return;
         _deathSaving = true;
         try
@@ -1881,17 +1888,35 @@ public partial class MainWindow : Window
         await Guarded(on ? "Starting preview…" : "Stopping preview…", () => _engine.SetPreviewAsync(on), on ? "Previewing." : "Preview stopped.");
     }
 
+    private VodEditWindow? _vodWindow;
+
+    private void VodEdit_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vodWindow is { IsLoaded: true }) { _vodWindow.Activate(); return; }
+        _vodWindow = new VodEditWindow(_engine, _state.Settings, Save) { Owner = this };
+        _vodWindow.Show();
+    }
+
     private async void Record_Click(object sender, RoutedEventArgs e)
     {
         if (!_engine.Recording)
         {
+            // what happens while recording is logged for the VOD editor (your words, clips, deaths, chat)
+            _sessionLog = new LeapcastStudioAI.Vod.SessionLog { Layout = _engine.CurrentClipLayout() };
             await Guarded("Starting recording…", () => _engine.StartRecordingAsync(), "Recording.");
         }
         else
         {
             string? path = null;
             await Guarded("Saving recording…", async () => path = await _engine.StopRecordingAsync());
-            if (!string.IsNullOrEmpty(path)) { Status("Saved " + Path.GetFileName(path)); Log("Recording saved: " + path, false); }
+            if (!string.IsNullOrEmpty(path))
+            {
+                Status("Saved " + Path.GetFileName(path));
+                Log("Recording saved: " + path, false);
+                if (_sessionLog is { } log && _engine.LastRecordingStartUtc is { } start)
+                    try { log.ToSidecar(start).Save(path); } catch (Exception ex) { Log("Session log not saved: " + ex.Message, true); }
+            }
+            _sessionLog = null;
         }
     }
 

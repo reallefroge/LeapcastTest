@@ -63,6 +63,7 @@
       </MenuItem>
       <MenuItem Header="_Tools">
         <MenuItem x:Name="AutoConfigMenu" Header="Auto-configuration wizard…" Click="AutoConfig_Click"/>
+        <MenuItem Header="Edit a recording into a video…" Click="VodEdit_Click" ToolTip="Turns an hour or more of stream into an edited ~15-minute video"/>
         <MenuItem Header="Stream settings…" Click="SettingsMenu_Click" Tag="Stream"/>
         <MenuItem Header="Add destination…" Click="AddOutput_Click"/>
         <MenuItem Header="Connection test…" Click="SettingsMenu_Click" Tag="Connection"/>

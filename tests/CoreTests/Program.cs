@@ -14,6 +14,44 @@ if (args.Length > 0 && args[0] == "--burn")
 }
 
 int failures = 0;
+// quick mode: only the VOD editor tests
+if (args.Length > 0 && args[0] == "--vodtest")
+{
+    int vf = 0;
+    string w = Path.Combine(Path.GetTempPath(), "leapcast-vodtest-" + Guid.NewGuid().ToString("N")[..6]);
+    await VodTests.RunAsync(Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg", w, (ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) vf++; });
+    return vf == 0 ? 0 : 1;
+}
+// quick mode: the VOD editor on a synthetic recording (args: --vod <folder>)
+if (args.Length > 1 && args[0] == "--vod")
+{
+    string vdir = args[1];
+    Directory.CreateDirectory(vdir);
+    string vff = Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg";
+    string src = Path.Combine(vdir, "stream.mp4");
+    await VodTests.MakeSyntheticStreamAsync(vff, src, 360);
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    var res = await LeapcastStudioAI.Vod.VodEditor.MakeAsync(vff, src, Path.Combine(vdir, "out"), new LeapcastStudioAI.Vod.VodEditOptions("Wizard101 Boss Rush", 90, Socials: "twitch.tv/example"),
+        (w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "20" }, new Progress<LeapcastStudioAI.Vod.VodEditor.Progress>(p => Console.WriteLine($"  {p.Fraction:P0} {p.Step}")), CancellationToken.None);
+    Console.WriteLine($"{res.Video} {res.Length} in {sw.Elapsed}");
+    Console.WriteLine(File.ReadAllText(res.Description));
+    return 0;
+}
+// quick mode: generated music samples (for listening / spectrograms)
+if (args.Length > 1 && args[0] == "--music")
+{
+    Directory.CreateDirectory(args[1]);
+    foreach (var mood in Enum.GetValues<LeapcastStudioAI.Vod.Mood>())
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var track = LeapcastStudioAI.Vod.MusicSynth.Track(mood, 40, 7);
+        LeapcastStudioAI.Vod.Dsp.WriteWav(Path.Combine(args[1], mood + ".wav"), track);
+        Console.WriteLine($"{mood}: {track.Length / 48000.0:0.0}s in {sw.ElapsedMilliseconds} ms, peak {track.Peak():0.00}");
+    }
+    foreach (var k in Enum.GetValues<LeapcastStudioAI.Vod.SfxKind>())
+        LeapcastStudioAI.Vod.Dsp.WriteWav(Path.Combine(args[1], "sfx-" + k + ".wav"), LeapcastStudioAI.Vod.Sfx.Make(k, 3));
+    return 0;
+}
 // quick mode: only the voice-clip listener
 if (args.Length > 0 && args[0] == "--voice")
 {
@@ -1569,6 +1607,10 @@ await AdaptSection(light);
 
 // ---------------------------------------------------------------- show/hide live, studio mode, rebuilds stay connected
 await LiveSwitchSection(light);
+
+// ---------------------------------------------------------------- VOD editor
+Console.WriteLine("VOD editor (a long recording → an edited video)");
+await VodTests.RunAsync(ffmpeg, work, Check);
 
 // ---------------------------------------------------------------- live 9:16 clips
 Console.WriteLine("9:16 clips made live from the raw game and camera (no webcam inside the game, nothing re-rendered)");

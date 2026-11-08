@@ -18,6 +18,8 @@ public sealed record ChatMessage(string User, string Text, bool Broadcaster, boo
 public sealed class TwitchChat : IDisposable
 {
     public event Action<ChatMessage>? Command;
+    /// <summary>Every chat message (the VOD editor uses chat activity to find moments).</summary>
+    public event Action<ChatMessage>? Message;
     public event Action<string>? Debug;
 
     public string Host { get; init; } = "irc.chat.twitch.tv";
@@ -114,6 +116,7 @@ public sealed class TwitchChat : IDisposable
                     if (line is null) break;
                     if (line.StartsWith("PING", StringComparison.Ordinal)) { await writer.WriteLineAsync("PONG" + line[4..]); continue; }
                     if (line.Contains(" RECONNECT", StringComparison.Ordinal)) break;
+                    if (Parse(line, DateTime.UtcNow) is { } any) Message?.Invoke(any);
                     if (Parse(line, DateTime.UtcNow) is { } msg && IsCommand(msg.Text, Word))
                     {
                         bool ok = Allowed(msg, Who);

@@ -158,6 +158,9 @@ public sealed class SegmentCache
         lock (_lock) { _recordingFrom = from; RecordingStartedUtc = DateTime.UtcNow; }
     }
 
+    /// <summary>When the last exported recording's first frame was captured (UTC), if known.</summary>
+    public DateTime? LastRecordingStartUtc { get; private set; }
+
     /// <summary>Stops recording and writes the MP4. Returns the output path.</summary>
     public async Task<string> StopRecordingAsync(string ffmpeg, string outputPath, CancellationToken ct = default)
     {
@@ -174,6 +177,11 @@ public sealed class SegmentCache
             await WaitClosedAsync(to, TimeSpan.FromSeconds(SegmentSeconds * 4 + 4), ct);
             var segs = Scan().Where(s => s.Closed && s.Key >= from && s.Key <= to && s.Size > 0).ToList();
             if (segs.Count == 0) throw new InvalidOperationException("Nothing was recorded (the encoder never started).");
+            // when the recording's first frame was shot (its timestamps are seconds since the session's origin)
+            LastRecordingStartUtc = null;
+            lock (_lock)
+                if (_origins.TryGetValue(segs[0].Session, out var origin) && TsTimestamps.FirstPts(segs[0].Path) is double pts)
+                    LastRecordingStartUtc = DateTime.UnixEpoch + TimeSpan.FromSeconds(origin + pts);
             await ConcatAsync(ffmpeg, segs, outputPath, ct);
             return outputPath;
         }

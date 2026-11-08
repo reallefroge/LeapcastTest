@@ -789,6 +789,9 @@ public sealed class StreamEngine : IDisposable
         return export is null ? "" : await export;
     }
 
+    /// <summary>When the last recording's first frame was captured (UTC): lines up the session log with the file.</summary>
+    public DateTime? LastRecordingStartUtc => _cache.LastRecordingStartUtc;
+
     public Task SetReplayBufferAsync(bool on) => Locked(async () =>
     {
         ReplayBuffer = on;
@@ -831,6 +834,15 @@ public sealed class StreamEngine : IDisposable
     /// Saves a 9:16 copy of a saved clip next to it ("… (9x16).mp4"), with the GPU encoder when there is one, at low
     /// priority (the stream comes first).
     /// </summary>
+    /// <summary>Encoder settings for an edited YouTube video: the stream's encoder at YouTube's recommended bitrates.</summary>
+    public IReadOnlyList<string> VodVideoArgs(int w, int h, double fps)
+    {
+        if (CurrentPlan is null) return new[] { "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p" };
+        int kbps = h >= 1400 ? 24000 : h >= 1000 ? (fps > 40 ? 12000 : 8000) : (fps > 40 ? 7500 : 5000);
+        var plan = CurrentPlan with { Width = w, Height = h, Fps = (int)Math.Round(fps), CapKbps = kbps, LowLatency = false, Light = false };
+        return EncoderCatalog.BuildVideoArgs(plan);
+    }
+
     /// <summary>Encoder settings for re-encoding a saved clip of w×h (captions): the stream's encoder, a clip's bitrate.</summary>
     public IReadOnlyList<string> ClipVideoArgs(int w, int h)
     {

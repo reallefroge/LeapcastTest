@@ -54,6 +54,9 @@ public sealed class VoiceListener : IDisposable
         return modelPath is not null;
     }
 
+    /// <summary>The speech model, loaded once and shared (also by the VOD editor).</summary>
+    public static VoskApi.Model SharedModel() => LoadModel();
+
     private static VoskApi.Model LoadModel()
     {
         lock (ModelLock)

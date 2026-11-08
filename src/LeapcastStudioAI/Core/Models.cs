@@ -477,6 +477,10 @@ public sealed class StudioSettings
     public string YouTubeClientSecretProtected { get; set; } = "";
     /// <summary>The Google sign-in (refresh token), DPAPI-encrypted.</summary>
     public string YouTubeRefreshProtected { get; set; } = "";
+    /// <summary>Where the VOD editor puts finished videos.</summary>
+    public string VodEditFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Leapcast", "VODEdits");
+    /// <summary>The VOD editor's target length (minutes).</summary>
+    public int VodEditMinutes { get; set; } = 15;
     /// <summary>Leave Leapcast's own windows out of display captures (they show what's behind them).</summary>
     public bool HideFromCapture { get; set; }
     /// <summary>Clips are saved as 9:16 (TikTok / Shorts): small camera on top, the game big below.</summary>
