@@ -2267,6 +2267,7 @@ public partial class MainWindow : Window
             if (current is not null) Item($"Remove from \"{current.Name}\"", () => scene.MoveToFolder(s, null));
         }
         menu.Items.Add(new Separator());
+        AddRefreshItems(menu, s);
         if (!SourceTypes.IsVideo(SourceTypes.KindOf(s.Type)))
         {
             // audio: nothing to place on a canvas
@@ -2306,6 +2307,53 @@ public partial class MainWindow : Window
         menu.Items.Add(props);
         Item("Hide", () => s.Visible = false);
         menu.IsOpen = true;
+    }
+
+    /// <summary>Refresh (every source) and Clear cache (web pages and images; on a folder: what's in it).</summary>
+    private void AddRefreshItems(ContextMenu menu, StudioSource s)
+    {
+        var targets = RefreshTargets(s);
+        if (targets.Count == 0) return;
+        var refresh = new MenuItem { Header = s.IsFolder ? "Refresh everything in it" : "Refresh",
+            ToolTip = "Opens it again: a page reloads, a window or camera is found again, an image is read again from its file" };
+        refresh.Click += (_, _) => RefreshSources(s, clearCache: false);
+        menu.Items.Add(refresh);
+        if (targets.Any(t => SourceTypes.KindOf(t.Type) is SourceKind.Browser or SourceKind.Image))
+        {
+            var clear = new MenuItem { Header = "Clear cache",
+                ToolTip = "Throws away the saved copies of pages and images and loads them fresh (you stay signed in)" };
+            clear.Click += (_, _) => RefreshSources(s, clearCache: true);
+            menu.Items.Add(clear);
+        }
+    }
+
+    private List<StudioSource> RefreshTargets(StudioSource s) =>
+        s.IsFolder ? SelectedScene?.ChildrenOf(s) ?? new List<StudioSource>() : new List<StudioSource> { s };
+
+    private async void RefreshSources(StudioSource s, bool clearCache)
+    {
+        var targets = RefreshTargets(s);
+        if (clearCache && s.IsFolder) targets = targets.Where(t => SourceTypes.KindOf(t.Type) is SourceKind.Browser or SourceKind.Image).ToList();
+        if (targets.Count == 0) return;
+        // one rebuild covers every source that needs one
+        var inPlace = targets.Where(_engine.RefreshesInPlace).ToList();
+        var rebuild = targets.Except(inPlace).ToList();
+        if (rebuild.Count > 0 && _engine.Live && _engine.Running)
+        {
+            string what = rebuild.Count == 1 ? $"\"{rebuild[0].Name}\"" : $"{rebuild.Count} of these sources";
+            if (MessageBox.Show(this, $"Refreshing {what} rebuilds the picture, so your stream reconnects for a second.\n\nRefresh now?",
+                    "Refresh", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                rebuild.Clear();
+        }
+        var said = new List<string>();
+        try
+        {
+            foreach (var t in inPlace) said.Add(await _engine.RefreshSourceAsync(t, clearCache));
+            if (rebuild.Count > 0) said.Add(await _engine.RefreshSourceAsync(rebuild[0], clearCache));
+        }
+        catch (Exception ex) { said.Add($"Couldn't refresh: {ex.Message}"); }
+        if (said.Count == 0) return;
+        Status(said.Count == 1 ? said[0] : (clearCache ? "Cache cleared, " : "") + $"refreshed {inPlace.Count + rebuild.Count} sources.");
     }
 
     /// <summary>Anchor to a corner with the size the source has now (so the change applies live, no rebuild).</summary>
@@ -2546,13 +2594,10 @@ public partial class MainWindow : Window
             return;
         }
         if (string.IsNullOrWhiteSpace(picker.SelectedType)) return;
-        if (picker.SelectedType == SourceTypes.Folder) { AddFolder(); return; }
-        var source = new StudioSource { Type = picker.SelectedType, Name = picker.SelectedType };
-        if (source.Type == SourceTypes.Camera) source.Name = "Webcam";
-        if (source.Type == SourceTypes.Window) source.Name = "Wizard101 window";
-        if (source.Type == SourceTypes.DesktopAudio) { source.Name = "Desktop audio"; source.NoiseCleanup = false; }
-        if (source.Type == SourceTypes.Microphone) source.Name = "Microphone";
-        if (source.Type == SourceTypes.Browser) { source.Name = "Chat"; source.Anchor = Anchors.TopRight; source.SizePercent = 0; }
+        if (picker.SelectedType == SourceTypes.Folder) { AddFolder(picker.NewSourceName); return; }
+        var source = new StudioSource { Type = picker.SelectedType, Name = picker.NewSourceName ?? SourcePickerWindow.DefaultName(picker.SelectedType) };
+        if (source.Type == SourceTypes.DesktopAudio) source.NoiseCleanup = false;
+        if (source.Type == SourceTypes.Browser) { source.Anchor = Anchors.TopRight; source.SizePercent = 0; }
 
         var props = new SourcePropertiesWindow(source, _engine.FfmpegPath) { Owner = this };
         if (props.ShowDialog() != true) return;
@@ -2679,12 +2724,12 @@ public partial class MainWindow : Window
 
     private void AddFolder_Click(object sender, RoutedEventArgs e) => AddFolder();
 
-    private void AddFolder()
+    private void AddFolder(string? named = null)
     {
         if (SelectedScene is null) return;
         int n = 1;
         while (SelectedScene.Sources.Any(x => x.IsFolder && x.Name == $"Folder {n}")) n++;
-        var name = TextPrompt.Ask(this, "New folder", "Folder name:", $"Folder {n}");
+        var name = named ?? TextPrompt.Ask(this, "New folder", "Folder name:", $"Folder {n}");
         if (string.IsNullOrWhiteSpace(name)) return;
         var folder = new StudioSource { Type = SourceTypes.Folder, Name = name.Trim() };
         SelectedScene.Sources.Add(folder); // top of the list
@@ -2782,6 +2827,8 @@ public partial class MainWindow : Window
         Item("Rename…", () => RenameFolder(folder));
         Item(folder.Visible ? "Hide contents" : "Show contents", () => folder.Visible = !folder.Visible);
         Item(folder.Locked ? "Unlock" : "Lock", () => folder.Locked = !folder.Locked, folder.Locked);
+        menu.Items.Add(new Separator());
+        AddRefreshItems(menu, folder);
         menu.Items.Add(new Separator());
         Item("Ungroup (keep sources)", () => SelectedScene?.RemoveFolder(folder, keepContents: true));
         var del = new MenuItem { Header = "Delete…" };

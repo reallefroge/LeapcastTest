@@ -14,6 +14,9 @@ public sealed class GpuImages
 
     public GpuImages(Func<string?> ffmpeg) => _ffmpeg = ffmpeg;
 
+    /// <summary>Forget every decoded picture (Clear cache): each is read again from its file.</summary>
+    public void Clear() { lock (_cache) _cache.Clear(); }
+
     public GpuFrame? Get(string path)
     {
         if (string.IsNullOrEmpty(path)) return null;

@@ -18,6 +18,26 @@ public static class SourceLibrary
         }
         return list;
     }
+
+    /// <summary>
+    /// Every source of this type you already have, in any scene (<paramref name="target"/> included), one per name
+    /// (copies of one camera in three scenes are offered once), with the scenes it's in. The one in
+    /// <paramref name="target"/> is the one copied when there is one.
+    /// </summary>
+    public static List<(StudioSource Source, List<string> Scenes)> Existing(IEnumerable<StudioScene> scenes, string type, StudioScene? target = null)
+    {
+        var all = scenes.ToList();
+        if (target is not null && !all.Contains(target)) all.Insert(0, target);
+        var byName = new Dictionary<string, (StudioSource Source, List<string> Scenes)>(StringComparer.OrdinalIgnoreCase);
+        var order = new List<string>();
+        foreach (var sc in all.OrderBy(sc => ReferenceEquals(sc, target) ? 0 : 1))
+            foreach (var s in sc.Sources.Where(x => x.Type == type))
+            {
+                if (!byName.TryGetValue(s.Name, out var e)) { byName[s.Name] = e = (s, new List<string>()); order.Add(s.Name); }
+                if (!e.Scenes.Contains(sc.Name)) e.Scenes.Add(sc.Name);
+            }
+        return order.Select(n => byName[n]).ToList();
+    }
 }
 
 /// <summary>

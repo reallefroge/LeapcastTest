@@ -109,6 +109,23 @@ public sealed class WebViewFrameSource : IFrameSource
         catch (Exception ex) { Error = ex.Message; }
     }
 
+    public void Refresh(bool clearCache)
+    {
+        if (_disposed) return;
+        _ui.BeginInvoke(async () =>
+        {
+            try
+            {
+                var core = _view.CoreWebView2;
+                if (core is null || _disposed) return;
+                // the cache is shared by every page; sign-ins (cookies) are kept
+                if (clearCache) await core.CallDevToolsProtocolMethodAsync("Network.clearBrowserCache", "{}");
+                await core.CallDevToolsProtocolMethodAsync("Page.reload", clearCache ? "{\"ignoreCache\":true}" : "{}");
+            }
+            catch (Exception ex) { Error = ex.Message; }
+        });
+    }
+
     public static string NormalizeUrl(string url)
     {
         url = url.Trim();

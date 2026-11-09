@@ -9,6 +9,9 @@ public interface IFrameSource : IDisposable
     byte[]? Latest();
     /// <summary>Why the source can't produce pictures (shown to the user), or null.</summary>
     string? Error { get; }
+    /// <summary>Loads the page again (<paramref name="clearCache"/>: the browser's cache is emptied first, so
+    /// every file comes fresh from the site). The last picture stays up until the page draws again.</summary>
+    void Refresh(bool clearCache) { }
 }
 
 /// <summary>
@@ -67,6 +70,14 @@ public sealed class BrowserBridge : IDisposable
         }
         _snapshot = new Dictionary<string, IFrameSource>(_sources);
         return result;
+    }
+
+    /// <summary>Reloads one page (Refresh / Clear cache). False when it isn't open.</summary>
+    public bool Refresh(string key, bool clearCache)
+    {
+        if (!_snapshot.TryGetValue(key, out var fs)) return false;
+        fs.Refresh(clearCache);
+        return true;
     }
 
     /// <summary>A page's latest picture (BGRA), for the GPU canvas.</summary>

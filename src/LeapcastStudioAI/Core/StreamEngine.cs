@@ -23,6 +23,8 @@ public interface IAudioBridge : IDisposable
     void SetSafety(AudioSafetyConfig config) { }
     /// <summary>Delays desktop-audio pipes by the safety delay (the pipeline shifts everything else to match).</summary>
     bool DelaysDesktopAudio => false;
+    /// <summary>Reopens one source's device in place (Refresh): the stream keeps going, a moment of silence at most.</summary>
+    bool Reopen(Guid sourceId) => false;
 }
 
 public interface IPlatformServices
@@ -513,6 +515,56 @@ public sealed partial class StreamEngine : IDisposable
         if (_gpuRun) GpuChanged(fadeFrom); // the GPU canvas: new readers if needed, then the new state
         else RefreshLayout();
         await ReconcileAsync(); // e.g. vertical canvas switched on, an output enabled with its own encoder
+    });
+
+    // ------------------------------------------------------------------ refresh a source
+
+    /// <summary>
+    /// What Refresh does for this source while the picture is running: true when it's reloaded on its own (a web
+    /// page, a window, a webcam, a microphone or desktop audio: nothing else is touched and the stream keeps going),
+    /// false when the picture has to be rebuilt to read it again (a screen, an image, a text: a moment's pause, and
+    /// a live stream reconnects for a second).
+    /// </summary>
+    public bool RefreshesInPlace(StudioSource s)
+    {
+        string key = PipelineBuilder.InputKey(s);
+        return SourceTypes.KindOf(s.Type) switch
+        {
+            SourceKind.Browser or SourceKind.Camera or SourceKind.Microphone or SourceKind.DesktopAudio => true,
+            SourceKind.Window => _windows.FramesOf(key) > 0 || _windows.StartsOf(key) > 0,
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// Refresh: the source is opened again, as if just added. A web page reloads (<paramref name="clearCache"/>:
+    /// with the browser's cache emptied first, so every file comes fresh from the site), a window capture finds
+    /// its window again, a webcam and an audio device reopen; each keeps its last picture/sound until the new one
+    /// comes, and nothing else is touched. A screen, an image or a text is read again by rebuilding the picture
+    /// (images are decoded again from their files). Returns what happened, for the status bar.
+    /// </summary>
+    public Task<string> RefreshSourceAsync(StudioSource s, bool clearCache = false) => Locked<string>(async () =>
+    {
+        var kind = SourceTypes.KindOf(s.Type);
+        string key = PipelineBuilder.InputKey(s);
+        if (clearCache) _gpuImages?.Clear();
+        if (kind is SourceKind.Microphone or SourceKind.DesktopAudio)
+            return _audio.Reopen(s.Id) ? $"{s.Name}: reopened." : $"{s.Name}: not open right now (it opens when the picture runs).";
+        if (_runner is null) return $"{s.Name}: not running right now (it's loaded fresh when the picture starts).";
+        switch (kind)
+        {
+            case SourceKind.Browser:
+                return _browsers.Refresh(key, clearCache) ? (clearCache ? $"{s.Name}: cache cleared, reloading." : $"{s.Name}: reloading.")
+                    : $"{s.Name}: not on the picture right now (it loads fresh when it's shown).";
+            case SourceKind.Camera:
+                return _cameras.Refresh(key) ? $"{s.Name}: reopening the camera." : $"{s.Name}: not on the picture right now (it opens fresh when it's shown).";
+            case SourceKind.Window:
+                if (_windows.Refresh(key)) return $"{s.Name}: finding the window again.";
+                break;
+        }
+        // read again from scratch (a text is drawn again, an image read from its file): rebuild the picture
+        await RestartAsync();
+        return $"{s.Name}: reloaded.";
     });
 
     // ------------------------------------------------------------------ camera auto light

@@ -6,33 +6,47 @@
         WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}" FontFamily="{StaticResource UiFont}">
   <DockPanel Margin="18">
     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+      <Button x:Name="BackButton" Content="Back" Click="Back_Click" Visibility="Collapsed"/>
       <Button Content="Cancel" IsCancel="True" Click="Cancel_Click"/>
-      <Button x:Name="AddButton" Content="Add source" IsDefault="True" Style="{StaticResource PrimaryButton}" Click="Add_Click"/>
+      <Button x:Name="AddButton" Content="Next" IsDefault="True" Style="{StaticResource PrimaryButton}" Click="Add_Click"/>
     </StackPanel>
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-      <StackPanel>
-        <!-- sources already set up in other scenes: added as a copy with every setting -->
-        <StackPanel x:Name="ExistingGroup">
-          <TextBlock Text="Add one you already set up" FontSize="17" FontWeight="SemiBold" Margin="3,0,0,2"/>
-          <TextBlock Text="Copies every setting." Style="{StaticResource Hint}" Margin="3,0,0,8"/>
-          <ListBox x:Name="ExistingList" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}"
-                   HorizontalContentAlignment="Stretch" MouseDoubleClick="SourceType_MouseDoubleClick" SelectionChanged="ExistingList_SelectionChanged">
+
+    <Grid>
+      <!-- step 1: what kind of source -->
+      <ScrollViewer x:Name="TypePage" VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+          <TextBlock Text="Choose source type" FontSize="17" FontWeight="SemiBold" Margin="3,0,0,8"/>
+          <ListBox x:Name="SourceType" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}"
+                   HorizontalContentAlignment="Stretch" MouseDoubleClick="SourceType_MouseDoubleClick" SelectionChanged="SourceType_SelectionChanged">
             <ListBox.ItemTemplate>
               <DataTemplate>
                 <Border Background="{StaticResource PanelAltBrush}" CornerRadius="7" Padding="10,7" Margin="1">
                   <StackPanel>
-                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/>
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/>
+                      <TextBlock Text="{Binding Have}" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="8,2,0,0"/>
+                    </StackPanel>
                     <TextBlock Text="{Binding Description}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap"/>
                   </StackPanel>
                 </Border>
               </DataTemplate>
             </ListBox.ItemTemplate>
           </ListBox>
-          <TextBlock Text="Or add a new one" FontSize="17" FontWeight="SemiBold" Margin="3,16,0,8"/>
         </StackPanel>
-        <TextBlock x:Name="NewHeader" Text="Choose source type" FontSize="17" FontWeight="SemiBold" Margin="3,0,0,8"/>
-        <ListBox x:Name="SourceType" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}"
-                 HorizontalContentAlignment="Stretch" MouseDoubleClick="SourceType_MouseDoubleClick" SelectionChanged="SourceType_SelectionChanged">
+      </ScrollViewer>
+
+      <!-- step 2: a new one, or one you already have (any scene, this one too) -->
+      <DockPanel x:Name="ChoicePage" Visibility="Collapsed">
+        <StackPanel DockPanel.Dock="Top">
+          <TextBlock x:Name="ChoiceHeader" Text="Add" FontSize="17" FontWeight="SemiBold" Margin="3,0,0,10"/>
+          <RadioButton x:Name="NewRadio" Content="Make a new one" GroupName="pick" IsChecked="True" FontWeight="SemiBold" Margin="3,0,0,6" Click="NewRadio_Click"/>
+          <TextBox x:Name="NewName" Margin="24,0,0,4" TextChanged="NewName_TextChanged"/>
+          <TextBlock Text="You set it up next (device, window, page…)." Style="{StaticResource Hint}" Margin="24,0,0,14"/>
+          <RadioButton x:Name="ExistingRadio" Content="Add one you already have" GroupName="pick" FontWeight="SemiBold" Margin="3,0,0,2" Click="ExistingRadio_Click"/>
+          <TextBlock x:Name="ExistingHint" Text="The same source with every setting (device, crop, size, filters, hotkey): nothing to set up again." Style="{StaticResource Hint}" Margin="24,0,0,8" TextWrapping="Wrap"/>
+        </StackPanel>
+        <ListBox x:Name="ExistingList" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}" Margin="20,0,0,0"
+                 HorizontalContentAlignment="Stretch" MouseDoubleClick="ExistingList_MouseDoubleClick" SelectionChanged="ExistingList_SelectionChanged">
           <ListBox.ItemTemplate>
             <DataTemplate>
               <Border Background="{StaticResource PanelAltBrush}" CornerRadius="7" Padding="10,7" Margin="1">
@@ -44,7 +58,7 @@
             </DataTemplate>
           </ListBox.ItemTemplate>
         </ListBox>
-      </StackPanel>
-    </ScrollViewer>
+      </DockPanel>
+    </Grid>
   </DockPanel>
 </Window>

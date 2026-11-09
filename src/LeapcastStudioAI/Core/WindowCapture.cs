@@ -383,6 +383,20 @@ public sealed class WindowCaptureBridge : IDisposable
         if (r is null) return null;
         lock (r.Lock) return r.Latest is { } f && f.Length >= r.Width * r.Height * 3 / 2 ? (f, r.Width, r.Height) : null;
     }
+    /// <summary>Re-attaches a window capture (Refresh): the window is looked up again, the last picture stays up meanwhile.</summary>
+    public bool Refresh(string key)
+    {
+        Process? p;
+        lock (_lock)
+        {
+            if (!_readers.TryGetValue(key, out var r) || r.Retired) return false;
+            p = r.Proc;
+            r.NextAttemptUtc = DateTime.UtcNow;
+        }
+        try { p?.Kill(true); } catch { }
+        return true;
+    }
+
     /// <summary>Kills a reader as if its window had closed (tests).</summary>
     public void SimulateWindowClosed(string key)
     {

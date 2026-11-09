@@ -361,6 +361,13 @@ Check(HotkeyText.Normalize("shift+ctrl+f1") == "Ctrl+Shift+F1" && HotkeyText.Nor
     Check(camB.Id != camA.Id && camB.DeviceName == "cam" && camB.CropLeft == 12 && camB.X == 0.6 && camB.Hotkey == camA.Hotkey,
         "adding one makes a copy with every setting and its own id");
     Check(SourceLibrary.FromOtherScenes(new[] { s1, s2 }, s2).All(o => o.Source.Name != "Webcam"), "…and it isn't offered again in that scene");
+    // "+" → a type → the ones you already have of it, this scene's included (one per name, with where it is)
+    var cams = SourceLibrary.Existing(new[] { s1, s2 }, SourceTypes.Camera, s2);
+    Check(cams.Count == 1 && ReferenceEquals(cams[0].Source, camB) && cams[0].Scenes.SequenceEqual(new[] { "BRB", "Game" }),
+        $"adding a camera offers the webcam you already have, once, with the scenes it's in ({string.Join("; ", cams.Select(c => c.Source.Name + ": " + string.Join(", ", c.Scenes)))})");
+    Check(SourceLibrary.Existing(new[] { s1, s2 }, SourceTypes.Image, s2).Select(x => x.Source.Name).SequenceEqual(new[] { "BRB card" })
+          && SourceLibrary.Existing(new[] { s1, s2 }, SourceTypes.Text, s2).Count == 0,
+        "…an image already in this scene is offered too; a type you have none of offers nothing (straight to a new one)");
     var map = HotkeyText.Map(new[] { s1, s2 });
     Check(map.TryGetValue("Ctrl+Shift+1", out var group) && group.Count == 2, "one hotkey switches the source in every scene it's in");
     bool shownNow = HotkeyText.Toggle(group!);
@@ -1734,6 +1741,16 @@ await engine.UpdateAsync(new[] { camScene }, camScene, WithEncoder(settings, "li
 await Task.Delay(1500);
 Check(afterSmall == camStarts && engine.CameraReaderStarts == camStarts + 1 && engine.PipelineStarts == crStarts + 4,
     $"resizing a webcam doesn't reopen it (reader starts {camStarts} → {afterSmall} after shrinking and growing back, → {engine.CameraReaderStarts} after growing 3× and a bit smaller)");
+{
+    int rs = engine.CameraReaderStarts, rps = engine.PipelineStarts;
+    string said = await engine.RefreshSourceAsync(rcam);
+    await Task.Delay(2500);
+    Check(engine.CameraReaderStarts == rs + 1 && engine.PipelineStarts == rps && engine.RefreshesInPlace(rcam),
+        $"Refresh on a webcam reopens the camera alone, the picture keeps running (reader starts {rs} → {engine.CameraReaderStarts}, pipeline starts {rps} → {engine.PipelineStarts}: \"{said}\")");
+    var card = camScene.Sources[0];
+    string said2 = await engine.RefreshSourceAsync(card, clearCache: true);
+    Check(engine.PipelineStarts == rps + 1 && !engine.RefreshesInPlace(card), $"Refresh / Clear cache on an image reads it again (one rebuild: {rps} → {engine.PipelineStarts}, \"{said2}\")");
+}
 engine.CameraDeviceOverride = camOverride;
 engine.FrameReady -= Grab;
 await engine.SetPreviewAsync(false);
@@ -1771,6 +1788,13 @@ await Task.Delay(4000);
 Console.WriteLine("    window reader: " + engine.WindowCaptureStats());
 Check(engine.WindowReaderStarts(gameWin) > gReader && engine.WindowFrames(gameWin) > gFramesBefore + 30 && engine.PipelineStarts == gStarts && Px(0.5, 0.5).g > 150,
     $"window closed: capture re-attached by itself, stream never restarted (reader starts {gReader} → {engine.WindowReaderStarts(gameWin)}, pipeline starts {gStarts} → {engine.PipelineStarts})");
+{
+    int rs = engine.WindowReaderStarts(gameWin), rps = engine.PipelineStarts; long rfr = engine.WindowFrames(gameWin);
+    string said = await engine.RefreshSourceAsync(gameWin);
+    await Task.Delay(4000);
+    Check(engine.WindowReaderStarts(gameWin) > rs && engine.WindowFrames(gameWin) > rfr + 30 && engine.PipelineStarts == rps && Px(0.5, 0.5).g > 150,
+        $"Refresh on a window finds it again, the stream never restarts (reader starts {rs} → {engine.WindowReaderStarts(gameWin)}, pipeline starts {rps} → {engine.PipelineStarts}: \"{said}\")");
+}
 engine.FrameReady -= GrabG;
 await engine.SetPreviewAsync(false);
 engine.WindowDeviceOverride = null;
@@ -1789,6 +1813,15 @@ await Task.Delay(3500);
 var inPage = Px(400 / 640.0, 225 / 360.0); var outside = Px(0.25, 0.25);
 Check(inPage.r > 200 && inPage.g < 60 && outside.r < 60, $"page drawn where placed (inside {inPage}, outside {outside}), transparent around it");
 Check(engine.SourceSize(chat) is (160, 90), $"page size known for the editor ({engine.SourceSize(chat)})");
+{
+    int rps = engine.PipelineStarts;
+    var page = SolidPage.Last;
+    string said = await engine.RefreshSourceAsync(chat);
+    string said2 = await engine.RefreshSourceAsync(chat, clearCache: true);
+    await Task.Delay(800);
+    Check(page is not null && page.Refreshes == 2 && page.LastClearCache && engine.PipelineStarts == rps && Px(400 / 640.0, 225 / 360.0).r > 200,
+        $"Refresh / Clear cache on a page reloads just the page (reloads {page?.Refreshes}, cache cleared {page?.LastClearCache}, pipeline starts {rps} → {engine.PipelineStarts}: \"{said}\" / \"{said2}\")");
+}
 engine.FrameReady -= GrabG;
 await engine.SetPreviewAsync(false);
 
@@ -2316,7 +2349,7 @@ static class WinApi
 
 sealed class FakePlatform(string png) : IPlatformServices
 {
-    public IFrameSource? OpenBrowser(StudioSource s) => new SolidPage(BrowserBridge.SizeOf(s).W, BrowserBridge.SizeOf(s).H);
+    public IFrameSource? OpenBrowser(StudioSource s) => SolidPage.Last = new SolidPage(BrowserBridge.SizeOf(s).W, BrowserBridge.SizeOf(s).H);
     public long? FindWindow(string title) => OperatingSystem.IsWindows() ? WinApi.Find(title) : null;
     public string? RenderText(StudioSource source, int outputHeight) => png;
     public (int X, int Y, int W, int H)? MonitorBounds(int index) => null;
@@ -2378,4 +2411,8 @@ sealed class SolidPage(int w, int h) : IFrameSource
     public byte[]? Latest() => _frame;
     public string? Error => null;
     public void Dispose() { }
+    public static SolidPage? Last;
+    public int Refreshes;
+    public bool LastClearCache;
+    public void Refresh(bool clearCache) { Refreshes++; LastClearCache = clearCache; }
 }

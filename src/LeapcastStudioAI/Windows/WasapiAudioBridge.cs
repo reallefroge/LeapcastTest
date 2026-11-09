@@ -23,6 +23,7 @@ public sealed class WasapiAudioBridge : IAudioBridge
         public required Guid SourceId;
         public required string Key;
         public required string Name;
+        public StudioSource? Source;
         public WasapiCapture? Capture;
         public BufferedWaveProvider? Buffer;
         public ISampleProvider? Stereo48k;
@@ -249,7 +250,7 @@ public sealed class WasapiAudioBridge : IAudioBridge
                         existing.Dispose(); // failed or unplugged earlier: try again
                         _feeds.Remove(id);
                     }
-                    var feed = new Feed { SourceId = id, Key = key, Name = src.Name };
+                    var feed = new Feed { SourceId = id, Key = key, Name = src.Name, Source = src };
                     try { StartCapture(feed, src); }
                     catch (Exception ex)
                     {
@@ -259,6 +260,30 @@ public sealed class WasapiAudioBridge : IAudioBridge
                     }
                     _feeds[id] = feed;
                 }
+            }
+        }).GetAwaiter().GetResult();
+    }
+
+    public bool Reopen(Guid sourceId)
+    {
+        // COM (the audio devices) wants a thread-pool thread, like Configure
+        return Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                if (!_feeds.TryGetValue(sourceId, out var feed) || feed.Source is null) return false;
+                try { feed.Capture?.StopRecording(); } catch { }
+                try { feed.Capture?.Dispose(); } catch { }
+                feed.Capture = null;
+                feed.Error = null;
+                // the pipe writer picks up the new buffer on its next read: the stream never stops
+                try { StartCapture(feed, feed.Source); }
+                catch (Exception ex)
+                {
+                    feed.Error = ex.Message;
+                    DeviceError?.Invoke($"\"{feed.Name}\": couldn't open the audio device ({ex.Message}).");
+                }
+                return true;
             }
         }).GetAwaiter().GetResult();
     }
