@@ -451,7 +451,7 @@ public sealed class SafetyJudge
     private readonly ContentGains _gains;
     private readonly object _lock = new();
     private int _nextId = 1;
-    private readonly List<Hold> _slurHolds = new(), _codeHolds = new();
+    private readonly List<Hold> _slurHolds = new(), _codeHolds = new(), _tailHolds = new();
     private readonly List<HeardWord> _history = new();     // finished words, last ~20 s (a code can span two sentences)
     private double _finalTo = double.NegativeInfinity;      // audio the last finished sentence covered (its words are settled)
     private readonly HashSet<long> _done = new();           // confirmed mutes already reported
@@ -498,11 +498,26 @@ public sealed class SafetyJudge
                 if (IsSlur(w.Text))
                 {
                     // a time from the running guess is rough: wider (the finished sentence brings the exact one)
-                    // (a word can show up before it's finished: the end gets a little more room)
-                    if (w.Estimated) Confirm(w.Start - 0.25, w.End + 0.22, "word");
+                    // a time from the running guess is rough: muted for good to about its end, and the next moment
+                    // held until the finished sentence says exactly where the word ends (it can show up before
+                    // it's finished; the word after it shouldn't be clipped)
+                    if (w.Estimated)
+                    {
+                        Confirm(w.Start - 0.25, w.End + 0.05, "word");
+                        double a = w.End + 0.05, b = w.End + 0.3;
+                        if (!_tailHolds.Any(t => t.From < b && t.To > a))
+                        {
+                            var t = new Hold { Id = _nextId++, From = a, To = b, CoreFrom = w.Start, CoreTo = w.End, Since = now };
+                            _tailHolds.Add(t);
+                            _gains.Mute(a, b, t.Id);
+                        }
+                    }
                     else Confirm(w.Start - 0.1, w.End + 0.1, "word");
                 }
             if (final) _finalTo = Math.Max(_finalTo, now);
+            // the finished sentence has the exact times: the word's real end is muted (step 1), the held moment after goes
+            for (int i = _tailHolds.Count - 1; i >= 0; i--)
+                if ((final && now > _tailHolds[i].To) || now - _tailHolds[i].Since > 12) { Release(_tailHolds[i]); _tailHolds.RemoveAt(i); }
 
             // 2. what the keyword listener held back: decided once the full recognizer has written down what was said there
             double lastStart = words.Count > 0 ? words[^1].Start : double.NegativeInfinity;
@@ -619,6 +634,14 @@ public sealed class SpeechListener : IDisposable
             return t0 + recSeconds + skipped / 16000.0;
         }
         public double Now(double t0) => t0 + (Interlocked.Read(ref Fed) + Interlocked.Read(ref Skipped)) / 16000.0;
+        /// <summary>A word's start: if the silence before it was skipped, the recognizer may count some of that silence as the word; it starts after the gap.</summary>
+        public double Start(double t0, double recStart, double recEnd)
+        {
+            long a = (long)(recStart * 16000), b = (long)(recEnd * 16000);
+            long? gapAt = null;
+            lock (Skips) foreach (var (at, _) in Skips) if (at > a && at < b) gapAt = at;
+            return gapAt is long g ? Timeline(t0, g / 16000.0) : Timeline(t0, recStart);
+        }
         public void Skip(int n)
         {
             long total = Interlocked.Add(ref Skipped, n);
@@ -801,9 +824,10 @@ public sealed class SpeechListener : IDisposable
             using var d = JsonDocument.Parse(json);
             if (d.RootElement.TryGetProperty(prop, out var arr) && arr.ValueKind == JsonValueKind.Array)
                 foreach (var w in arr.EnumerateArray())
-                    o.Add(new HeardWord(w.GetProperty("word").GetString() ?? "",
-                        ear.Timeline(_t0, w.TryGetProperty("start", out var s) ? s.GetDouble() : 0),
-                        ear.Timeline(_t0, w.TryGetProperty("end", out var e) ? e.GetDouble() : 0)));
+                {
+                    double rs = w.TryGetProperty("start", out var s) ? s.GetDouble() : 0, re = w.TryGetProperty("end", out var e) ? e.GetDouble() : 0;
+                    o.Add(new HeardWord(w.GetProperty("word").GetString() ?? "", ear.Start(_t0, rs, re), ear.Timeline(_t0, re)));
+                }
         }
         catch { }
         return o;

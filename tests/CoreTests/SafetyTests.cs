@@ -218,6 +218,12 @@ static class SafetyTests
                     (6.01, "what is up my " + R("avttn") + " how are you doing") },
                 new[] { ("what", 4.09, 4.3), ("is", 4.33, 4.45), ("up", 4.48, 4.6), ("my", 4.63, 4.76), (R("avttn"), 4.78, 5.03), ("how", 5.05, 5.25), ("are", 5.29, 5.4), ("you", 5.41, 5.57), ("doing", 5.59, 5.9) },
                 6.71, (i, w) => SlurWords.Near(w, true, null) ? true : w is "what" or "are" or "doing" ? false : null, new[] { (5.21, R("avttnm")), (5.51, R("ubaxl")) });
+            // the same, the recognizer alone (no keyword listener): the word after the slur isn't clipped
+            var r6 = Replay(new[] { (4.91, "what is up"), (5.01, "what is up my"), (5.31, "what is up my " + R("avttn")), (5.71, "what is up my " + R("avttn") + " how are"),
+                    (6.01, "what is up my " + R("avttn") + " how are you doing") },
+                new[] { ("what", 4.08, 4.3), ("is", 4.32, 4.45), ("up", 4.47, 4.6), ("my", 4.62, 4.78), (R("avttn"), 4.8, 5.05), ("how", 5.07, 5.27), ("are", 5.28, 5.42), ("you", 5.43, 5.57), ("doing", 5.58, 5.9) },
+                6.71, (i, w) => SlurWords.Near(w, true, null) ? true : w is "what" or "how" or "doing" ? false : null);
+            check(r6.Wrong == 0, $"Slur filter (replayed from Windows): said casually, cut; \"how\" right after it isn't clipped ({r6.Detail})");
             // a long word shown in the running guess before it was finished (Windows trace): its end must not slip out
             var r5 = Replay(new[] { (4.60, "the"), (4.80, "the pineapple"), (5.50, "the pineapple was sitting"), (5.70, "the pineapple was sitting on the"), (6.20, "the pineapple was sitting on the kitchen") },
                 new[] { ("the", 4.08, 4.2), ("pineapple", 4.23, 4.75), ("was", 4.77, 4.95), ("sitting", 4.98, 5.25), ("on", 5.28, 5.4), ("the", 5.43, 5.5), ("kitchen", 5.52, 5.85) },
