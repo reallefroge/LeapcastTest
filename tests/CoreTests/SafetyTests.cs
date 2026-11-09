@@ -220,16 +220,54 @@ static class SafetyTests
             pcm16.AddRange(new short[16000 * 4]); pcm16.AddRange(speech); pcm16.AddRange(new short[16000 * 4]);
             // where the words really are (the same recognizer, offline)
             var heard = new List<VoskApi.Word>();
+            var firstSeen = new Dictionary<string, double>(); // word@start → where the running guess first had it
+            var cpu = System.Diagnostics.Stopwatch.StartNew();
             using (var rec = new VoskApi.Recognizer(VoiceListener.SharedModel(), alternatives: 0))
             {
+                bool pw = rec.TryPartialWords();
                 var all = pcm16.ToArray();
                 for (int at = 0; at < all.Length; at += 1600)
                 {
                     var chunk = all.Skip(at).Take(1600).ToArray();
-                    if (rec.Accept(chunk, chunk.Length) is { } js) heard.AddRange(VoskApi.Parse(js).FirstOrDefault()?.Words ?? new List<VoskApi.Word>());
+                    double pos = (at + chunk.Length) / 16000.0;
+                    if (rec.Accept(chunk, chunk.Length) is { } js)
+                    {
+                        var ws = VoskApi.Parse(js).FirstOrDefault()?.Words ?? new List<VoskApi.Word>();
+                        heard.AddRange(ws);
+                        foreach (var w in ws) firstSeen.TryAdd($"{w.Text}@{w.Start:0.0}", pos);
+                    }
+                    else if (pw)
+                        try
+                        {
+                            using var pj = System.Text.Json.JsonDocument.Parse(rec.Partial());
+                            if (pj.RootElement.TryGetProperty("partial_result", out var arr))
+                                foreach (var w in arr.EnumerateArray())
+                                    firstSeen.TryAdd($"{w.GetProperty("word").GetString()}@{w.GetProperty("start").GetDouble():0.0}", pos);
+                        }
+                        catch { }
                 }
                 heard.AddRange(VoskApi.Parse(rec.Final()).FirstOrDefault()?.Words ?? new List<VoskApi.Word>());
             }
+            double rtf = cpu.Elapsed.TotalSeconds / (pcm16.Count / 16000.0);
+            // the same without word times in the running guess (does asking for them delay it?)
+            var textLags = new List<double>();
+            using (var rec2 = new VoskApi.Recognizer(VoiceListener.SharedModel(), alternatives: 0))
+            {
+                var all = pcm16.ToArray();
+                int done = 0;
+                for (int at = 0; at < all.Length; at += 1600)
+                {
+                    var chunk = all.Skip(at).Take(1600).ToArray();
+                    double pos = (at + chunk.Length) / 16000.0;
+                    if (rec2.Accept(chunk, chunk.Length) is not null) break;
+                    int n = 0;
+                    try { using var pj2 = System.Text.Json.JsonDocument.Parse(rec2.Partial()); n = (pj2.RootElement.GetProperty("partial").GetString() ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries).Length; } catch { }
+                    while (done < n && done < heard.Count) { textLags.Add(pos - heard[done].End); done++; }
+                }
+            }
+            Console.WriteLine($"    spoken test ({name}) without word times: {(textLags.Count > 0 ? textLags.Average() : double.NaN):0.00} s after a word ends (worst {(textLags.Count > 0 ? textLags.Max() : double.NaN):0.00} s)");
+            var lags = heard.Select(w => firstSeen.TryGetValue($"{w.Text}@{w.Start:0.0}", out var p) ? p - w.End : double.NaN).Where(x => !double.IsNaN(x)).ToList();
+            Console.WriteLine($"    spoken test ({name}) recognizer: {rtf:0.000}× real time; a word shows up in the running guess {(lags.Count > 0 ? lags.Average() : double.NaN):0.00} s after it ends (worst {(lags.Count > 0 ? lags.Max() : double.NaN):0.00} s)");
             string Show(string w) => SlurWords.Near(w, true, null) ? "#" + R(w) : w;
             Console.WriteLine($"    spoken test ({name}) heard: " + string.Join(" ", heard.Select(w => $"{Show(w.Text)}@{w.Start:0.00}")));
             var wants = heard.Select((w, i) => (w, want: expect(w, i, heard))).Where(x => x.want is not null).ToList();

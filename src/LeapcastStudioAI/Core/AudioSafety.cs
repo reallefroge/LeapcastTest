@@ -357,6 +357,9 @@ public static class CodeLetters
                     cur.Add(w); bridged++;
                     continue;
                 }
+                // the last word written so far, after letters being read out: the next one decides (a misheard
+                // letter in the running guess mustn't let the rest of the code out)
+                if (i == words.Count - 1 && cur.Count > 0 && (armed || strong >= 2 || cur.Count >= 3)) continue;
                 End(true);
                 if (Arming.Contains(n)) lastArm = w.End;
                 continue;
@@ -386,7 +389,9 @@ public static class CodeLetters
                 {
                     string m = SlurWords.Norm(words[j].Text);
                     if (Lead.Contains(m) || Fillers.Contains(m)) continue;
-                    return null; // letters (their run holds them) or other words (not a code)
+                    if (Of(words[j].Text) != Kind.None) return null;   // letters: their run holds them
+                    if (j == words.Count - 1) break;                   // one word so far: could be a misheard letter
+                    return null;                                       // ordinary talk: not a code
                 }
                 return words[i].End;
             }
