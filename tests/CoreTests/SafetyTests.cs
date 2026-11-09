@@ -91,6 +91,18 @@ static class SafetyTests
             check(stillHeld && !cg.Muted(5015), "Slur filter: a slow running guess that hasn't reached the word yet can't let it go; the ordinary word, once written, does");
         }
 
+        // ---- word times for the recognizer's running guess (from when each word showed up)
+        {
+            var gt = new GuessTimes();
+            gt.Finished(4.0);
+            gt.Update("hello", 5.3);
+            gt.Update("hello there", 5.8);
+            var gg = gt.Update("hello their friend how", 6.6);
+            bool ok = Math.Abs(gg[0].End - 5.05) < 0.01 && Math.Abs(gg[1].End - 5.55) < 0.01 && gg[1].Text == "their"
+                      && gg[2].End > gg[1].End && Math.Abs(gg[3].End - 6.35) < 0.01 && gg.All(w => w.Start < w.End && w.Start >= 4.0 - 1e-9);
+            check(ok, $"Running guess: each word timed from when it showed up, revised words keep their place ({string.Join(" ", gg.Select(w => $"{w.Text}:{w.Start:0.00}-{w.End:0.00}"))})");
+        }
+
         // ---- spoken game codes
         {
             // words at a steady pace (s per word), then fed the way the recognizer reports them: growing guesses, then the sentence

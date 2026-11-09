@@ -235,8 +235,46 @@ public sealed class LoudGuard
     }
 }
 
-/// <summary>A word the recognizer heard, with when (seconds on the stream's timeline).</summary>
-public readonly record struct HeardWord(string Text, double Start, double End);
+/// <summary>A word the recognizer heard, with when (seconds on the stream's timeline); Estimated: from its running guess.</summary>
+public readonly record struct HeardWord(string Text, double Start, double End, bool Estimated = false);
+
+/// <summary>
+/// Times for the words of a recognizer's running guess, taken from when each first showed up in it: a word
+/// appears about <see cref="Lag"/> after it ends (the guess with real word times comes ~1.5 s later, too late
+/// for a 2 s delay). A word the guess revises keeps its place; finished sentences bring exact times.
+/// </summary>
+public sealed class GuessTimes
+{
+    public const double Lag = 0.25;
+    public const double MaxWord = 0.75;
+    private readonly List<HeardWord> _est = new();
+    private double _floor = double.NegativeInfinity;   // where the current sentence can start (the last one's end)
+
+    public void Finished(double end) { _est.Clear(); _floor = end; }
+
+    public IReadOnlyList<HeardWord> Update(string text, double now)
+    {
+        var cur = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var old = _est.ToList();
+        _est.Clear();
+        // words already there keep their times (a revised word keeps its place)
+        for (int i = 0; i < Math.Min(cur.Length, old.Count); i++) _est.Add(old[i] with { Text = cur[i] });
+        int fresh = cur.Length - _est.Count;
+        double baseEnd = _est.Count > 0 ? _est[^1].End : _floor;
+        double target = now - Lag;
+        for (int j = 0; j < fresh; j++)
+        {
+            // new since the last look: said since the last known word, the last of them just now
+            double end = double.IsInfinity(baseEnd) || baseEnd >= target
+                ? target - (fresh - 1 - j) * 0.3
+                : baseEnd + (target - baseEnd) * (j + 1) / fresh;
+            double prev = _est.Count > 0 ? _est[^1].End : _floor;
+            double start = Math.Max(double.IsInfinity(prev) ? double.MinValue : prev, end - MaxWord);
+            _est.Add(new HeardWord(cur[_est.Count], Math.Min(start, end - 0.08), end, Estimated: true));
+        }
+        return _est.ToList();
+    }
+}
 
 /// <summary>
 /// Letters said out loud, the way a game code (an Among Us lobby code) is read: "C, E, U, W, Y, B", "see e you
@@ -457,7 +495,12 @@ public sealed class SafetyJudge
         {
             // 1. filtered words: muted for good
             foreach (var w in words)
-                if (IsSlur(w.Text)) Confirm(w.Start - 0.15, w.End + 0.15, "word");
+                if (IsSlur(w.Text))
+                {
+                    // a time from the running guess is rough: wider (the finished sentence brings the exact one)
+                    if (w.Estimated) Confirm(Math.Min(w.Start, w.End - 0.9) - 0.15, w.End + 0.3, "word");
+                    else Confirm(w.Start - 0.15, w.End + 0.15, "word");
+                }
             if (final) _finalTo = Math.Max(_finalTo, now);
 
             // 2. what the keyword listener held back: decided once the full recognizer has written down what was said there
@@ -496,7 +539,7 @@ public sealed class SafetyJudge
         // what's known so far: finished sentences, then the running guess (which runs behind the audio a little)
         var all = final ? _history.ToList()
             : _history.Where(w => words.Count == 0 || w.End <= words[0].Start + 0.05).Concat(words).ToList();
-        double frontier = final ? now : now - 1.0;
+        double frontier = final ? now : now - 0.6;
         var want = new List<(double A, double B)>();
         foreach (var r in CodeLetters.Runs(all, frontier))
         {
@@ -575,16 +618,14 @@ public sealed class SpeechListener : IDisposable
     {
         _t0 = timelineStart; _judge = judge; _model = model;
         var rec = new VoskApi.Recognizer(model, alternatives: 0);
-        bool partialWords = rec.TryPartialWords();
-        _main.Thread = new Thread(() => RunMain(rec, partialWords)) { IsBackground = true, Name = "Leapcast safety (words)", Priority = ThreadPriority.AboveNormal };
+        _main.Thread = new Thread(() => RunMain(rec)) { IsBackground = true, Name = "Leapcast safety (words)", Priority = ThreadPriority.AboveNormal };
         _main.Thread.Start();
         if (keywords is { Count: > 0 })
             try
             {
                 var kr = VoskApi.Recognizer.Keywords(model, keywords);
-                bool kpw = kr.TryPartialWords();
                 _keys = new Ear();
-                _keys.Thread = new Thread(() => RunKeys(kr, kpw)) { IsBackground = true, Name = "Leapcast safety (keywords)", Priority = ThreadPriority.AboveNormal };
+                _keys.Thread = new Thread(() => RunKeys(kr)) { IsBackground = true, Name = "Leapcast safety (keywords)", Priority = ThreadPriority.AboveNormal };
                 _keys.Thread.Start();
             }
             catch { _keys = null; } // an older libvosk without grammars: the full recognizer alone
@@ -612,7 +653,6 @@ public sealed class SpeechListener : IDisposable
         try
         {
             using var warm = new VoskApi.Recognizer(_model, alternatives: 0);
-            warm.TryPartialWords();
             var quiet = new short[1600];
             for (int i = 0; i < 20; i++) { quiet[i % quiet.Length] = (short)((i * 37) % 200 - 100); warm.Accept(quiet, quiet.Length); warm.Partial(); }
             warm.Final();
@@ -620,11 +660,12 @@ public sealed class SpeechListener : IDisposable
         catch { }
     }
 
-    private void RunMain(VoskApi.Recognizer rec, bool partialWords)
+    private void RunMain(VoskApi.Recognizer rec)
     {
         WarmUp();
         int maxBacklog = 0;
-        string lastText = "", lastTrace = "";
+        string lastTrace = "";
+        var times = new GuessTimes();
         try
         {
             foreach (var pcm in _main.Queue.GetConsumingEnumerable())
@@ -638,7 +679,7 @@ public sealed class SpeechListener : IDisposable
                     var words = Words(json, "result");
                     Trace?.Invoke($"{now:0.00}s result: {string.Join(" ", words.Select(w => $"{Show(w.Text)}@{w.Start:0.00}"))}");
                     _judge.Heard(words, now, final: true);
-                    lastText = "";
+                    times.Finished(words.Count > 0 ? words[^1].End : now);
                     continue;
                 }
                 // the running guess costs time: only when caught up (a slow PC must not fall behind the delay)
@@ -647,32 +688,22 @@ public sealed class SpeechListener : IDisposable
                     if (Trace is { } tb && _main.Queue.Count > maxBacklog) { maxBacklog = _main.Queue.Count; tb($"{now:0.00}s behind by {_main.Queue.Count * 0.1:0.0} s"); }
                     continue;
                 }
-                var partial = rec.Partial();
-                var timed = partialWords ? Words(partial, "partial_result") : new();
-                string text = Text(partial);
-                if (Trace is { } tr && text != lastTrace) { lastTrace = text; tr($"{now:0.00}s partial{(timed.Count > 0 ? "+times" : "")}: {string.Join(" ", text.Split(' ').Select(Show))}"); }
-                if (timed.Count > 0 || text.Length == 0) { _judge.Heard(timed, now, final: false); continue; }
-                // no word times in the running guess (an older libvosk): a new filtered word in it was said within the
-                // last moment or so (the finished sentence, with times, settles everything else)
-                if (text != lastText)
-                {
-                    var before = lastText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    var after = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    for (int i = 0; i < after.Length; i++)
-                        if ((i >= before.Length || before[i] != after[i]) && _judge.IsSlur(after[i]))
-                            _judge.Heard(new[] { new HeardWord(after[i], now - 1.45, now + 0.1) }, now, final: false);
-                    lastText = text;
-                }
+                // the guess as text (asking for its word times makes it ~1.5 s later): times from when each word showed up
+                string text = Text(rec.Partial());
+                var guess = times.Update(text, now);
+                if (Trace is { } tr && text != lastTrace) { lastTrace = text; tr($"{now:0.00}s partial: {string.Join(" ", guess.Select(w => $"{Show(w.Text)}~{w.Start:0.00}"))}"); }
+                _judge.Heard(guess, now, final: false);
             }
         }
         catch { }
         finally { rec.Dispose(); }
     }
 
-    private void RunKeys(VoskApi.Recognizer rec, bool partialWords)
+    private void RunKeys(VoskApi.Recognizer rec)
     {
         WarmUp();
-        string lastText = "";
+        var times = new GuessTimes();
+        int reported = 0;     // words of the current guess already reported
         try
         {
             foreach (var pcm in _keys!.Queue.GetConsumingEnumerable())
@@ -681,39 +712,30 @@ public sealed class SpeechListener : IDisposable
                 var json = rec.Accept(pcm, pcm.Length);
                 Interlocked.Add(ref _keys.Fed, pcm.Length);
                 double now = _t0 + Interlocked.Read(ref _keys.Fed) / 16000.0;
-                if (json is not null) { Suspects(Words(json, "result"), "", now, "result"); lastText = ""; continue; }
+                if (json is not null)
+                {
+                    var words = Words(json, "result").Where(w => w.Text != "[unk]" && w.Text.Length > 0).ToList();
+                    foreach (var w in words) _judge.Suspect(w.Start, w.End, w.Text, now);
+                    if (words.Count > 0) Trace?.Invoke($"{now:0.00}s keyword result: {string.Join(" ", words.Select(w => $"{SlurWords.Rot13(w.Text)}@{w.Start:0.00}"))}");
+                    times.Finished(now); reported = 0;
+                    continue;
+                }
                 if (_keys.Queue.Count > 0) continue;
-                var partial = rec.Partial();
-                string text = Text(partial);
-                if (text == lastText) continue;
-                Suspects(partialWords ? Words(partial, "partial_result") : new(), text, now, "partial");
-                lastText = text;
+                var guess = times.Update(Text(rec.Partial()), now);
+                if (reported > guess.Count) reported = guess.Count;
+                for (int i = reported; i < guess.Count; i++)
+                {
+                    var w = guess[i];
+                    if (w.Text == "[unk]" || w.Text.Length == 0) continue;
+                    // just showed up: said in about the last second
+                    _judge.Suspect(Math.Min(w.Start, now - 1.15), Math.Max(w.End, now - 0.1), w.Text, now);
+                    Trace?.Invoke($"{now:0.00}s keyword: {SlurWords.Rot13(w.Text)}~{w.Start:0.00}");
+                }
+                reported = guess.Count;
             }
         }
         catch { }
         finally { rec.Dispose(); }
-
-        void Suspects(List<HeardWord> timed, string text, double now, string what)
-        {
-            var hits = timed.Where(w => w.Text != "[unk]" && w.Text.Length > 0).ToList();
-            if (hits.Count > 0)
-            {
-                foreach (var w in hits)
-                {
-                    bool odd = w.End < w.Start || w.End > now + 0.5 || w.Start < now - 6;
-                    if (odd) _judge.Suspect(now - 1.2, now + 0.2, w.Text, now);
-                    else _judge.Suspect(w.Start, w.End, w.Text, now);
-                }
-                Trace?.Invoke($"{now:0.00}s keyword {what}: {string.Join(" ", hits.Select(w => $"{SlurWords.Rot13(w.Text)}@{w.Start:0.00}"))}");
-            }
-            else if (timed.Count == 0 && text.Length > 0)
-            {
-                var said = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(x => x != "[unk]").ToList();
-                if (said.Count == 0) return;
-                _judge.Suspect(now - 1.2, now + 0.2, said[^1], now);
-                Trace?.Invoke($"{now:0.00}s keyword {what} (no times): {string.Join(" ", said.Select(SlurWords.Rot13))}");
-            }
-        }
     }
 
     /// <summary>Filtered words appear in logs encoded (#…, ROT13), never spelled out.</summary>
