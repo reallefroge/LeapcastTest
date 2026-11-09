@@ -1657,6 +1657,8 @@ var camScene = new StudioScene { Name = "cam resize" };
 camScene.Sources.Add(new StudioSource { Name = "Card", Type = SourceTypes.Image, FilePath = redPng, Anchor = Anchors.Fill });
 var rcam = new StudioSource { Name = "Webcam", Type = SourceTypes.Camera, DeviceName = "synthetic", Anchor = Anchors.Free, X = 0.6, Y = 0.6, W = 0.3, CameraDenoise = false };
 camScene.Sources.Add(rcam);
+var camOverride = engine.CameraDeviceOverride;
+engine.CameraDeviceOverride = _ => new InputSpec(new[] { "-re", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30" }, false); // the same device every time, like a real webcam
 await engine.UpdateAsync(new[] { camScene }, camScene, WithEncoder(settings, "libx264"), false);
 await Task.Delay(2500);
 int camStarts = engine.CameraReaderStarts, crStarts = engine.PipelineStarts;
@@ -1675,6 +1677,7 @@ await engine.UpdateAsync(new[] { camScene }, camScene, WithEncoder(settings, "li
 await Task.Delay(1500);
 Check(afterSmall == camStarts && engine.CameraReaderStarts == camStarts + 1 && engine.PipelineStarts == crStarts + 4,
     $"resizing a webcam doesn't reopen it (reader starts {camStarts} → {afterSmall} after shrinking and growing back, → {engine.CameraReaderStarts} after growing 3× and a bit smaller)");
+engine.CameraDeviceOverride = camOverride;
 engine.FrameReady -= Grab;
 await engine.SetPreviewAsync(false);
 await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
