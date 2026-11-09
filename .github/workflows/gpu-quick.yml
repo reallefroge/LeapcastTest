@@ -1,0 +1,30 @@
+name: GPU canvas - quick test
+
+# Only the GPU canvas tests (Direct3D 11 on Windows' software renderer), in a few minutes.
+on:
+  push:
+    branches: [ gpu-quick ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gpu:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build the app (compile check)
+        shell: pwsh
+        run: dotnet build src/LeapcastStudioAI/LeapcastStudioAI.csproj -c Release 2>&1 | Select-String -Pattern "error|Build succeeded" | Select-Object -First 40
+      - name: GPU canvas tests
+        shell: pwsh
+        run: |
+          dotnet run -c Release --project tests/CoreTests -- --gpu 2>&1 | Tee-Object -FilePath gpu.txt
+          $code = $LASTEXITCODE
+          Get-Content gpu.txt | Where-Object { $_ -match 'FAIL|error' } | Select-Object -First 30 | ForEach-Object { Write-Host "::warning title=gpu::$($_.Trim())" }
+          if ($code -ne 0) { throw "GPU canvas tests failed" }

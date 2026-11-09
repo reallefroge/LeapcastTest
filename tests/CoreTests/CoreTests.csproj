@@ -8,12 +8,17 @@
   </PropertyGroup>
   <!-- Windows only: Windows' voices speak test phrases to the voice-clip listener. -->
   <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
-    <DefineConstants>$(DefineConstants);WINDOWS_SPEECH</DefineConstants>
+    <DefineConstants>$(DefineConstants);WINDOWS_SPEECH;WINDOWS_GPU</DefineConstants>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
     <PackageReference Include="System.Speech" Version="8.0.0" />
     <!-- libvosk.dll (the managed wrapper isn't used: Core/VoskApi.cs calls libvosk directly) -->
     <PackageReference Include="Vosk" Version="0.3.38" ExcludeAssets="compile" />
+    <!-- the GPU canvas, tested with Windows' software renderer (WARP: no graphics card on the test machine) -->
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.1" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.1" />
+    <Compile Include="../../src/LeapcastStudioAI/Windows/Gpu/**/*.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- The engine core is platform-neutral, so it is compiled and exercised against real FFmpeg here. -->

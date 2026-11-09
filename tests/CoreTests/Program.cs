@@ -68,6 +68,14 @@ if (args.Length > 0 && args[0] == "--safety")
     SafetyTests.Run((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) sf++; });
     return sf == 0 ? 0 : 1;
 }
+// quick mode: only the GPU canvas
+if (args.Length > 0 && args[0] == "--gpu")
+{
+    int gf = 0;
+    void GCheck(bool ok, string what) { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) gf++; }
+    await GpuCanvasTests.RunAsync(GCheck);
+    return gf == 0 ? 0 : 1;
+}
 // quick mode: only stream safety, spoken (Windows voices, real time)
 if (args.Length > 0 && args[0] == "--spoken-safety")
 {
@@ -1762,6 +1770,10 @@ await LiveSwitchSection(light);
 
 // ---------------------------------------------------------------- chat panel + alerts
 await ChatTests.RunAsync(Check);
+
+// ---------------------------------------------------------------- GPU canvas
+Console.WriteLine("GPU canvas (Direct3D 11)");
+await GpuCanvasTests.RunAsync(Check);
 
 // ---------------------------------------------------------------- stream safety delay
 SafetyTests.Run(Check);

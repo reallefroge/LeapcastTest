@@ -11,6 +11,8 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- exe / taskbar / Start menu icon (source art: Assets/leapcast.svg, leapcast-small.svg for 16–32 px) -->
     <ApplicationIcon>Assets\leapcast.ico</ApplicationIcon>
+    <!-- the GPU canvas copies pictures to and from Direct3D textures -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Assets\leapcast.ico" />
@@ -18,6 +20,9 @@
   </ItemGroup>
   <ItemGroup>
     <!-- WASAPI mic + desktop (loopback) audio capture -->
+    <!-- GPU scene compositing (Direct3D 11) -->
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.1" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.1" />
     <PackageReference Include="NAudio.Core" Version="2.2.1" />
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
     <!-- DPAPI encryption for the stream key -->
