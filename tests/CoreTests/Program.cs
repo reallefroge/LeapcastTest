@@ -14,6 +14,13 @@ if (args.Length > 0 && args[0] == "--burn")
 }
 
 int failures = 0;
+// quick mode: the Among Us edit on made-up signals (no FFmpeg)
+if (args.Length > 0 && args[0] == "--au")
+{
+    int af = 0;
+    VodTests.AmongUsPlan((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
+    return af == 0 ? 0 : 1;
+}
 // quick mode: only the VOD editor tests
 if (args.Length > 0 && args[0] == "--vodtest")
 {
@@ -36,6 +43,33 @@ if (args.Length > 1 && args[0] == "--vod")
         (w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "20" }, new Progress<LeapcastStudioAI.Vod.VodEditor.Progress>(p => Console.WriteLine($"  {p.Fraction:P0} {p.Step}")), CancellationToken.None);
     Console.WriteLine($"{res.Video} {res.Length} in {sw.Elapsed}");
     Console.WriteLine(File.ReadAllText(res.Description));
+    return 0;
+}
+// quick mode: the editor's plan for a real recording (args: --plan <recording.mp4> [--render <folder>])
+if (args.Length > 1 && args[0] == "--plan")
+{
+    string pff = Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg";
+    var sig = await LeapcastStudioAI.Vod.VodAnalyzer.AnalyzeAsync(pff, args[1], null, CancellationToken.None, useWhisper: false);
+    int nb = (int)Math.Ceiling(sig.Duration / 0.5);
+    var ph = LeapcastStudioAI.Vod.VodPlanner.GamePhases(sig, nb, out bool au);
+    Console.WriteLine($"{sig.Duration:0} s, Among Us: {au}, your words {sig.Words.Count}, others' words {sig.Others.Count}");
+    for (int b = 0; b < nb;)
+    {
+        int e = b; while (e < nb && ph[e] == ph[b]) e++;
+        Console.WriteLine($"  {b * 0.5,6:0.0}–{e * 0.5,6:0.0}  {ph[b]}");
+        b = e;
+    }
+    var popts = new LeapcastStudioAI.Vod.VodEditOptions("Among Us", 3600, Captions: false, Chapters: true);
+    var vplan = LeapcastStudioAI.Vod.VodPlanner.Plan(sig, popts);
+    Console.WriteLine($"plan: {vplan.Duration:0.0} s");
+    foreach (var pc in vplan.Pieces) Console.WriteLine($"  {pc.At,6:0.0}  {pc.Role,-7} {pc.In,6:0.0}–{pc.Out,6:0.0}  ({ph[Math.Clamp((int)(pc.In / 0.5), 0, nb - 1)]})");
+    foreach (var (at, title) in vplan.Chapters) Console.WriteLine($"  chapter {at,6:0.0} {title}");
+    if (args.Length > 3 && args[2] == "--render")
+    {
+        var res = await LeapcastStudioAI.Vod.VodEditor.MakeAsync(pff, args[1], args[3], popts with { Captions = false },
+            (w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "22" }, null, CancellationToken.None);
+        Console.WriteLine(res.Video);
+    }
     return 0;
 }
 // quick mode: generated music samples (for listening / spectrograms)

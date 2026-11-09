@@ -22,6 +22,8 @@ public sealed class EditTweaks
     public double MusicVolume { get; set; } = 1;
     public bool Music { get; set; } = true;
     public bool Captions { get; set; } = true;
+    /// <summary>Chapter cards on screen and chapters in the description.</summary>
+    public bool Chapters { get; set; } = true;
     public double SfxVolume { get; set; } = 1;
     /// <summary>−1 tighter (more cuts, shorter moments), 0, +1 relaxed (longer, fewer cuts).</summary>
     public int Pace { get; set; }
@@ -63,6 +65,8 @@ public sealed class VodProject
     public double TargetSeconds { get; set; } = 900;
     public bool Captions { get; set; } = true;
     public bool Music { get; set; } = true;
+    /// <summary>Made with chapter cards (and description chapters).</summary>
+    public bool ChapterCards { get; set; } = true;
     public string Socials { get; set; } = "";
     public EditTweaks Tweaks { get; set; } = new();
     /// <summary>Whisper's words already written (source seconds) and the stretches they cover.</summary>
@@ -81,7 +85,8 @@ public sealed class VodProject
     public static string PathFor(string video) => Path.Combine(Path.GetDirectoryName(video) ?? "", Path.GetFileNameWithoutExtension(video) + ".edit.json");
     private string SignalsPath => Path.Combine(WorkDir, "signals.json.gz");
 
-    public VodEditOptions Options() => new(Tweaks.Title ?? Title, (Tweaks.Minutes ?? TargetSeconds / 60) * 60, Captions && Tweaks.Captions, Music && Tweaks.Music, Socials);
+    public VodEditOptions Options() => new(Tweaks.Title ?? Title, (Tweaks.Minutes ?? TargetSeconds / 60) * 60, Captions && Tweaks.Captions, Music && Tweaks.Music, Socials,
+        ChapterCards && Tweaks.Chapters);
 
     /// <summary>Where a moment of the finished video comes from in the recording (null: a title or end card).</summary>
     public double? SourceAt(double editSeconds)
@@ -232,6 +237,13 @@ public static class EditFeedback
             {
                 if (Regex.IsMatch(s, @"\b(no|remove|without|off|turn off)\b")) { t.Captions = false; ok.Add("No captions"); }
                 else if (Regex.IsMatch(s, @"\b(add|on|turn on|want|with)\b")) { t.Captions = true; ok.Add("Captions on"); }
+            }
+
+            // ---- chapters (cards on screen, times in the description); "rename chapter 2…" is handled above
+            if (Regex.IsMatch(s, @"\bchapters\b|\bchapter cards?\b") && !Regex.IsMatch(s, @"(?:part|chapter|card)\s*\d"))
+            {
+                if (Regex.IsMatch(s, @"\b(no|remove|without|off|turn off|get rid of|drop|don'?t want)\b")) { t.Chapters = false; ok.Add("No chapters"); }
+                else if (Regex.IsMatch(s, @"\b(add|on|turn on|want|with|bring back)\b")) { t.Chapters = true; ok.Add("Chapters on"); }
             }
 
             // ---- length and pace

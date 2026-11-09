@@ -49,8 +49,63 @@ static class VodTests
         finally { Whisper.Off = false; }
     }
 
+    /// <summary>
+    /// Among Us (signals only): a meeting with the map opened for 16 s in the middle, a round of play, a second
+    /// meeting, the game ending and 60 s of lobby. The edit has both meetings and the round, nothing of the lobby,
+    /// and with chapters off no chapter cards and no chapters in the description.
+    /// </summary>
+    public static void AmongUsPlan(Action<bool, string> check)
+    {
+        const double D = 300; int nv = (int)(D / 0.5), nl = (int)(D / 0.1);
+        bool Meet(double t) => (t < 60 && !(t >= 30 && t < 46)) || (t >= 150 && t < 230);
+        bool Lobby(double t) => t >= 240;
+        var meeting = new float[nv]; var lobby = new float[nv]; var nov = new float[nv]; var motion = new float[nv]; var bright = new float[nv];
+        for (int b = 0; b < nv; b++)
+        {
+            double t = b * 0.5;
+            meeting[b] = Meet(t) ? 0.35f : 0;
+            lobby[b] = Lobby(t) ? 1 : 0;
+            nov[b] = t is >= 60 and < 150 ? 0.25f : 0.01f;
+            motion[b] = t is >= 60 and < 150 ? 0.3f : Lobby(t) ? 0.2f : 0.05f;
+            bright[b] = 0.4f;
+        }
+        var loud = new float[nl];
+        for (int k = 0; k < nl; k++) { double t = k * 0.1; loud[k] = (t % 10) < 6 ? -22 : -45; if (Math.Abs(t - 100) < 2 || Math.Abs(t - 190) < 2 || Math.Abs(t - 270) < 2) loud[k] = -10; }
+        var mine = new List<VodWord>(); var others = new List<VodWord>();
+        string[] talk = { "where", "were", "you", "i", "was", "in", "electrical", "doing", "wires", "red", "is", "sus" };
+        for (double t = 0; t < D; t += 10)
+            for (int k = 0; k < 8; k++) (k % 2 == 0 ? mine : others).Add(new VodWord(talk[(int)(t / 10 + k) % talk.Length], t + k * 0.7, t + k * 0.7 + 0.5));
+        foreach (var (t, w) in new[] { (99.0, "no way he vented"), (189.0, "oh my god it was red"), (269.0, "lets go again guys") })
+        {
+            var ws = w.Split(' ');
+            for (int k = 0; k < ws.Length; k++) mine.Add(new VodWord(ws[k], t + k * 0.4, t + k * 0.4 + 0.35));
+        }
+        mine.Sort((a, b) => a.Start.CompareTo(b.Start));
+        var s = new VodSignals
+        {
+            Duration = D, Width = 1920, Height = 1080, Fps = 30, Loud = loud, Motion = motion, Brightness = bright,
+            Words = mine, Markers = new(), WordsFromMic = true, Novelty = nov, MeetingUi = meeting, Lobby = lobby, Others = others,
+            Layout = new ClipLayout(1920, 1080, new LayoutRect(0, 0, 1920, 1080), new LayoutRect(1440, 810, 480, 270)),
+        };
+        var ph = VodPlanner.GamePhases(s, nv, out bool au);
+        string Runs() { var o = new List<string>(); for (int b = 0; b < nv;) { int e = b; while (e < nv && ph[e] == ph[b]) e++; o.Add($"{ph[b]} {b * 0.5:0}–{e * 0.5:0}"); b = e; } return string.Join(", ", o); }
+        check(au && ph[(int)(38 / 0.5)] == VodPlanner.PhaseKind.Meeting && ph[(int)(100 / 0.5)] == VodPlanner.PhaseKind.Play && ph[(int)(200 / 0.5)] == VodPlanner.PhaseKind.Meeting && ph[(int)(260 / 0.5)] == VodPlanner.PhaseKind.Idle,
+            $"VOD editor, Among Us: meetings (a map opened mid-meeting is still the meeting), the round and the lobby told apart ({Runs()})");
+        var plan = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120, Chapters: false));
+        var body = plan.Pieces.Where(p => p.Role is not ("end" or "title")).ToList();
+        bool noLobby = plan.Pieces.All(p => p.Out <= 239.5 || p.In >= 300);
+        bool hasPlay = body.Any(p => p.In < 150 && p.Out > 60), meet1 = body.Any(p => p.In < 60), meet2 = body.Any(p => p.In < 230 && p.Out > 150);
+        check(noLobby && hasPlay && meet1 && meet2,
+            $"…the edit has both meetings and the round of play, and not a frame of the lobby ({string.Join(" ", body.Select(p => $"{p.In:0}–{p.Out:0}"))})");
+        check(plan.Chapters.Count == 0 && !plan.Texts.Any(x => x.Kind == "chapter"), "…chapters off: no chapter cards, no chapters in the description");
+        var with = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120));
+        check(with.Chapters.Any(c => c.Title.StartsWith("Meeting")) && with.Chapters.Any(c => c.Title.StartsWith("Round")),
+            $"…chapters on: named by meeting and round ({string.Join(" / ", with.Chapters.Select(c => c.Title))})");
+    }
+
     private static async Task RunInnerAsync(string ffmpeg, string work, Action<bool, string> check)
     {
+        AmongUsPlan(check);
         string dir = Path.Combine(work, "vod");
         Directory.CreateDirectory(dir);
         string src = Path.Combine(dir, "stream.mp4");

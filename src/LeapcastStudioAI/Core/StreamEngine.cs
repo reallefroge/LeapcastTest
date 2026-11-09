@@ -36,6 +36,8 @@ public interface IPlatformServices
     (int W, int H)? WindowClientSize(long hwnd) => null;
     /// <summary>Starts rendering a web page off-screen (null where browsers aren't supported).</summary>
     IFrameSource? OpenBrowser(StudioSource source) => null;
+    /// <summary>Layers scenes on the graphics card (null where that isn't available).</summary>
+    IGpuCanvas? CreateGpuCanvas(int width, int height, int fps, Func<string, GpuFrame?> frames) => null;
 }
 
 public sealed record EngineStatus(
@@ -67,7 +69,7 @@ public sealed class EngineMessageEventArgs(string text, bool isError) : EventArg
 /// segments and to independent multistream outputs (Aitum-style: start/stop/reconnect each destination on its own).
 /// All public operations are serialized.
 /// </summary>
-public sealed class StreamEngine : IDisposable
+public sealed partial class StreamEngine : IDisposable
 {
     private readonly IAudioBridge _audio;
     private readonly IPlatformServices _platform;
@@ -488,7 +490,8 @@ public sealed class StreamEngine : IDisposable
             await RestartAsync();
             return;
         }
-        bool structural = RunnerFingerprint(Composited()) != _runnerFingerprint
+        bool structural = RunnerFingerprint(FfScenes(Composited())) != _runnerFingerprint
+                          || GpuWanted() != _gpuRun
                           || (_runnerRequest is not null && Math.Abs(_runnerRequest.SafetyDelay - (_audio.DelaysDesktopAudio ? Settings.SafetyConfig().DelaySeconds : 0)) > 1e-6);
         _audio.SetSafety(Settings.SafetyConfig()); // word list, guard on/off: live
         if (restartIfRunning || structural)
@@ -499,13 +502,16 @@ public sealed class StreamEngine : IDisposable
             await RestartAsync();
             return;
         }
+        int? fadeFrom = null;
         if (index != _activeIndex)
         {
+            fadeFrom = CompositedIndex(_activeIndex);
             Transition(CompositedIndex(_activeIndex), CompositedIndex(index));
             _activeIndex = index;
         }
         ApplyLiveState(); // sources shown/hidden, volume changes: switched live, no rebuild
-        RefreshLayout();
+        if (_gpuRun) GpuChanged(fadeFrom); // the GPU canvas: new readers if needed, then the new state
+        else RefreshLayout();
         await ReconcileAsync(); // e.g. vertical canvas switched on, an output enabled with its own encoder
     });
 
@@ -562,6 +568,7 @@ public sealed class StreamEngine : IDisposable
             if (r is not null && spec is not null && _runnerRequest is { } rq && rq.PreviewRate != _previewRate
                 && DateTime.UtcNow - _runnerBuiltUtc < TimeSpan.FromSeconds(6))
                 r.SendCommands(PipelineBuilder.PreviewGateCommands(spec, _previewRate));
+            if (_gpuRun) { GpuAutoLight(); return; }
             if (r is null || spec is null || spec.CameraLightFilters.Count == 0) return;
             foreach (var key in spec.CameraLightFilters.Select(f => f.Key).Distinct())
             {
@@ -603,6 +610,7 @@ public sealed class StreamEngine : IDisposable
     public void RefreshLayout()
     {
         if (_runner is null || _runnerSpec is null || _runnerRequest is null) return;
+        if (_gpuRun) { PushGpuState(); return; } // the canvas draws every source itself
         var want = DesiredPositions(_runnerSpec, _runnerRequest);
         lock (_posLock)
             foreach (var (k, v) in want) _wantPos[k] = v;
@@ -1194,7 +1202,7 @@ public sealed class StreamEngine : IDisposable
     private async Task ReconcileAsync(bool requireSuccess = false)
     {
         var want = DesiredShape();
-        if (!want.Run) { await StopRunnerAsync(); CloseDevices(); Publish(); return; }
+        if (!want.Run) { await StopRunnerAsync(); CloseDevices(); _gpu?.Dispose(); _gpu = null; Publish(); return; }
         if (_runner is not null && want == _runnerShape) return;
         await StopRunnerAsync();
         await StartRunnerAsync(requireSuccess);
@@ -1301,9 +1309,24 @@ public sealed class StreamEngine : IDisposable
                 extra.Add((bus.Path, o.IsVertical, op));
             }
 
+        // GPU mode: the canvas is FFmpeg's only picture (every scene shows it; audio stays per scene)
+        string? blocker = GpuBlocker(shape, scenes);
+        _gpuRun = blocker is null && EnsureGpuCanvas(plan);
+        if (!_gpuRun && Settings.GpuCompositing && blocker is not null && blocker != "off") GpuStatus = blocker;
+        if (!Settings.GpuCompositing) { _gpu?.Dispose(); _gpu = null; GpuStatus = "off"; }
+        if (_gpuRun)
+        {
+            int gw = _gpu!.Width, gh = _gpu.Height;
+            _gpuPipe?.Dispose();
+            var canvas = _gpu;
+            _gpuPipe = new CountedFramePipe(_pipeDir, gw * gh * 3 / 2, plan.Fps, origin, () => canvas.Latest(), Frames.BlankI420(gw, gh));
+            camFeeds = new Dictionary<string, CameraBridge.CameraFeed>(camFeeds) { [PipelineBuilder.InputKey(CanvasSource)] = new CameraBridge.CameraFeed(_gpuPipe.Path, gw, gh) };
+            _gpuReaders = null;
+            GpuStatus = $"on: {_gpu.Adapter}";
+        }
         var request = new PipelineRequest
         {
-            Scenes = scenes,
+            Scenes = FfScenes(scenes),
             ActiveSceneIndex = Math.Max(0, scenes.FindIndex(sc => ReferenceEquals(sc, ActiveScene))),
             StagedSceneIndex = StagedComposited,
             Plan = plan,
@@ -1351,7 +1374,7 @@ public sealed class StreamEngine : IDisposable
         InitLiveState(spec);
         _runnerRequest = request;
         _runnerOrigin = request.WallclockOrigin;
-        _runnerFingerprint = RunnerFingerprint(scenes);
+        _runnerFingerprint = RunnerFingerprint(FfScenes(scenes));
         var (phw, pvw, ph) = spec.PreviewLayout;
         PreviewFrame = (spec.PreviewStageWidth + phw + pvw, ph, phw, pvw, spec.PreviewStageWidth);
         foreach (var w in spec.Warnings) Message?.Invoke(this, new EngineMessageEventArgs(w, false));
@@ -1383,6 +1406,7 @@ public sealed class StreamEngine : IDisposable
         runner.LogLine += line => OnLogLine(line, spec, parsing);
         _runner = runner;
         _runnerBuiltUtc = DateTime.UtcNow;
+        if (_gpuRun) { RefreshGpuReaders(); PushGpuState(); }
         // the preview's rate changed while this was being built: catch up
         if (request.PreviewRate != _previewRate) runner.SendCommands(PipelineBuilder.PreviewGateCommands(spec, _previewRate));
         _runnerShape = shape;
@@ -1497,6 +1521,7 @@ public sealed class StreamEngine : IDisposable
         if (_runnerShape?.Clip == true) _clipCache.EndSession();
         if (encoded) _audio.ClosePipes();
         _cameras.ClosePipes(); // readers stay open (warm) for the next run
+        StopGpu();
         _windows.ClosePipes();
         _browsers.ClosePipes();
         _runnerShape = null;
@@ -1800,6 +1825,8 @@ public sealed class StreamEngine : IDisposable
         _outputs.Dispose();
         _audio.Dispose();
         _lightTimer.Dispose();
+        _gpuPipe?.Dispose();
+        _gpu?.Dispose();
         _cameras.Dispose();
         _windows.Dispose();
         _browsers.Dispose();

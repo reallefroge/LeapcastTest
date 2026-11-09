@@ -472,6 +472,8 @@ public sealed class StudioSettings
     /// seamless fade either way: every scene's shown sources keep running.
     /// </summary>
     public bool InstantSwitching { get; set; }
+    /// <summary>Layer scenes on the graphics card (Direct3D 11) instead of in FFmpeg on the processor.</summary>
+    public bool GpuCompositing { get; set; }
     /// <summary>Keep the preview at full speed while another app is in front (e.g. it's on a second monitor while you play).</summary>
     public bool PreviewLiveInBackground { get; set; }
     /// <summary>YouTube: pick the broadcast (scheduled or new) when going live, instead of only using the stream key.</summary>
@@ -484,6 +486,8 @@ public sealed class StudioSettings
     /// <summary>Where the VOD editor puts finished videos.</summary>
     public string VodEditFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Leapcast", "VODEdits");
     /// <summary>The VOD editor's target length (minutes).</summary>
+    /// <summary>Chapter cards and description chapters in edited videos.</summary>
+    public bool VodEditChapters { get; set; } = true;
     public int VodEditMinutes { get; set; } = 15;
     /// <summary>Leave Leapcast's own windows out of display captures (they show what's behind them).</summary>
     public bool HideFromCapture { get; set; }

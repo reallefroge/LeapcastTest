@@ -60,4 +60,4 @@ public sealed class EditPlan
     public int FramesOf(Piece p) => Math.Max(1, (int)Math.Round(p.Length * Fps));
 }
 
-public sealed record VodEditOptions(string Title, double TargetSeconds = 900, bool Captions = true, bool Music = true, string Socials = "");
+public sealed record VodEditOptions(string Title, double TargetSeconds = 900, bool Captions = true, bool Music = true, string Socials = "", bool Chapters = true);

@@ -21,7 +21,7 @@ public static class VodEditor
         var project = new VodProject
         {
             Recording = recording, OutputFolder = outputFolder, Title = options.Title, TargetSeconds = options.TargetSeconds,
-            Captions = options.Captions, Music = options.Music, Socials = options.Socials,
+            Captions = options.Captions, Music = options.Music, Socials = options.Socials, ChapterCards = options.Chapters,
         };
         CleanOldWork(outputFolder);
         return RunAsync(ffmpeg, project, videoArgs, progress, ct, revise: false);

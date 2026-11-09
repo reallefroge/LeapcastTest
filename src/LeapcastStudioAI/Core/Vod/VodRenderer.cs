@@ -269,8 +269,11 @@ public static class VodRenderer
                 bool voice = spoken[Math.Min(spoken.Length - 1, (int)(t * 20))];
                 talking = voice ? talking + 0.005 : Math.Max(0, talking - 0.01);
                 double src = piece.In + (t - piece.At) * piece.Speed;
-                bool loud = s.LoudAt(src) > -28;
-                target = piece.Speed < 1 ? 0.06 : voice ? (talking > 6 ? 0.035 : 0.075) : loud ? 0.12 : 0.18;
+                // anyone talking (your friends on Discord too, not just you) or the game making noise: the music
+                // steps back; it only comes up a little in real quiet
+                float lvl = Math.Max(s.LoudAt(src), s.LoudAt(src + 0.1));
+                bool sound = lvl > -38, loud = lvl > -28;
+                target = piece.Speed < 1 ? 0.05 : voice ? (talking > 6 ? 0.03 : 0.055) : loud ? 0.06 : sound ? 0.08 : 0.14;
             }
             else talking = 0;
             double coef = target < gain ? 0.25 : 0.02; // quick to get out of the way, slow to come back
@@ -340,8 +343,8 @@ public static class VodRenderer
         return sb.ToString();
     }
 
-    /// <summary>The music's overall level (0.5 = half of the original mix: about −6 dB everywhere).</summary>
-    public const double MusicLevel = 0.5;
+    /// <summary>The music's overall level (0.32 of the original mix: about −10 dB everywhere; lowered twice on request).</summary>
+    public const double MusicLevel = 0.32;
 
     /// <summary>A name for a piece made exactly this way (source, timing, every effect).</summary>
     private static string PieceKey(string source, Piece p, EditPlan plan)

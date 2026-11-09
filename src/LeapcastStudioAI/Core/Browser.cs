@@ -18,6 +18,7 @@ public interface IFrameSource : IDisposable
 public sealed class BrowserBridge : IDisposable
 {
     private readonly Dictionary<string, IFrameSource> _sources = new();
+    private volatile Dictionary<string, IFrameSource> _snapshot = new();   // read from other threads (GPU canvas)
     private readonly List<CountedFramePipe> _pipes = new();
     private readonly string _scratch;
     private readonly Func<StudioSource, IFrameSource?> _factory;
@@ -64,7 +65,15 @@ public sealed class BrowserBridge : IDisposable
             _pipes.Add(pipe);
             result[key] = new BrowserFeed(pipe.Path, w, h, fps);
         }
+        _snapshot = new Dictionary<string, IFrameSource>(_sources);
         return result;
+    }
+
+    /// <summary>A page's latest picture (BGRA), for the GPU canvas.</summary>
+    public GpuFrame? LatestBgra(string key)
+    {
+        _snapshot.TryGetValue(key, out var fs);
+        return fs?.Latest() is { } f && f.Length >= fs.Width * fs.Height * 4 ? new GpuFrame(f, fs.Width, fs.Height, FramePixels.Bgra) : null;
     }
 
     /// <summary>Deepest frame backlog of any browser pipe (seconds).</summary>
@@ -81,6 +90,7 @@ public sealed class BrowserBridge : IDisposable
         ClosePipes();
         foreach (var s in _sources.Values) { try { s.Dispose(); } catch { } }
         _sources.Clear();
+        _snapshot = new();
     }
 
     public void Dispose() => CloseAll();

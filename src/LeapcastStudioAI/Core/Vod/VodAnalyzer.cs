@@ -26,7 +26,19 @@ public sealed class VodSignals
     /// <summary>The recording has a sound track (a silent one is scored with music only).</summary>
     public bool HasAudio { get; init; } = true;
 
+    /// <summary>How different the game picture is from 8 s before, every 0.5 s: moving around a map is high, a lobby or menu low.</summary>
+    public float[] Novelty { get; init; } = Array.Empty<float>();
+    /// <summary>Among Us: how much of the meeting tablet's green frame is on screen, every 0.5 s (0…1).</summary>
+    public float[] MeetingUi { get; init; } = Array.Empty<float>();
+    /// <summary>Among Us: the lobby is on screen ("WAITING FOR HOST" / the room settings panel), every 0.5 s (0 or 1).</summary>
+    public float[] Lobby { get; init; } = Array.Empty<float>();
+    public bool LobbyAt(double t) => Lobby.Length > 0 && Lobby[Math.Clamp((int)(t / VideoStep), 0, Lobby.Length - 1)] > 0.5f;
+    /// <summary>What other people said (your desktop audio: friends on Discord, the game), when it was transcribed.</summary>
+    public List<VodWord> Others { get; init; } = new();
+
     public float LoudAt(double t) => Loud.Length == 0 ? -90 : Loud[Math.Clamp((int)(t / LoudStep), 0, Loud.Length - 1)];
+    public float NoveltyAt(double t) => Novelty.Length == 0 ? -1 : Novelty[Math.Clamp((int)(t / VideoStep), 0, Novelty.Length - 1)];
+    public float MeetingAt(double t) => MeetingUi.Length == 0 ? 0 : MeetingUi[Math.Clamp((int)(t / VideoStep), 0, MeetingUi.Length - 1)];
     public float MotionAt(double t) => Motion.Length == 0 ? 0 : Motion[Math.Clamp((int)(t / VideoStep), 0, Motion.Length - 1)];
 }
 
@@ -113,6 +125,10 @@ public static class VodAnalyzer
             const int W = 320, H = 180;
             var motion = new List<float>();
             var bright = new List<float>();
+            var novelty = new List<float>();
+            var meetingUi = new List<float>();
+            var lobby = new List<float>();
+            var thumbs = new List<float[]>();
             var deaths = new List<VodMarker>();
             var det = new DeathDetector();
             var t0 = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -121,6 +137,12 @@ public static class VodAnalyzer
             LayoutRect game = layout?.Game is { } g && layout.CanvasW > 0
                 ? new LayoutRect(g.X * W / layout.CanvasW, g.Y * H / layout.CanvasH, g.W * W / layout.CanvasW, g.H * H / layout.CanvasH)
                 : new LayoutRect(0, 0, W, H);
+            // the game's own picture on the frame (a layout may run it past the edges), and the webcam's spot (left out)
+            int gx0 = Math.Clamp((int)game.X, 0, W - 1), gy0 = Math.Clamp((int)game.Y, 0, H - 1);
+            int gx1 = Math.Clamp((int)(game.X + game.W), gx0 + 1, W), gy1 = Math.Clamp((int)(game.Y + game.H), gy0 + 1, H);
+            LayoutRect? camRect = layout?.Camera is { } cr && layout.CanvasW > 0
+                ? new LayoutRect(cr.X * W / layout.CanvasW, cr.Y * H / layout.CanvasH, cr.W * W / layout.CanvasW, cr.H * H / layout.CanvasH) : null;
+            bool InCam(int x, int y) => camRect is { } c && x >= c.X && x < c.X + c.W && y >= c.Y && y < c.Y + c.H;
             // the GPU decodes when it can (an hour of 1080p60 is a lot of frames); the CPU otherwise
             using var p = Start(ffmpeg, new[] { "-v", "error", "-hwaccel", "auto", "-i", video, "-an", "-vf", $"fps=2,scale={W}:{H}:flags=fast_bilinear,format=bgra", "-f", "rawvideo", "-" });
             using var reg = ct.Register(() => { try { p.Kill(true); } catch { } });
@@ -149,6 +171,47 @@ public static class VodAnalyzer
                 }
                 motion.Add(prev is null ? 0 : Math.Min(1f, diff / (float)samples / 40f));
                 bright.Add(lum / (float)samples / 255f);
+                // a 16×9 colour thumbnail of the game picture (webcam left out): compared with 8 s ago
+                var th = new float[16 * 9 * 3];
+                var cnt = new int[16 * 9];
+                for (int y = gy0; y < gy1; y += 2)
+                    for (int x = gx0; x < gx1; x += 2)
+                    {
+                        if (InCam(x, y)) continue;
+                        int cell = Math.Min(8, (y - gy0) * 9 / (gy1 - gy0)) * 16 + Math.Min(15, (x - gx0) * 16 / (gx1 - gx0));
+                        int i = (y * W + x) * 4;
+                        th[cell * 3] += frame[i]; th[cell * 3 + 1] += frame[i + 1]; th[cell * 3 + 2] += frame[i + 2];
+                        cnt[cell]++;
+                    }
+                for (int c = 0; c < cnt.Length; c++) if (cnt[c] > 0) { th[c * 3] /= cnt[c] * 255f; th[c * 3 + 1] /= cnt[c] * 255f; th[c * 3 + 2] /= cnt[c] * 255f; }
+                thumbs.Add(th);
+                if (thumbs.Count > 16)
+                {
+                    var old = thumbs[^17];
+                    float d = 0; int used = 0;
+                    for (int c = 0; c < cnt.Length; c++) if (cnt[c] > 0) { d += Math.Abs(th[c * 3] - old[c * 3]) + Math.Abs(th[c * 3 + 1] - old[c * 3 + 1]) + Math.Abs(th[c * 3 + 2] - old[c * 3 + 2]); used++; }
+                    novelty.Add(used == 0 ? 0 : d / (used * 3));
+                    thumbs.RemoveAt(0);
+                }
+                else novelty.Add(novelty.Count > 0 ? novelty[^1] : 0.1f);
+                // Among Us: the meeting tablet's bright green frame down the left and right edges of the game picture
+                float Strip(double fx0, double fx1)
+                {
+                    int x0 = gx0 + (int)((gx1 - gx0) * fx0), x1 = Math.Max(x0 + 1, gx0 + (int)((gx1 - gx0) * fx1));
+                    int y0 = gy0 + (gy1 - gy0) / 10, y1 = gy0 + (gy1 - gy0) * 6 / 10;
+                    int green = 0, all = 0;
+                    for (int y = y0; y < y1; y++)
+                        for (int x = x0; x < x1 && x < W; x++)
+                        {
+                            if (InCam(x, y)) continue;
+                            int i = (y * W + x) * 4;
+                            if (frame[i + 1] > 140 && frame[i + 2] < 120 && frame[i] < 120) green++;
+                            all++;
+                        }
+                    return all == 0 ? 0 : green / (float)all;
+                }
+                meetingUi.Add(Math.Max(Strip(0.003, 0.03), Strip(0.97, 0.997)));
+                lobby.Add(AmongUsLobby(frame, W, H, gx0, gy0, gx1, gy1) ? 1 : 0);
                 det.Feed(frame, W, H, game, t0 + TimeSpan.FromSeconds(index * 0.5));
                 prev ??= new byte[frame.Length];
                 Buffer.BlockCopy(frame, 0, prev, 0, frame.Length);
@@ -156,7 +219,7 @@ public static class VodAnalyzer
                 videoDone = index * 0.5 / Math.Max(1, dur);
                 if (index % 20 == 0) Report();
             }
-            return (motion.ToArray(), bright.ToArray(), deaths);
+            return (motion.ToArray(), bright.ToArray(), deaths, novelty.ToArray(), meetingUi.ToArray(), lobby.ToArray());
         }, ct);
 
         // the words: Whisper on your mic track (only your voice), else on the recording's sound; then speaker leaks out
@@ -185,7 +248,7 @@ public static class VodAnalyzer
         }, ct);
         var (loud, heard) = await audioTask;
         var whispered = await whisperTask;
-        var (mot, bri, found) = await videoTask;
+        var (mot, bri, found, nov, meet, lob) = await videoTask;
         var markers = new List<VodMarker>(side?.Markers ?? new());
         // deaths seen in the video that the session log doesn't already have
         foreach (var m in found)
@@ -197,7 +260,56 @@ public static class VodAnalyzer
             Duration = dur, Width = w, Height = h, Fps = fps, HasAudio = hasAudio, Loud = loud, Motion = mot, Brightness = bri,
             Words = Vocabulary.Fix(whispered is { Count: > 0 } ? whispered : haveWords ? side!.Words : heard), Markers = markers, Layout = side?.Layout,
             WordsFromMic = haveWords || side?.MicFile is not null, WordsFromWhisper = whispered is { Count: > 0 },
+            Novelty = nov, MeetingUi = meet, Lobby = lob, Others = side?.Desktop?.ToList() ?? new(),
         };
+    }
+
+    /// <summary>
+    /// The Among Us lobby: the "WAITING FOR HOST" box under the crew (two thin grey lines with flat dark grey between,
+    /// in the bottom middle of the game), or the room-settings panel on the right (dark, with the teal room code and
+    /// "VIEW" button). BGRA frame; the game's picture is (x0, y0)–(x1, y1).
+    /// </summary>
+    public static bool AmongUsLobby(byte[] f, int w, int h, int x0, int y0, int x1, int y1)
+    {
+        int gw = x1 - x0, gh = y1 - y0;
+        if (gw < 40 || gh < 40) return false;
+        int bx0 = x0 + gw * 39 / 100, bx1 = x0 + gw * 59 / 100, by0 = y0 + gh * 70 / 100, by1 = Math.Min(h, y1);
+        int rows = by1 - by0, cols = bx1 - bx0;
+        double Lum(int x, int y) { int i = (y * w + x) * 4; return (f[i] + f[i + 1] + f[i + 2]) / 3.0; }
+        int Sat(int x, int y) { int i = (y * w + x) * 4; return Math.Max(f[i], Math.Max(f[i + 1], f[i + 2])) - Math.Min(f[i], Math.Min(f[i + 1], f[i + 2])); }
+        var lines = new List<int>();
+        for (int y = by0 + 2; y < by1 - 2; y++)
+        {
+            int hit = 0;
+            for (int x = bx0; x < bx1; x++)
+            {
+                double l = Lum(x, y);
+                if (l > 85 && l < 210 && Sat(x, y) < 24 && (Lum(x, y - 2) < l - 18 || Lum(x, y + 2) < l - 18)) hit++;
+            }
+            if (hit > cols * 0.75) lines.Add(y);
+        }
+        foreach (int a in lines)
+            foreach (int b in lines)
+            {
+                int g = b - a;
+                if (g < gh * 0.08 || g > gh * 0.15) continue;
+                int dark = 0, flat = 0, all = 0;
+                for (int y = a + 2; y < b - 1; y++)
+                    for (int x = bx0; x < bx1; x++) { all++; if (Lum(x, y) < 110) dark++; if (Sat(x, y) < 25) flat++; }
+                if (all > 0 && dark > all * 0.6 && flat > all * 0.85) return true;
+            }
+        // the room settings panel (top right of the game)
+        int px0 = x0 + gw * 77 / 100, px1 = x0 + gw * 99 / 100, py0 = y0 + gh * 12 / 100, py1 = Math.Min(h, y0 + gh * 62 / 100);
+        int pd = 0, teal = 0, pall = 0;
+        for (int y = Math.Max(0, py0); y < py1; y++)
+            for (int x = px0; x < px1 && x < w; x++)
+            {
+                int i = (y * w + x) * 4;
+                pall++;
+                if ((f[i] + f[i + 1] + f[i + 2]) / 3 < 45) pd++;
+                if (f[i + 1] > 170 && f[i] > 170 && f[i + 2] < 130) teal++; // BGRA: B high, G high, R low
+            }
+        return pall > 0 && pd > pall * 0.45 && teal > pall * 0.002;
     }
 
     private static IEnumerable<VodWord> Words(string json) =>

@@ -375,6 +375,14 @@ public sealed class WindowCaptureBridge : IDisposable
     /// <summary>Frames received from a window's reader so far (tests / health).</summary>
     public long FramesOf(string key) { lock (_lock) return _readers.TryGetValue(key, out var r) ? Interlocked.Read(ref r.Frames) : 0; }
     public int StartsOf(string key) { lock (_lock) return _readers.TryGetValue(key, out var r) ? r.Starts : 0; }
+    /// <summary>A window's latest picture (YUV 4:2:0, already cut and sized), for the GPU canvas.</summary>
+    public (byte[] Frame, int Width, int Height)? Latest(string key)
+    {
+        Reader? r;
+        lock (_lock) _readers.TryGetValue(key, out r);
+        if (r is null) return null;
+        lock (r.Lock) return r.Latest is { } f && f.Length >= r.Width * r.Height * 3 / 2 ? (f, r.Width, r.Height) : null;
+    }
     /// <summary>Kills a reader as if its window had closed (tests).</summary>
     public void SimulateWindowClosed(string key)
     {

@@ -24,7 +24,8 @@ public sealed class VodEditWindow : Window
     private readonly ListBox _list = new() { Height = 190 };
     private readonly TextBox _title = new(), _minutes = new() { Width = 60 };
     private readonly CheckBox _captions = new() { Content = "Captions", IsChecked = true, Margin = new Thickness(0, 0, 16, 0) };
-    private readonly CheckBox _music = new() { Content = "Music (original, made for each video)", IsChecked = true };
+    private readonly CheckBox _music = new() { Content = "Music (original, made for each video)", IsChecked = true, Margin = new Thickness(0, 0, 16, 0) };
+    private readonly CheckBox _chapters = new() { Content = "Chapters", IsChecked = true, ToolTip = "Chapter cards on screen (\"MEETING 1\", \"ROUND 2\"…) and chapter times in the description" };
     private readonly TextBlock _folder = new() { TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private readonly ProgressBar _bar = new() { Height = 8, Maximum = 1, Margin = new Thickness(0, 12, 0, 6) };
     private readonly TextBlock _step = new() { TextWrapping = TextWrapping.Wrap };
@@ -62,7 +63,8 @@ public sealed class VodEditWindow : Window
         row.Children.Add(_minutes);
         p.Children.Add(row);
         var opts = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
-        opts.Children.Add(_captions); opts.Children.Add(_music);
+        opts.Children.Add(_captions); opts.Children.Add(_music); opts.Children.Add(_chapters);
+        _chapters.IsChecked = _settings.VodEditChapters;
         p.Children.Add(opts);
         var folderRow = new DockPanel { Margin = new Thickness(0, 10, 0, 0) };
         var change = new Button { Content = "Change…", Margin = new Thickness(8, 0, 0, 0) };
@@ -120,7 +122,7 @@ public sealed class VodEditWindow : Window
     private readonly ComboBox _emphasis = new() { Width = 140, ItemsSource = new[] { "More action", "Balanced", "More funny" } };
     private readonly CheckBox _rSlow = new() { Content = "Slow motion", Margin = new Thickness(0, 0, 14, 0) }, _rFace = new() { Content = "Cuts to your face", Margin = new Thickness(0, 0, 14, 0) },
         _rCold = new() { Content = "Cold open", Margin = new Thickness(0, 0, 14, 0) }, _rCaptions = new() { Content = "Captions", Margin = new Thickness(0, 0, 14, 0) },
-        _rMusic = new() { Content = "Music" };
+        _rMusic = new() { Content = "Music", Margin = new Thickness(0, 0, 14, 0) }, _rChapters = new() { Content = "Chapters" };
     private readonly Button _rerender = new() { Content = "Re-render with changes", MinWidth = 190 };
 
     private FrameworkElement BuildRevisePanel()
@@ -155,7 +157,7 @@ public sealed class VodEditWindow : Window
         r.Children.Add(Row("Focus on", _emphasis));
         r.Children.Add(Row("Length (minutes)", _rMinutes));
         var toggles = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
-        foreach (var c in new[] { _rCold, _rSlow, _rFace, _rCaptions, _rMusic }) toggles.Children.Add(c);
+        foreach (var c in new[] { _rCold, _rSlow, _rFace, _rCaptions, _rMusic, _rChapters }) toggles.Children.Add(c);
         r.Children.Add(toggles);
         r.Children.Add(Label("Moments in the video (untick to leave one out)"));
         r.Children.Add(new Border { Child = new ScrollViewer { Content = _moments, MaxHeight = 220, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
@@ -213,7 +215,7 @@ public sealed class VodEditWindow : Window
         _emphasis.SelectedIndex = t.Emphasis + 1;
         _rMinutes.Text = ((t.Minutes ?? pr.TargetSeconds / 60)).ToString("0.#");
         _rSlow.IsChecked = t.SlowMotion; _rFace.IsChecked = t.FaceCam; _rCold.IsChecked = t.ColdOpen;
-        _rCaptions.IsChecked = t.Captions && pr.Captions; _rMusic.IsChecked = t.Music && pr.Music;
+        _rCaptions.IsChecked = t.Captions && pr.Captions; _rMusic.IsChecked = t.Music && pr.Music; _rChapters.IsChecked = t.Chapters && pr.ChapterCards;
         _moments.Children.Clear();
         foreach (var m in pr.Moments)
         {
@@ -248,6 +250,8 @@ public sealed class VodEditWindow : Window
             t.Minutes = Math.Abs(mins - pr.TargetSeconds / 60) < 0.01 ? null : mins;
         t.SlowMotion = _rSlow.IsChecked == true; t.FaceCam = _rFace.IsChecked == true; t.ColdOpen = _rCold.IsChecked == true;
         t.Captions = _rCaptions.IsChecked == true;
+        t.Chapters = _rChapters.IsChecked == true;
+        if (t.Chapters && !pr.ChapterCards) pr.ChapterCards = true; // made without, wanted now
         foreach (var cb in _moments.Children.OfType<CheckBox>())
             if (cb.Tag is EditMoment m)
             {
@@ -357,6 +361,7 @@ public sealed class VodEditWindow : Window
         if (_engine.FfmpegPath is not { } ffmpeg) { _step.Text = "FFmpeg isn't available."; return; }
         if (!int.TryParse(_minutes.Text.Trim(), out int minutes) || minutes < 1 || minutes > 120) { _step.Text = "Length: 1 to 120 minutes."; return; }
         _settings.VodEditMinutes = minutes;
+        _settings.VodEditChapters = _chapters.IsChecked == true;
         _save();
         _cts = new CancellationTokenSource();
         _start.IsEnabled = false; _cancel.IsEnabled = true; _open.Visibility = Visibility.Collapsed;
@@ -364,7 +369,7 @@ public sealed class VodEditWindow : Window
         try
         {
             var opts = new VodEditOptions(_title.Text.Trim().Length == 0 ? "Stream highlights" : _title.Text.Trim(), minutes * 60, _captions.IsChecked == true,
-                _music.IsChecked == true, _settings.RecapSocials);
+                _music.IsChecked == true, _settings.RecapSocials, _chapters.IsChecked == true);
             var progress = new Progress<VodEditor.Progress>(x => { _bar.Value = x.Fraction; _step.Text = x.Step; });
             VodRenderer.LogPath = Path.Combine(StateStore.Folder, "logs", "vod-edit.log");
             if (BackgroundWork.Live) _step.Text = "You're live: editing slowly in the background so the stream stays smooth (full speed once you stop).";

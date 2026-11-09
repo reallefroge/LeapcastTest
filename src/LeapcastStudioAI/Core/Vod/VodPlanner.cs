@@ -71,6 +71,25 @@ public static class VodPlanner
             float br = s.Brightness.Length == 0 ? 0.5f : s.Brightness[Math.Clamp(b, 0, s.Brightness.Length - 1)];
             still[b] = run >= 6 || br < 0.05f;
         }
+        // ---------------------------------------------------------------- what kind of play each moment is
+        // Among Us: the meeting tablet on screen (talk is the content there, the still picture isn't dead air), the
+        // game itself (moving around the map), and the lobby or menus (the same room for ages: nothing happens)
+        var phase = GamePhases(s, n, out bool amongUs);
+        if (amongUs)
+            for (int b = 0; b < n; b++) still[b] = phase[b] == PhaseKind.Idle || (phase[b] != PhaseKind.Meeting && still[b]);
+        var others = s.Others ?? new List<VodWord>();
+        var otherSpeech = new double[n];
+        var otherExcite = new double[n];
+        for (int i = 0; i < others.Count; i++)
+        {
+            var w = others[i];
+            for (int b = (int)(w.Start / Bin); b <= (int)(w.End / Bin) && b < n; b++) if (b >= 0) otherSpeech[b] = Math.Min(3, otherSpeech[b] + 1);
+            double wt = WordWeight(others, i);
+            int wb = (int)(w.Start / Bin);
+            if (wt > 0 && wb >= 0 && wb < n) otherExcite[wb] += wt;
+        }
+        // where sentences start and end, anyone's (cuts land between sentences, not in someone's)
+        var allWords = amongUs ? words.Concat(others).OrderBy(w => w.Start).ToList() : words;
         foreach (var m in s.Markers)
         {
             (double from, double to, double w) = m.Kind switch
@@ -95,6 +114,13 @@ public static class VodPlanner
                      + 0.8 * Math.Max(0, (chat[b] - chatMean) / chatSd)
                      - (still[b] ? 3 : 0) - (speech[b] == 0 && motion[b] < 0.02 ? 1.2 : 0)
                      - (Removed(b * Bin, b * Bin + Bin) ? 50 : 0);
+            if (amongUs)
+            {
+                // others arguing counts too (they're half the show in a meeting); the lobby counts for nothing
+                raw[b] += 0.5 * otherSpeech[b] + 1.6 * Math.Min(3, otherExcite[b]);
+                if (phase[b] == PhaseKind.Idle) raw[b] -= 6;
+                if (phase[b] == PhaseKind.Play) raw[b] += 1.4 * Math.Min(1, Math.Max(0, s.NoveltyAt(b * Bin)) * 8);
+            }
         }
         var smooth = MovingAverage(raw, 12);
 
@@ -188,9 +214,30 @@ public static class VodPlanner
         var byValue = Enumerable.Range(0, episodes.Count).OrderByDescending(e => epValue[e]).ToList();
         var picked = new List<int>();
 
+        Dictionary<int, string>? episodeNames = null;
+        if (amongUs)
+        {
+            // the stream's own structure: every round of play and every meeting is an episode
+            episodes.Clear();
+            episodeNames = new();
+            int rounds = 0, meetings = 0;
+            for (int b = 0; b < n;)
+            {
+                int e = b;
+                while (e < n && phase[e] == phase[b]) e++;
+                if (phase[b] != PhaseKind.Idle)
+                {
+                    episodeNames[episodes.Count] = phase[b] == PhaseKind.Meeting ? $"Meeting {++meetings}" : $"Round {++rounds}";
+                    episodes.Add((b, e));
+                }
+                b = e;
+            }
+            if (episodes.Count == 0) { episodes.Add((0, n)); episodeNames = null; }
+            else PickGameAndMeetings(episodes, phase, smooth, still, motion, s, allWords, budget, PaceScale, AddSeg, Len);
+        }
         // 1. the big moment of the best episodes (with the lead-up that makes it land); a stretch with a death or a
         //    clip you saved always gets its moment if there's any room
-        foreach (int e in byValue)
+        foreach (int e in amongUs ? Enumerable.Empty<int>() : byValue)
         {
             bool eventful = s.Markers.Any(m => m.Kind is "death" or "clip" && m.At >= episodes[e].A * Bin && m.At < episodes[e].B * Bin);
             if (Len() >= budget * (eventful ? 0.9 : 0.62)) continue;
@@ -205,12 +252,12 @@ public static class VodPlanner
         // moments you asked for are always in
         foreach (var inc in tw.Include)
         {
-            int e = EpisodeOf(inc);
+            int e = Math.Min(episodes.Count - 1, EpisodeOf(inc));
             if (AddSeg(SentenceStart(words, Math.Max(0, inc - 10 * PaceScale)), SentenceEnd(words, Math.Min(s.Duration, inc + 8 * PaceScale), s.Duration), inc, 1000, e)
                 && !picked.Contains(e)) picked.Add(e);
         }
         // 2. a breather: the funniest calm stretch not already in, between the intense ones
-        if (episodes.Count > 2)
+        if (episodes.Count > 2 && !amongUs)
         {
             int fun = Enumerable.Range(0, episodes.Count).Where(e => !picked.Contains(e)).OrderByDescending(e => epFun[e]).FirstOrDefault(-1);
             if (fun >= 0 && epFun[fun] >= 2)
@@ -229,7 +276,7 @@ public static class VodPlanner
             }
         }
         // 3. each picked episode gets its story: what you said going in, the reaction after
-        foreach (int e in picked.OrderByDescending(e => epValue[e]))
+        foreach (int e in amongUs ? Enumerable.Empty<int>() : picked.OrderByDescending(e => epValue[e]))
         {
             if (Len() >= budget) break;
             var (a, b) = episodes[e];
@@ -248,7 +295,7 @@ public static class VodPlanner
                 AddSeg(after - 0.5, SentenceEnd(words, Math.Min(after + 6, b * Bin), s.Duration), after, epValue[e] + 3, e);
         }
         // 4. the build-up: a quick beat between going in and the big moment, best episodes first
-        foreach (int e in picked.OrderByDescending(e => epValue[e]))
+        foreach (int e in amongUs ? Enumerable.Empty<int>() : picked.OrderByDescending(e => epValue[e]))
         {
             if (Len() >= budget) break;
             var (a, b) = episodes[e];
@@ -282,10 +329,43 @@ public static class VodPlanner
                 ? (Math.Min(longest.Peak - 6, longest.From + cut), longest.To, longest.Peak, longest.Value)
                 : (longest.From, Math.Max(longest.Peak + 6, longest.To - cut), longest.Peak, longest.Value);
         }
+        // Among Us: not a frame of the lobby, whatever joined what
+        if (amongUs)
+        {
+            var clean = new List<(double From, double To, double Peak, double Value)>();
+            var cleanEp = new List<int>();
+            for (int k = 0; k < chosen.Count; k++)
+            {
+                var c = chosen[k];
+                double cur = c.From;
+                for (double t = c.From; t <= c.To + Bin; t += Bin)
+                {
+                    bool idle = t < c.To && phase[Math.Clamp((int)(t / Bin), 0, n - 1)] == PhaseKind.Idle;
+                    if (idle || t > c.To)
+                    {
+                        double end = Math.Min(t, c.To);
+                        if (end - cur >= 2) { clean.Add((cur, end, Math.Clamp(c.Peak, cur, end), c.Value)); cleanEp.Add(segEpisode[k]); }
+                        cur = t + Bin;
+                    }
+                }
+            }
+            chosen = clean; segEpisode = cleanEp;
+        }
         // the story plays in order
         var order = Enumerable.Range(0, chosen.Count).OrderBy(k => chosen[k].From).ToList();
         chosen = order.Select(k => chosen[k]).ToList();
         segEpisode = order.Select(k => segEpisode[k]).ToList();
+        // pieces that grew into each other while joining: one piece (never the same seconds twice)
+        for (int k = 1; k < chosen.Count;)
+        {
+            var (p, c) = (chosen[k - 1], chosen[k]);
+            if (c.From < p.To || (c.From < p.To + 3 && segEpisode[k] == segEpisode[k - 1]))
+            {
+                chosen[k - 1] = (p.From, Math.Max(p.To, c.To), c.Value > p.Value ? c.Peak : p.Peak, Math.Max(p.Value, c.Value));
+                chosen.RemoveAt(k); segEpisode.RemoveAt(k);
+            }
+            else k++;
+        }
         var plan = new EditPlan { Width = s.Width, Height = s.Height, Fps = s.Fps, Title = o.Title, Layout = s.Layout };
         if (chosen.Count == 0) { chosen.Add((0, Math.Min(s.Duration, Math.Max(10, target - overhead)), Math.Min(s.Duration, 5), 0)); segEpisode.Add(0); }
         var best = chosen.OrderByDescending(c => c.Value).First();
@@ -298,7 +378,8 @@ public static class VodPlanner
         if (coldTo - coldFrom < 4) { coldFrom = Math.Clamp(best.Peak - 5.5, best.From, Math.Max(best.From, best.To - 8)); coldTo = Math.Min(best.To, coldFrom + 8); }
         var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = true, Push = tw.Zooms > 0 ? 0.07 : 0 };
         if (tw.ColdOpen) plan.Pieces.Add(cold);
-        double titleSrc = Math.Min(Math.Max(0, s.Duration - 3.2), coldTo);
+        // (blurred behind the title: from just before the cold open's end, so it's never from somewhere left out, like a lobby)
+        double titleSrc = amongUs ? Math.Max(0, coldTo - 3.0) : Math.Min(Math.Max(0, s.Duration - 3.2), coldTo);
         plan.Pieces.Add(new Piece { Role = "title", In = titleSrc, Out = titleSrc + 3.0, Blur = true, Mute = true, Push = tw.Zooms > 0 ? 0.05 : 0 });
 
         // ---------------------------------------------------------------- chapters: one per stretch of play (at most 7)
@@ -329,7 +410,9 @@ public static class VodPlanner
         for (int i = 0; i < chosen.Count; i++)
         {
             var (from, to, peak, _) = chosen[i];
-            var spans = JumpCuts(from, to, words, s, s.Markers, peak, tw.Pace < 0 ? 0.5 : tw.Pace > 0 ? 1.6 : 0.8);
+            var spans = amongUs
+                ? JumpCuts(from, to, allWords, s, s.Markers, peak, tw.Pace < 0 ? 0.9 : tw.Pace > 0 ? 2.2 : 1.4, silenceBelow: medLoud - 16)
+                : JumpCuts(from, to, words, s, s.Markers, peak, tw.Pace < 0 ? 0.5 : tw.Pace > 0 ? 1.6 : 0.8);
             var deaths = tw.SlowMotion ? s.Markers.Where(m => m.Kind == "death" && m.At > from + 2 && m.At < to).Select(m => m.At).ToList() : new List<double>();
             var momentPieces = new List<Piece>();
             foreach (var (a, b) in spans)
@@ -423,13 +506,18 @@ public static class VodPlanner
             // named after where you are when you keep saying it (Khrysalis, Darkmoor…), else your best line
             string? place = Topic(words, ranges, c > 0 ? usedTopics : null);
             if (place is not null) usedTopics.Add(place);
-            string name = place ?? (quote.Length > 0 ? $"“{quote}”" : $"Part {c + 1}");
-            if (c == 0) { plan.Chapters.Add((chapterStart[0], place is not null || quote.Length > 0 ? name : "Part 1")); continue; }
+            int firstMoment = chapterStartMoment[c];
+            string? phaseName = episodeNames is not null && firstMoment >= 0 && episodeNames.TryGetValue(segEpisode[firstMoment], out var pn) ? pn : null;
+            string name = phaseName ?? place ?? (quote.Length > 0 ? $"“{quote}”" : $"Part {c + 1}");
+            if (c == 0) { plan.Chapters.Add((chapterStart[0], phaseName is not null || place is not null || quote.Length > 0 ? name : "Part 1")); continue; }
             // your own card text when you changed it
             var card = tw.Cards.FirstOrDefault(x => x.Chapter == c + 1);
             string? sub = !string.IsNullOrWhiteSpace(card?.Sub) ? card!.Sub!.Trim() : place is not null || quote.Length > 0 ? name : null;
-            string head = !string.IsNullOrWhiteSpace(card?.Heading) ? card!.Heading!.Trim().ToUpperInvariant() : $"PART {c + 1}";
-            plan.Chapters.Add((chapterStart[c], sub ?? name));
+            string head = !string.IsNullOrWhiteSpace(card?.Heading) ? card!.Heading!.Trim().ToUpperInvariant()
+                : phaseName is not null ? phaseName.ToUpperInvariant() : $"PART {c + 1}";
+            if (phaseName is not null && card?.Sub is null) sub = quote.Length > 0 ? $"“{quote}”" : null;
+            plan.Chapters.Add((chapterStart[c], phaseName ?? sub ?? name));
+            if (!o.Chapters) continue; // chapters off: no cards on screen (and none in the description)
             plan.Texts.Add(new TextCue("chapter", chapterStart[c] + 0.15, 2.6, head, sub));
             plan.Sfx.Add(new SfxCue(chapterStart[c] - 0.05, SfxKind.SoftWhoosh, 0.7f));
             plan.Sfx.Add(new SfxCue(chapterStart[c] + 0.25, SfxKind.Pop, 0.6f));
@@ -444,6 +532,7 @@ public static class VodPlanner
             plan.Texts.Add(new TextCue("later", fp.At + 0.1, 2.0, later));
             if (!fp.WhipIn) plan.Sfx.Add(new SfxCue(fp.At, SfxKind.SoftWhoosh, 0.6f));
         }
+        if (!o.Chapters) plan.Chapters.Clear();
         plan.Texts.Add(new TextCue("end", plan.Pieces[^1].At + 0.3, plan.Pieces[^1].Length - 0.3, "THANKS FOR WATCHING", o.Socials));
         plan.MusicVolume = tw.MusicVolume;
         plan.SfxVolume = tw.SfxVolume;
@@ -549,7 +638,7 @@ public static class VodPlanner
 
     /// <summary>Where to cut inside a moment: drop stretches with nobody talking, little happening and nothing
     /// marked, leaving a beat either side so it doesn't feel chopped.</summary>
-    private static List<(double, double)> JumpCuts(double from, double to, List<VodWord> words, VodSignals s, List<VodMarker> markers, double peak, double minGap = 0.8)
+    private static List<(double, double)> JumpCuts(double from, double to, List<VodWord> words, VodSignals s, List<VodMarker> markers, double peak, double minGap = 0.8, double? silenceBelow = null)
     {
         var inside = words.Where(w => w.End > from && w.Start < to).OrderBy(w => w.Start).ToList();
         var spans = new List<(double, double)>();
@@ -563,6 +652,9 @@ public static class VodPlanner
                 double still = 0; int k = 0;
                 for (double t = gapA; t < gapB; t += 0.5) { still += s.MotionAt(t); k++; }
                 bool quiet = k > 0 && still / k < 0.035;
+                // (when told: only a real silence goes, never someone talking or the game going off)
+                if (quiet && silenceBelow is double sb)
+                    for (double t = gapA; t < gapB && quiet; t += 0.1) if (s.LoudAt(t) > sb) quiet = false;
                 bool important = Math.Abs(peak - (gapA + gapB) / 2) < 3 || markers.Any(m => m.Kind is "death" or "clip" && m.At > gapA - 2 && m.At < gapB + 2);
                 if (quiet && !important)
                 {
@@ -575,6 +667,151 @@ public static class VodPlanner
         if (to - cur > 0.6) spans.Add((cur, to));
         if (spans.Count == 0) spans.Add((from, to));
         return spans;
+    }
+
+    public enum PhaseKind : byte { Play, Meeting, Idle }
+
+    /// <summary>
+    /// What's on screen every half second: an Among Us meeting (its tablet's green frame), the game itself, or a
+    /// lobby / menu (the picture barely changes for a long while). <paramref name="amongUs"/>: meetings were seen,
+    /// so the edit is built from rounds and meetings.
+    /// </summary>
+    public static PhaseKind[] GamePhases(VodSignals s, int n, out bool amongUs)
+    {
+        var ph = new PhaseKind[n];
+        var meet = new bool[n];
+        for (int b = 0; b < n; b++) meet[b] = s.MeetingAt(b * Bin) >= 0.15;
+        // a map or chat opened during a meeting hides the frame for a while (people check the map for 15–20 s):
+        // still the meeting. A real round between two meetings is longer (the ejection alone takes ~10 s).
+        int lastMeet = -999;
+        for (int b = 0; b < n; b++)
+        {
+            if (!meet[b]) continue;
+            if (b - lastMeet > 1 && b - lastMeet <= 44) for (int k = lastMeet + 1; k < b; k++) meet[k] = true;
+            lastMeet = b;
+        }
+        // a flash of green isn't a meeting: at least 6 s
+        for (int b = 0; b < n;)
+        {
+            if (!meet[b]) { b++; continue; }
+            int e = b; while (e < n && meet[e]) e++;
+            if (e - b < 12) for (int k = b; k < e; k++) meet[k] = false;
+            b = e;
+        }
+        amongUs = meet.Count(x => x) >= 20;
+        if (!amongUs) return ph;
+        // the lobby ("WAITING FOR HOST"): never in the video. A moment where it wasn't recognized (someone walked
+        // over the box) between lobby frames is still the lobby, and so is a second either side of it.
+        var lobby = new bool[n];
+        for (int b = 0; b < n; b++) lobby[b] = s.LobbyAt(b * Bin);
+        int lastLobby = -999;
+        for (int b = 0; b < n; b++)
+        {
+            if (!lobby[b]) continue;
+            if (b - lastLobby > 1 && b - lastLobby <= 20) for (int k = lastLobby + 1; k < b; k++) lobby[k] = true;
+            lastLobby = b;
+        }
+        var near = (bool[])lobby.Clone();
+        for (int b = 0; b < n; b++) if (lobby[b]) for (int k = Math.Max(0, b - 2); k <= Math.Min(n - 1, b + 2); k++) near[k] = true;
+        for (int b = 0; b < n; b++)
+            ph[b] = near[b] && !meet[b] ? PhaseKind.Idle : meet[b] ? PhaseKind.Meeting : PhaseKind.Play;
+        // a few seconds of play between a meeting and the lobby (the game ending) go with the lobby
+        for (int b = 0; b < n;)
+        {
+            int e = b; while (e < n && ph[e] == ph[b]) e++;
+            if (ph[b] == PhaseKind.Play && e - b < 12 && e < n && ph[e] == PhaseKind.Idle && b > 0 && ph[b - 1] != PhaseKind.Play)
+                for (int k = b; k < e; k++) ph[k] = PhaseKind.Idle;
+            b = e;
+        }
+        return ph;
+    }
+
+    /// <summary>
+    /// An Among Us edit: the game itself (each round's best stretches: moving around, tasks, kills, reports) and the
+    /// meetings' best moments (accusations, everyone talking at once, the big reactions), always with how each
+    /// meeting ended (the vote and the ejection). The lobby is left out.
+    /// </summary>
+    private static void PickGameAndMeetings(List<(int A, int B)> episodes, PhaseKind[] phase, double[] smooth, bool[] still, double[] motion,
+        VodSignals s, List<VodWord> allWords, double budget, double pace, Func<double, double, double, double, int, bool> addSeg, Func<double> len)
+    {
+        int n = phase.Length;
+        double playTotal = 0, meetTotal = 0;
+        foreach (var (a, b) in episodes) { if (phase[a] == PhaseKind.Meeting) meetTotal += (b - a) * Bin; else playTotal += (b - a) * Bin; }
+        // the game gets at least a third of the video (more when there's more of it), never more than it has
+        double playShare = playTotal + meetTotal <= 0 ? 0.5 : Math.Clamp(playTotal / (playTotal + meetTotal), 0.35, 0.65);
+        double playBudget = Math.Min(playTotal * 0.9, budget * playShare);
+        double meetBudget = budget - playBudget;
+        double playLen = 0, meetLen = 0;
+
+        // the best window around a peak, cut between sentences
+        (double From, double To) Window(double peak, double before, double after, int a, int b)
+        {
+            double from = SentenceStart(allWords, Math.Max(a * Bin, peak - before));
+            double to = SentenceEnd(allWords, Math.Min(b * Bin, peak + after), s.Duration);
+            return (Math.Max(a * Bin - 0.5, from), Math.Min(b * Bin + 1, to));
+        }
+        // best bins of an episode not yet in the edit
+        var taken = new bool[n];
+        int BestBin(int a, int b)
+        {
+            int best = -1;
+            for (int k = a; k < b; k++) if (!taken[k] && (best < 0 || smooth[k] > smooth[best])) best = k;
+            return best;
+        }
+        void Take(double from, double to) { for (int k = Math.Max(0, (int)(from / Bin) - 6); k < Math.Min(n, (int)(to / Bin) + 6); k++) taken[k] = true; }
+        bool Add(double from, double to, double peak, double value, int e, bool play)
+        {
+            double before = len();
+            if (!addSeg(from, to, peak, value, e)) return false;
+            Take(from, to);
+            double added = Math.Max(0, len() - before);
+            if (play) playLen += added; else meetLen += added;
+            return true;
+        }
+
+        // 1. how every meeting ended: the vote coming in, and the ejection after it (the payoff of the argument)
+        for (int e = 0; e < episodes.Count; e++)
+        {
+            var (a, b) = episodes[e];
+            if (phase[a] != PhaseKind.Meeting) continue;
+            double end = b * Bin;
+            // the ejection after it, up to where the lobby starts (a game that ended there)
+            int stop = b; while (stop < n && stop < b + 22 && phase[stop] != PhaseKind.Idle) stop++;
+            Add(SentenceStart(allWords, end - 7), Math.Min(s.Duration, stop * Bin), end, 30, e, play: false);
+        }
+        // 2. one stretch of every round of play, and the hottest moment of every meeting
+        for (int e = 0; e < episodes.Count; e++)
+        {
+            var (a, b) = episodes[e];
+            bool play = phase[a] != PhaseKind.Meeting;
+            if ((b - a) * Bin < 8) continue;
+            int pk = BestBin(a, b);
+            if (pk < 0) continue;
+            var (f, t) = play ? Window(pk * Bin, 9 * pace, 11 * pace, a, b) : Window(pk * Bin, 8 * pace, 7 * pace, a, b);
+            Add(f, t, pk * Bin, 20 + smooth[pk], e, play);
+        }
+        // 3. then the best of what's left, game and meetings each up to their share
+        for (int guard = 0; guard < 60 && len() < budget; guard++)
+        {
+            bool wantPlay = playLen < playBudget && (meetLen >= meetBudget || playLen / Math.Max(1, playBudget) <= meetLen / Math.Max(1, meetBudget));
+            int bestE = -1, bestK = -1;
+            for (int e = 0; e < episodes.Count; e++)
+            {
+                var (a, b) = episodes[e];
+                if ((phase[a] != PhaseKind.Meeting) != wantPlay) continue;
+                int k = BestBin(a, b);
+                if (k >= 0 && (bestK < 0 || smooth[k] > smooth[bestK])) { bestE = e; bestK = k; }
+            }
+            if (bestK < 0)
+            {
+                if (wantPlay) playBudget = playLen; else meetBudget = meetLen; // nothing left of that kind
+                if (playLen >= playBudget && meetLen >= meetBudget) break;
+                continue;
+            }
+            var (ea, eb) = episodes[bestE];
+            var (f, t) = wantPlay ? Window(bestK * Bin, 7 * pace, 9 * pace, ea, eb) : Window(bestK * Bin, 6 * pace, 6 * pace, ea, eb);
+            if (!Add(f, t, bestK * Bin, 10 + smooth[bestK], bestE, wantPlay)) Take(bestK * Bin - 2, bestK * Bin + 2);
+        }
     }
 
     /// <summary>Reaction moments inside a stretch: a hype word, or the voice jumping well above its usual level.</summary>
