@@ -154,10 +154,11 @@ static class SafetyTests
         {
             // (now, running guess) … then the finished sentence with exact times
             (int Silent, int Wrong, string Detail) Replay((double Now, string Text)[] guesses, (string W, double S, double E)[] final, double finalAt,
-                Func<int, string, bool?> want, (double Now, string Word)[]? keywords = null, bool codes = true)
+                Func<int, string, bool?> want, (double Now, string Word)[]? keywords = null, bool codes = true, string custom = "")
             {
                 var cg = new ContentGains();
-                var j = new SafetyJudge(cg, w => SlurWords.Near(w, true, null), codes);
+                var mine = SlurWords.Custom(custom);
+                var j = new SafetyJudge(cg, w => SlurWords.Near(w, true, mine), codes);
                 var gt = new GuessTimes();
                 gt.Finished(3.5);
                 var events = guesses.Select(g => (Now: g.Now, Kind: 0, Text: g.Text))
@@ -216,8 +217,13 @@ static class SafetyTests
             var r4 = Replay(new[] { (4.91, "what is"), (5.11, "what is up my"), (5.21, "what is up my " + R("avttn")), (5.71, "what is up my " + R("avttn") + " how are"),
                     (6.01, "what is up my " + R("avttn") + " how are you doing") },
                 new[] { ("what", 4.09, 4.3), ("is", 4.33, 4.45), ("up", 4.48, 4.6), ("my", 4.63, 4.76), (R("avttn"), 4.78, 5.03), ("how", 5.05, 5.25), ("are", 5.29, 5.4), ("you", 5.41, 5.57), ("doing", 5.59, 5.9) },
-                6.71, (i, w) => SlurWords.Near(w, true, null) ? true : w is "what" or "how" or "doing" ? false : null, new[] { (5.21, R("avttnm")), (5.51, R("ubaxl")) });
-            check(r4.Wrong == 0, $"Slur filter (replayed from Windows): said casually, cut; a false alarm on \"how\" let go ({r4.Detail})");
+                6.71, (i, w) => SlurWords.Near(w, true, null) ? true : w is "what" or "are" or "doing" ? false : null, new[] { (5.21, R("avttnm")), (5.51, R("ubaxl")) });
+            // a long word shown in the running guess before it was finished (Windows trace): its end must not slip out
+            var r5 = Replay(new[] { (4.60, "the"), (4.80, "the pineapple"), (5.50, "the pineapple was sitting"), (5.70, "the pineapple was sitting on the"), (6.20, "the pineapple was sitting on the kitchen") },
+                new[] { ("the", 4.08, 4.2), ("pineapple", 4.23, 4.75), ("was", 4.77, 4.95), ("sitting", 4.98, 5.25), ("on", 5.28, 5.4), ("the", 5.43, 5.5), ("kitchen", 5.52, 5.85) },
+                7.2, (i, w) => w == "pineapple" ? true : w is "sitting" or "kitchen" ? false : null, new[] { (4.80, "pineapple") }, custom: "pineapple");
+            check(r5.Wrong == 0, $"Slur filter (replayed from Windows): a word that showed up before it ended is silenced to its end ({r5.Detail})");
+            check(r4.Wrong == 0, $"Slur filter (replayed from Windows): said casually, cut; a false alarm on \"how\" let go; only the start of \"how\" right after it may be clipped ({r4.Detail})");
         }
 
         // ---- camera auto light

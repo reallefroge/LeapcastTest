@@ -498,7 +498,8 @@ public sealed class SafetyJudge
                 if (IsSlur(w.Text))
                 {
                     // a time from the running guess is rough: wider (the finished sentence brings the exact one)
-                    if (w.Estimated) Confirm(w.Start - 0.25, w.End + 0.15, "word");
+                    // (a word can show up before it's finished: the end gets a little more room)
+                    if (w.Estimated) Confirm(w.Start - 0.25, w.End + 0.22, "word");
                     else Confirm(w.Start - 0.1, w.End + 0.1, "word");
                 }
             if (final) _finalTo = Math.Max(_finalTo, now);
