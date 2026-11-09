@@ -15,7 +15,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 The self-contained app (with FFmpeg in `ffmpeg\bin`) is published to `publish\win-x64`, and the setup program is written to
-`dist\LeapcastStudioAI-Setup-0.15.0-win-x64.exe`.
+`dist\LeapcastStudioAI-Setup-0.16.0-win-x64.exe`.
 
 Options:
 * `-SkipInstaller`: publish the app folder only.

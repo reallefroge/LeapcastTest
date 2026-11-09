@@ -84,6 +84,11 @@ static class SafetyTests
             check(cg.Muted(3020), "Slur filter: while the full recognizer hasn't got there yet, it stays muted");
             j.Heard(new[] { W("hey", 39.5, 39.8), W(R("avtthu"), 40.0, 40.3) }, 40.6, false);
             check(cg.Muted(4015) && !cg.Muted(3970), "Slur filter: a near miss heard by the full recognizer alone is muted (and only it)");
+            j.Suspect(50.0, 50.3, R("avttre"), 51.1);
+            j.Heard(new[] { W("and", 49.5, 49.7), W("said", 49.7, 50.02) }, 51.6, false);
+            bool stillHeld = cg.Muted(5015);
+            j.Heard(new[] { W("and", 49.5, 49.7), W("said", 49.7, 50.02), W("bigger", 50.02, 50.3), W("than", 50.4, 50.6) }, 51.9, false);
+            check(stillHeld && !cg.Muted(5015), "Slur filter: a slow running guess that hasn't reached the word yet can't let it go; the ordinary word, once written, does");
         }
 
         // ---- spoken game codes
@@ -124,6 +129,11 @@ static class SafetyTests
             check(!c6.EverMuted, "Codes: \"are you okay\" is never cut");
             var c7 = Say("plan b is fine", 0.3);
             check(!c7.Words.Any(w => Silent(c7.Gains, w)), "Codes: a lone letter (\"plan B\") is held for a moment at most, then let go");
+            var c9 = Say("get in here k que acts the j m hurry up", 0.7);
+            check(c9.Words.Skip(3).Take(6).All(w => Silent(c9.Gains, w)) && !Silent(c9.Gains, c9.Words[^2]) && c9.Codes == 1,
+                "Codes: letters the recognizer wrote as words (\"que\", \"acts\", \"the\") inside a code are hidden too");
+            var c10 = Say("b r b guys", 0.3);
+            check(c10.Codes == 0 && !c10.Words.Any(w => Silent(c10.Gains, w)), "Codes: \"B R B\" (three letters) isn't a code");
             var c8 = Say("the code is c e u w y b", 0.5, codes: false);
             check(!c8.EverMuted, "Codes: off unless turned on");
         }

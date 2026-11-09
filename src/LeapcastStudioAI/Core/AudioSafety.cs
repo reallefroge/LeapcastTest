@@ -248,9 +248,9 @@ public static class CodeLetters
     private static readonly HashSet<string> Weak = new()
     {
         "a", "i", "o", "see", "sea", "be", "bee", "you", "yew", "why", "wye", "are", "oh", "owe", "eye", "aye", "tea", "tee", "pea", "pee",
-        "queue", "cue", "jay", "kay", "gee", "dee", "ex", "em", "en", "ay",
+        "queue", "cue", "jay", "kay", "gee", "dee", "ex", "em", "en", "ay", "acts", "ax", "axe", "eff", "elle",
     };
-    private static readonly HashSet<string> StrongNames = new() { "ef", "el", "ell", "ess", "vee", "zee", "zed", "aitch" };
+    private static readonly HashSet<string> StrongNames = new() { "ef", "el", "ell", "ess", "vee", "zee", "zed", "aitch", "que", "kew", "dubya" };
     private static readonly HashSet<string> Nato = new()
     {
         "alpha", "alfa", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet", "juliett", "kilo", "lima",
@@ -260,6 +260,8 @@ public static class CodeLetters
     public static readonly HashSet<string> Arming = new() { "code", "codes", "lobby", "lobbies" };
     /// <summary>Sounds people make between letters (they don't end the run).</summary>
     public static readonly HashSet<string> Fillers = new() { "uh", "um", "er", "ah", "hmm", "huh", "mm" };
+    /// <summary>Words between "code" and the letters ("the code is…", "lobby code's…").</summary>
+    private static readonly HashSet<string> Lead = new() { "is", "its", "it's", "the", "was", "code's", "codes", "code", "lobby", "new", "our", "my", "it", "so", "okay", "ok", "now", "here", "for" };
 
     public enum Kind { None, Weak, Strong, Nato, Double }
 
@@ -288,32 +290,42 @@ public static class CodeLetters
         public int StrongCount => Strong + (NatoCount >= 3 ? NatoCount : 0);
 
         /// <summary>
-        /// A code: after "code"/"lobby" any two letters; otherwise three that could only be spelling, or (the
-        /// fallback) four or more letters in a row at the pace of someone reading them out.
+        /// A code: after "code"/"lobby" any two letters; otherwise (the fallback) four or more letters in a row,
+        /// read at the pace of someone spelling or mostly letters nobody says except when spelling.
         /// </summary>
-        public bool IsCode => (Armed && Count >= 2) || StrongCount >= 3
+        public bool IsCode => (Armed && Count >= 2)
             || (Count >= 4 && (StrongCount >= 2 || (StrongCount >= 1 && Pace >= 0.3) || Pace >= 0.38));
 
         /// <summary>Could still become a code: hold it back until it's decided.</summary>
         public bool Suspect => !Closed && (Armed || StrongCount >= 1 || (Count >= 3 && Pace >= 0.33) || (Count >= 2 && Pace >= 0.45));
+
+        /// <summary>
+        /// Someone is (probably) reading a code right now: hold back everything from its start until it's over, so
+        /// letters the recognizer hasn't written down yet can't slip out.
+        /// </summary>
+        public bool Reading => !Closed && (Armed || IsCode || StrongCount >= 2 || (Count >= 3 && Pace >= 0.33));
     }
 
     public const double MaxGap = 1.3;   // longer than this between letters: a new run
 
-    /// <summary>The runs of letters in what was heard (time order). <paramref name="now"/>: how far the recognizer has heard.</summary>
-    public static List<Run> Runs(IReadOnlyList<HeardWord> words, double now)
+    /// <summary>
+    /// The runs of letters in what was heard (time order). <paramref name="frontier"/>: how far the words heard are
+    /// known to be complete (a run that ended more than <see cref="MaxGap"/> before it is over).
+    /// </summary>
+    public static List<Run> Runs(IReadOnlyList<HeardWord> words, double frontier)
     {
         var runs = new List<Run>();
         var cur = new List<HeardWord>();
-        int strong = 0, nato = 0;
+        int strong = 0, nato = 0, bridged = 0;
         double lastArm = double.NegativeInfinity;
         bool armed = false;
         void End(bool closedByWord)
         {
             if (cur.Count > 0)
-                runs.Add(new Run(cur.ToList(), strong, nato, closedByWord || now - cur[^1].End > MaxGap, armed));
-            cur.Clear(); strong = 0; nato = 0;
+                runs.Add(new Run(cur.ToList(), strong, nato, closedByWord || frontier - cur[^1].End > MaxGap, armed));
+            cur.Clear(); strong = 0; nato = 0; bridged = 0;
         }
+        bool LetterAt(int j) => j < words.Count && Of(words[j].Text) != Kind.None;
         for (int i = 0; i < words.Count; i++)
         {
             var w = words[i];
@@ -337,7 +349,14 @@ public static class CodeLetters
             }
             if (k == Kind.None)
             {
-                if (CodeLetters.Fillers.Contains(n)) continue;
+                if (Fillers.Contains(n)) continue;
+                // a letter the recognizer wrote as a word ("Z" heard as "the") in the middle of a code being read
+                if (cur.Count > 0 && (strong >= 2 || armed) && bridged < 2 && w.End - w.Start < 0.6 && LetterAt(i + 1)
+                    && w.Start - cur[^1].End <= MaxGap && words[i + 1].Start - w.End <= MaxGap && !Arming.Contains(n))
+                {
+                    cur.Add(w); bridged++;
+                    continue;
+                }
                 End(true);
                 if (Arming.Contains(n)) lastArm = w.End;
                 continue;
@@ -350,23 +369,48 @@ public static class CodeLetters
         End(false);
         return runs;
     }
+
+    /// <summary>
+    /// "…the code is" with nothing after it yet: where the letters would start (the end of "code"), or null. Held
+    /// back so the first letter is covered even before the recognizer writes it down.
+    /// </summary>
+    public static double? OpenArm(IReadOnlyList<HeardWord> words, double now)
+    {
+        for (int i = words.Count - 1; i >= 0; i--)
+        {
+            string n = SlurWords.Norm(words[i].Text);
+            if (Arming.Contains(n))
+            {
+                if (now - words[i].End > 4.5) return null;
+                for (int j = i + 1; j < words.Count; j++)
+                {
+                    string m = SlurWords.Norm(words[j].Text);
+                    if (Lead.Contains(m) || Fillers.Contains(m)) continue;
+                    return null; // letters (their run holds them) or other words (not a code)
+                }
+                return words[i].End;
+            }
+        }
+        return null;
+    }
 }
 
 /// <summary>
 /// Decides what's muted. Two ears report to it: a quick keyword listener that only knows the filtered words (it
 /// says "maybe" early, and that stretch is held back at once) and the full recognizer, which knows ~100,000 words
 /// and has the last say: a filtered word, or one that sounds just like it, is muted for good; an ordinary word
-/// ("bigger", "trigger") lets the stretch go out untouched. While it's undecided, it stays muted. Spoken codes
-/// (letters read out) are held back the same way and let go if they turn out to be ordinary words.
+/// ("bigger", "trigger") lets the stretch go out untouched. Until the full recognizer has written down what was
+/// said there, it stays held. Spoken codes are held back the same way while someone may be reading one out.
 /// </summary>
 public sealed class SafetyJudge
 {
-    private sealed class Hold { public int Id; public double From, To, Since; public string Word = ""; }
+    private sealed class Hold { public int Id; public double From, To, CoreFrom, CoreTo, Since; }
     private readonly ContentGains _gains;
     private readonly object _lock = new();
     private int _nextId = 1;
     private readonly List<Hold> _slurHolds = new(), _codeHolds = new();
     private readonly List<HeardWord> _history = new();     // finished words, last ~20 s (a code can span two sentences)
+    private double _finalTo = double.NegativeInfinity;      // audio the last finished sentence covered (its words are settled)
     private readonly HashSet<long> _done = new();           // confirmed mutes already reported
     private readonly List<(double From, double To)> _codesMuted = new();
 
@@ -379,20 +423,21 @@ public sealed class SafetyJudge
 
     public SafetyJudge(ContentGains gains, Func<string, bool> isSlur, bool codes) { _gains = gains; IsSlur = isSlur; Codes = codes; }
 
-    /// <summary>The keyword listener thinks it heard a filtered word around [from, to]: held back until the full recognizer decides.</summary>
+    /// <summary>The keyword listener thinks it heard a filtered word in [from, to]: held back until the full recognizer decides.</summary>
     public void Suspect(double from, double to, string word, double now)
     {
         lock (_lock)
         {
-            from -= 0.12; to += 0.12;
-            if (_slurHolds.FirstOrDefault(h => h.From < to && h.To > from) is { } h)
+            double a = from - 0.12, b = to + 0.12;
+            if (_slurHolds.FirstOrDefault(h => h.From < b && h.To > a) is { } h)
             {
-                if (from < h.From || to > h.To) { h.From = Math.Min(h.From, from); h.To = Math.Max(h.To, to); _gains.Mute(h.From, h.To, h.Id); }
+                h.CoreFrom = Math.Min(h.CoreFrom, from); h.CoreTo = Math.Max(h.CoreTo, to);
+                if (a < h.From || b > h.To) { h.From = Math.Min(h.From, a); h.To = Math.Max(h.To, b); _gains.Mute(h.From, h.To, h.Id); }
                 return;
             }
-            var hold = new Hold { Id = _nextId++, From = from, To = to, Since = now, Word = word };
+            var hold = new Hold { Id = _nextId++, From = a, To = b, CoreFrom = from, CoreTo = to, Since = now };
             _slurHolds.Add(hold);
-            _gains.Mute(from, to, hold.Id);
+            _gains.Mute(a, b, hold.Id);
             Held++;
         }
     }
@@ -408,73 +453,86 @@ public sealed class SafetyJudge
             // 1. filtered words: muted for good
             foreach (var w in words)
                 if (IsSlur(w.Text)) Confirm(w.Start - 0.15, w.End + 0.15, "word");
+            if (final) _finalTo = Math.Max(_finalTo, now);
 
-            // 2. what the keyword listener held back: decided by the words heard there
-            double heardTo = words.Count > 0 ? Math.Max(now - 0.3, words[^1].End) : now;
+            // 2. what the keyword listener held back: decided once the full recognizer has written down what was said there
+            double lastStart = words.Count > 0 ? words[^1].Start : double.NegativeInfinity;
             for (int i = _slurHolds.Count - 1; i >= 0; i--)
             {
                 var h = _slurHolds[i];
-                var over = words.Concat(_history).Where(w => w.End > h.From + 0.1 && w.Start < h.To - 0.1).ToList();
+                double core = Math.Max(0.05, h.CoreTo - h.CoreFrom);
+                var over = words.Concat(_history).Where(w =>
+                    Math.Min(w.End, h.CoreTo) - Math.Max(w.Start, h.CoreFrom) >= 0.5 * Math.Min(core, Math.Max(0.05, w.End - w.Start))).ToList();
                 if (over.Any(w => IsSlur(w.Text))) { Confirm(h.From, h.To, "word"); _slurHolds.RemoveAt(i); continue; }
-                // ordinary words there, and the recognizer has moved on past them (its guess won't change): let it go
-                bool settled = final || heardTo > h.To + 0.25;
-                if (settled && (over.Count > 0 || final || now > h.To + 0.8)) { Release(h); _slurHolds.RemoveAt(i); continue; }
+                bool settled = _finalTo > h.CoreTo + 0.1 || lastStart >= h.CoreTo - 0.05;
+                // an ordinary word there (or, in a finished sentence, nothing at all): let it go
+                if (settled && (over.Count > 0 || _finalTo > h.CoreTo + 0.3)) { Release(h); _slurHolds.RemoveAt(i); continue; }
                 // gone out long ago: forget it (still undecided: it stayed muted)
-                if (now - h.Since > 12) _slurHolds.RemoveAt(i);
+                if (now - h.Since > 15) _slurHolds.RemoveAt(i);
             }
-
-            // 3. spoken codes
-            if (Codes) Codes_(words, now);
-            else foreach (var h in _codeHolds.ToList()) { Release(h); _codeHolds.Remove(h); }
 
             if (final)
             {
                 _history.AddRange(words);
                 _history.RemoveAll(w => w.End < now - 20);
             }
+
+            // 3. spoken codes
+            if (Codes) Codes_(words, now, final);
+            else foreach (var h in _codeHolds.ToList()) { Release(h); _codeHolds.Remove(h); }
+
             if (_done.Count > 5000) _done.Clear();
             _codesMuted.RemoveAll(c => c.To < now - 30);
         }
     }
 
-    private void Codes_(IReadOnlyList<HeardWord> words, double now)
+    private void Codes_(IReadOnlyList<HeardWord> words, double now, bool final)
     {
-        double start = words.Count > 0 ? words[0].Start : double.MaxValue;
-        var all = _history.Where(w => w.End <= start + 0.05).Concat(words).ToList();
-        var runs = CodeLetters.Runs(all, now);
-        var keep = new HashSet<Hold>();
-        foreach (var r in runs)
+        // what's known so far: finished sentences, then the running guess (which runs behind the audio a little)
+        var all = final ? _history.ToList()
+            : _history.Where(w => words.Count == 0 || w.End <= words[0].Start + 0.05).Concat(words).ToList();
+        double frontier = final ? now : now - 1.0;
+        var want = new List<(double A, double B)>();
+        foreach (var r in CodeLetters.Runs(all, frontier))
         {
             double a = r.From - 0.1, b = r.To + 0.12;
-            var touching = _codeHolds.Where(h => h.From < b && h.To > a).ToList();
             if (r.IsCode)
             {
-                foreach (var h in touching) { _gains.Mute(h.From, h.To); _codeHolds.Remove(h); }
                 if (!_codesMuted.Any(c => c.From < b && c.To > a)) Muted?.Invoke(a, b, "code");
+                var merged = (From: Math.Min(a, _codesMuted.Where(c => c.From < b && c.To > a).Select(c => c.From).DefaultIfEmpty(a).Min()), To: b);
                 _codesMuted.RemoveAll(c => c.From < b && c.To > a);
-                _codesMuted.Add((Math.Min(a, touching.Select(h => h.From).DefaultIfEmpty(a).Min()), b));
+                _codesMuted.Add(merged);
                 _gains.Mute(a, b);
             }
-            else if (r.Suspect)
-            {
-                // a run already muted for good (a longer run whose start was cut off by a revised guess) stays muted
-                if (_codesMuted.Any(c => c.From < b && c.To > a)) { _gains.Mute(a, b); continue; }
-                var h = touching.FirstOrDefault();
-                if (h is null) { h = new Hold { Id = _nextId++, From = a, To = b, Since = now, Word = "code" }; _codeHolds.Add(h); Held++; }
-                h.From = Math.Min(h.From, a); h.To = Math.Max(h.To, b);
-                _gains.Mute(h.From, h.To, h.Id);
-                keep.Add(h);
-                foreach (var o in touching.Skip(1)) keep.Add(o);
-            }
+            if (r.Reading) want.Add((a, Math.Max(b, now + 1.0)));       // still being read: everything from its start
+            else if (r.Suspect && !r.IsCode) want.Add((a, b));          // a letter or two: just those, until it's clear
         }
-        // held back, but no longer part of a run that could be a code: let it go once the words there are known
-        double heardTo = all.Count > 0 ? Math.Max(now - 0.3, all[^1].End) : now;
-        for (int i = _codeHolds.Count - 1; i >= 0; i--)
+        if (CodeLetters.OpenArm(all, now) is double armEnd) want.Add((armEnd, now + 1.0));
+        // join what overlaps
+        want.Sort((x, y) => x.A.CompareTo(y.A));
+        var joined = new List<(double A, double B)>();
+        foreach (var w in want)
+            if (joined.Count > 0 && w.A <= joined[^1].B) joined[^1] = (joined[^1].A, Math.Max(joined[^1].B, w.B));
+            else joined.Add(w);
+
+        // the held stretches become exactly these: grown, shrunk (the end of a code read out: the rest goes out), new or let go
+        var used = new HashSet<Hold>();
+        foreach (var (a, b) in joined)
         {
-            var h = _codeHolds[i];
-            if (keep.Contains(h)) continue;
-            if (heardTo > h.To + 0.2 || now > h.To + CodeLetters.MaxGap) { Release(h); _codeHolds.RemoveAt(i); }
+            var touching = _codeHolds.Where(h => !used.Contains(h) && h.From < b && h.To > a).ToList();
+            var h = touching.FirstOrDefault();
+            foreach (var o in touching.Skip(1)) { Release(o); _codeHolds.Remove(o); }
+            if (h is null) { h = new Hold { Id = _nextId++, From = a, To = b, Since = now }; _codeHolds.Add(h); Held++; }
+            else
+            {
+                if (h.To > b) _gains.Release(h.Id, b, h.To);
+                if (h.From < a) _gains.Release(h.Id, h.From, a);
+                h.From = a; h.To = b;
+            }
+            _gains.Mute(a, b, h.Id);
+            used.Add(h);
         }
+        foreach (var h in _codeHolds.Where(h => !used.Contains(h)).ToList()) { Release(h); _codeHolds.Remove(h); }
     }
 
     private void Confirm(double from, double to, string what)
