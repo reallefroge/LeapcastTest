@@ -266,8 +266,8 @@ public sealed class GuessTimes
         {
             // new since the last look: said since the last known word, the last of them just now
             double end = double.IsInfinity(baseEnd) || baseEnd >= target
-                ? target - (fresh - 1 - j) * 0.3
-                : baseEnd + (target - baseEnd) * (j + 1) / fresh;
+                ? target - (fresh - 1 - j) * 0.12   // several at once: assume quick speech (never makes a code out of talk)
+                : Math.Max(baseEnd + (target - baseEnd) * (j + 1) / fresh, target - (fresh - 1 - j) * 0.12);
             double prev = _est.Count > 0 ? _est[^1].End : _floor;
             double start = Math.Max(double.IsInfinity(prev) ? double.MinValue : prev, end - MaxWord);
             _est.Add(new HeardWord(cur[_est.Count], Math.Min(start, end - 0.08), end, Estimated: true));
@@ -324,7 +324,7 @@ public static class CodeLetters
         public double From => Letters[0].Start;
         public double To => Letters[^1].End;
         /// <summary>Mean time from one letter's start to the next (s): reading letters out is slow and even.</summary>
-        public double Pace => Count > 1 ? (Letters[^1].Start - Letters[0].Start) / (Count - 1) : 0;
+        public double Pace => Count > 1 ? (Letters[^1].End - Letters[0].End) / (Count - 1) : 0;
         public int StrongCount => Strong + (NatoCount >= 3 ? NatoCount : 0);
 
         /// <summary>
@@ -389,7 +389,7 @@ public static class CodeLetters
             {
                 if (Fillers.Contains(n)) continue;
                 // a letter the recognizer wrote as a word ("Z" heard as "the") in the middle of a code being read
-                if (cur.Count > 0 && (strong >= 2 || armed) && bridged < 2 && w.End - w.Start < 0.6 && LetterAt(i + 1)
+                if (cur.Count > 0 && (strong >= 2 || armed) && bridged < 2 && (w.Estimated || w.End - w.Start < 0.6) && LetterAt(i + 1)
                     && w.Start - cur[^1].End <= MaxGap && words[i + 1].Start - w.End <= MaxGap && !Arming.Contains(n))
                 {
                     cur.Add(w); bridged++;
@@ -397,7 +397,7 @@ public static class CodeLetters
                 }
                 // the last word written so far, after letters being read out: the next one decides (a misheard
                 // letter in the running guess mustn't let the rest of the code out)
-                if (i == words.Count - 1 && cur.Count > 0 && (armed || strong >= 2 || cur.Count >= 3)) continue;
+                if (i == words.Count - 1 && cur.Count > 0 && (armed || strong >= 1 || cur.Count >= 3)) continue;
                 End(true);
                 if (Arming.Contains(n)) lastArm = w.End;
                 continue;
@@ -498,8 +498,8 @@ public sealed class SafetyJudge
                 if (IsSlur(w.Text))
                 {
                     // a time from the running guess is rough: wider (the finished sentence brings the exact one)
-                    if (w.Estimated) Confirm(Math.Min(w.Start, w.End - 0.9) - 0.15, w.End + 0.3, "word");
-                    else Confirm(w.Start - 0.15, w.End + 0.15, "word");
+                    if (w.Estimated) Confirm(w.Start - 0.25, w.End + 0.15, "word");
+                    else Confirm(w.Start - 0.1, w.End + 0.1, "word");
                 }
             if (final) _finalTo = Math.Max(_finalTo, now);
 
@@ -511,9 +511,9 @@ public sealed class SafetyJudge
                 double core = Math.Max(0.05, h.CoreTo - h.CoreFrom);
                 var over = words.Concat(_history).Where(w =>
                     Math.Min(w.End, h.CoreTo) - Math.Max(w.Start, h.CoreFrom) >= 0.5 * Math.Min(core, Math.Max(0.05, w.End - w.Start))).ToList();
-                if (over.Any(w => IsSlur(w.Text))) { Confirm(h.From, h.To, "word"); _slurHolds.RemoveAt(i); continue; }
                 bool settled = _finalTo > h.CoreTo + 0.1 || lastStart >= h.CoreTo - 0.05;
-                // an ordinary word there (or, in a finished sentence, nothing at all): let it go
+                // the full recognizer has written down what was said there: a filtered word in it is already muted
+                // for good (step 1), everything else there goes out
                 if (settled && (over.Count > 0 || _finalTo > h.CoreTo + 0.3)) { Release(h); _slurHolds.RemoveAt(i); continue; }
                 // gone out long ago: forget it (still undecided: it stayed muted)
                 if (now - h.Since > 15) _slurHolds.RemoveAt(i);
@@ -544,6 +544,9 @@ public sealed class SafetyJudge
         foreach (var r in CodeLetters.Runs(all, frontier))
         {
             double a = r.From - 0.1, b = r.To + 0.12;
+            // the last letter's end is only estimated (running guess): muted for good up to it, the bit after held
+            // until the finished sentence says exactly where it ends (so the next word isn't clipped)
+            if (r.IsCode && r.Letters[^1].Estimated) { want.Add((r.To - 0.05, b + 0.1)); b = r.To - 0.05; }
             if (r.IsCode)
             {
                 if (!_codesMuted.Any(c => c.From < b && c.To > a)) Muted?.Invoke(a, b, "code");
@@ -728,7 +731,7 @@ public sealed class SpeechListener : IDisposable
                     var w = guess[i];
                     if (w.Text == "[unk]" || w.Text.Length == 0) continue;
                     // just showed up: said in about the last second
-                    _judge.Suspect(Math.Min(w.Start, now - 1.15), Math.Max(w.End, now - 0.1), w.Text, now);
+                    _judge.Suspect(Math.Min(w.Start, now - 0.95), Math.Max(w.End, now - 0.15), w.Text, now);
                     Trace?.Invoke($"{now:0.00}s keyword: {SlurWords.Rot13(w.Text)}~{w.Start:0.00}");
                 }
                 reported = guess.Count;

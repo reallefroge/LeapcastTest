@@ -150,6 +150,76 @@ static class SafetyTests
             check(!c8.EverMuted, "Codes: off unless turned on");
         }
 
+        // ---- replays of what Windows' recognizer really wrote, and when (CI traces): checked as the audio goes out 2 s later
+        {
+            // (now, running guess) … then the finished sentence with exact times
+            (int Silent, int Wrong, string Detail) Replay((double Now, string Text)[] guesses, (string W, double S, double E)[] final, double finalAt,
+                Func<int, string, bool?> want, (double Now, string Word)[]? keywords = null, bool codes = true)
+            {
+                var cg = new ContentGains();
+                var j = new SafetyJudge(cg, w => SlurWords.Near(w, true, null), codes);
+                var gt = new GuessTimes();
+                gt.Finished(3.5);
+                var events = guesses.Select(g => (Now: g.Now, Kind: 0, Text: g.Text))
+                    .Concat((keywords ?? Array.Empty<(double Now, string Word)>()).Select(k => (Now: k.Now, Kind: 1, Text: k.Word)))
+                    .Append((Now: finalAt, Kind: 2, Text: "")).OrderBy(e => e.Now).ThenBy(e => e.Kind).ToList();
+                // five points across each word, each judged when it goes out
+                var points = new Dictionary<(int, int), bool>();
+                double last = 0;
+                void Out(double upTo)
+                {
+                    for (int i = 0; i < final.Length; i++)
+                        for (int k = 0; k < 5; k++)
+                        {
+                            double t = final[i].S + (final[i].E - final[i].S) * (0.15 + 0.175 * k);
+                            if (t + 2 > last && t + 2 <= upTo) points[(i, k)] = cg.Muted((long)(t * 100));
+                        }
+                    last = upTo;
+                }
+                foreach (var (now, kind, text) in events)
+                {
+                    Out(now);
+                    if (kind == 0) j.Heard(gt.Update(text, now), now, false);
+                    else if (kind == 1) j.Suspect(now - 0.95, now - 0.15, text, now);
+                    else { j.Heard(final.Select(f => new HeardWord(f.W, f.S, f.E)).ToList(), now, true); gt.Finished(final[^1].E); }
+                }
+                j.Heard(new List<HeardWord>(), finalAt + 3, false);
+                Out(finalAt + 5);
+                int silent = 0, wrong = 0; var detail = new List<string>();
+                for (int i = 0; i < final.Length; i++)
+                {
+                    int cut = Enumerable.Range(0, 5).Count(k => points.TryGetValue((i, k), out var v) && v);
+                    var w = want(i, final[i].W);
+                    bool m = w == true ? cut == 5 : cut >= 3;   // to be hidden: all of it; to be heard: most of it
+                    if (w == true && m) silent++;
+                    if (w is { } ww && ww != m) { wrong++; detail.Add($"{(SlurWords.Near(final[i].W, true, null) ? "#" + R(final[i].W) : final[i].W)} {(m ? "cut" : "audible")}"); }
+                }
+                return (silent, wrong, string.Join(", ", detail));
+            }
+            var r1 = Replay(new[] { (4.71, "get"), (4.91, "get in here"), (5.21, "get in here k"), (5.71, "get in here k p"), (6.01, "get in here k"), (6.21, "get in here k que"),
+                    (6.71, "get in here k few"), (6.91, "get in here k que acts"), (7.61, "get in here k que acts the"), (8.41, "get in here k que acts the j"),
+                    (8.81, "get in here k que acts the j m"), (9.31, "get in here k que acts the j m hurry up") },
+                new[] { ("get", 4.06, 4.3), ("in", 4.33, 4.43), ("here", 4.45, 4.6), ("k", 4.63, 4.9), ("que", 5.35, 5.6), ("acts", 6.1, 6.4), ("the", 6.88, 7.1),
+                    ("j", 7.54, 7.8), ("m", 8.26, 8.5), ("hurry", 8.53, 8.8), ("up", 8.86, 9.0) }, 10.01,
+                (i, w) => i is >= 3 and <= 8 && w != "the" ? true : w is "hurry" or "up" or "get" ? false : null);
+            check(r1.Wrong == 0, $"Codes (replayed from Windows): \"K Q X Z J M\" heard as \"k que acts the j m\" is hidden as it goes out ({r1.Detail})");
+            var r2 = Replay(new[] { (4.91, "oh i see"), (5.01, "oh i see you"), (5.21, "oh i see you are"), (5.51, "oh i see you are going to"), (5.71, "oh i see you are going to the"),
+                    (6.21, "oh i see you are going to the store") },
+                new[] { ("oh", 4.09, 4.28), ("i", 4.3, 4.4), ("see", 4.42, 4.6), ("you", 4.63, 4.78), ("are", 4.81, 4.9), ("going", 4.93, 5.2), ("to", 5.26, 5.35), ("the", 5.38, 5.45), ("store", 5.47, 5.8) },
+                6.71, (i, w) => false);
+            check(r2.Wrong == 0, $"Codes (replayed from Windows): \"oh I see you are going to the store\" goes out untouched ({r2.Detail})");
+            var r3 = Replay(new[] { (4.71, "and"), (4.91, "and then"), (5.01, "and then he"), (5.21, "and then he said"), (5.51, "and then he said " + R("avttre")),
+                    (5.81, "and then he said " + R("avttre") + " and"), (6.01, "and then he said " + R("avttre") + " and left the"), (6.31, "and then he said " + R("avttre") + " and left the game") },
+                new[] { ("and", 4.09, 4.25), ("then", 4.27, 4.45), ("he", 4.48, 4.58), ("said", 4.6, 4.84), (R("avttre"), 4.87, 5.18), ("and", 5.2, 5.35), ("left", 5.38, 5.6), ("the", 5.62, 5.69), ("game", 5.71, 6.0) },
+                6.91, (i, w) => SlurWords.Near(w, true, null) ? true : w is "then" or "left" or "game" ? false : null, new[] { (5.51, R("avttre")) });
+            check(r3.Wrong == 0, $"Slur filter (replayed from Windows): the word is cut, the words around it aren't ({r3.Detail})");
+            var r4 = Replay(new[] { (4.91, "what is"), (5.11, "what is up my"), (5.21, "what is up my " + R("avttn")), (5.71, "what is up my " + R("avttn") + " how are"),
+                    (6.01, "what is up my " + R("avttn") + " how are you doing") },
+                new[] { ("what", 4.09, 4.3), ("is", 4.33, 4.45), ("up", 4.48, 4.6), ("my", 4.63, 4.76), (R("avttn"), 4.78, 5.03), ("how", 5.05, 5.25), ("are", 5.29, 5.4), ("you", 5.41, 5.57), ("doing", 5.59, 5.9) },
+                6.71, (i, w) => SlurWords.Near(w, true, null) ? true : w is "what" or "how" or "doing" ? false : null, new[] { (5.21, R("avttnm")), (5.51, R("ubaxl")) });
+            check(r4.Wrong == 0, $"Slur filter (replayed from Windows): said casually, cut; a false alarm on \"how\" let go ({r4.Detail})");
+        }
+
         // ---- camera auto light
         {
             byte[] Frame(double luma, double windowLuma = -1)
