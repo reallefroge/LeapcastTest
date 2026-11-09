@@ -259,8 +259,9 @@ UVO PS_UV(VO i)
         _ctx.OMSetBlendState(_opaque);
         var full = new Params { X0 = -1, Y0 = 1, X1 = 1, Y1 = -1, U1 = 1, V1 = 1, Gamma = 1, Contrast = 1, Saturation = 1, Opacity = 1 };
         SetParams(full);
-        _ctx.PSSetShaderResource(0, _canvas.Srv!);
+        // the canvas stops being a target before it's read (Direct3D drops a read of a texture still being drawn to)
         _ctx.OMSetRenderTargets(_y.Rtv);
+        _ctx.PSSetShaderResource(0, _canvas.Srv!);
         _ctx.RSSetViewport(0, 0, Width, Height);
         _ctx.PSSetShader(_psY);
         _ctx.Draw(4, 0);
