@@ -20,7 +20,11 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build the app (compile check)
         shell: pwsh
-        run: dotnet build src/LeapcastStudioAI/LeapcastStudioAI.csproj -c Release 2>&1 | Select-String -Pattern "error|Build succeeded" | Select-Object -First 40
+        run: |
+          $env:TERM = "dumb"
+          dotnet build src/LeapcastStudioAI/LeapcastStudioAI.csproj -c Release -clp:NoSummary 2>&1 | Out-File build.txt -Width 600
+          Get-Content build.txt | Where-Object { $_ -match "error|Build succeeded" } | Select-Object -Unique -First 40 | ForEach-Object { Write-Host $_ }
+          if (Select-String -Path build.txt -Pattern " error " -Quiet) { throw "build failed" }
       - name: GPU canvas tests
         shell: pwsh
         run: |

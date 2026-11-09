@@ -116,7 +116,7 @@ UVO PS_UV(VO i)
     private readonly object _stateLock = new();
     private byte[]? _latest;
     private readonly object _latestLock = new();
-    private long _frames, _uploads;
+    private long _frameCount, _uploads;
     private double _frameMs;
     private static readonly Color4 Background = new(0x0E / 255f, 0x10 / 255f, 0x16 / 255f, 1f);
 
@@ -124,7 +124,7 @@ UVO PS_UV(VO i)
     public int Height { get; }
     public int Fps { get; }
     public string Adapter { get; } = "";
-    public long Frames => Interlocked.Read(ref _frames);
+    public long Frames => Interlocked.Read(ref _frameCount);
     public long Uploads => Interlocked.Read(ref _uploads);
     public double FrameMs => Volatile.Read(ref _frameMs);
     public string? Error { get; private set; }
@@ -210,7 +210,7 @@ UVO PS_UV(VO i)
                 double ms = (clock.Elapsed.TotalSeconds - t0) * 1000;
                 avg = n == 0 ? ms : avg * 0.95 + ms * 0.05;
                 Volatile.Write(ref _frameMs, avg);
-                Interlocked.Increment(ref _frames);
+                Interlocked.Increment(ref _frameCount);
                 n++;
                 // next frame on the frame-rate grid (no drift)
                 double next = n * period, wait = next - clock.Elapsed.TotalSeconds;
