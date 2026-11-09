@@ -248,9 +248,10 @@ public sealed class WindowCaptureBridge : IDisposable
             var s = p.StandardOutput.BaseStream;
             try
             {
+                var ring = new FrameRing(size);
                 while (true)
                 {
-                    var buf = new byte[size];
+                    var buf = ring.Next();
                     int got = 0;
                     while (got < size)
                     {

@@ -371,6 +371,9 @@
             <CheckBox x:Name="PreviewBackgroundBox" Content="Keep the preview at full speed while I'm in another app" Margin="0,10,0,0"/>
             <TextBlock Style="{StaticResource Hint}"
                        Text="Off: while another app is in front (you're in the game) the preview shows a third of its pictures, and none while Leapcast is minimized or the preview is off. The stream itself is never affected. Turn this on if you watch the preview on a second monitor while you play."/>
+            <CheckBox x:Name="GpuCompositingBox" Content="Layer scenes on the graphics card (beta)" Margin="0,10,0,0"/>
+            <TextBlock Style="{StaticResource Hint}"
+                       Text="Your graphics card stacks the game, camera, pages and images instead of the processor, and only the scene on air is drawn: much less CPU while you play. Moving, resizing, showing, hiding and switching never rebuild anything. Not used (the classic way takes over by itself) with a screen capture, the 9:16 canvas, 9:16 clips or studio mode."/>
             <TextBlock Text="PRIVACY" Style="{StaticResource SectionHeader}" Margin="3,14,3,8"/>
             <CheckBox x:Name="HideFromCaptureBox" Content="Hide Leapcast from display capture"/>
             <TextBlock Style="{StaticResource Hint}"

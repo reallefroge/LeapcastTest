@@ -17,6 +17,10 @@ public sealed class WindowsPlatform : IPlatformServices
     public IFrameSource? OpenBrowser(StudioSource source) =>
         Application.Current is { } app ? WebViewFrameSource.Create(source, app.Dispatcher) : null;
 
+    /// <summary>Scenes layered on the graphics card (Direct3D 11); null = the classic compositor is used.</summary>
+    public IGpuCanvas? CreateGpuCanvas(int width, int height, int fps, Func<string, GpuFrame?> frames) =>
+        new D3DCanvas(width, height, fps, frames);
+
     public string? RenderText(StudioSource source, int outputHeight)
     {
         if (string.IsNullOrWhiteSpace(source.Text)) return null;

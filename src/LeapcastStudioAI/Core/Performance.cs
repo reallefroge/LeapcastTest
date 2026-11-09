@@ -67,14 +67,17 @@ public sealed record PerfLevel(int Index, string Name, string Explanation, bool 
 /// </summary>
 public sealed class PerformanceGovernor
 {
-    public sealed record Sample(double Speed, double BacklogSeconds, double UploadBacklogSeconds, TimeSpan SinceStart);
+    /// <param name="FpsRatio">Frames out per second ÷ the frame rate over the same window (0 = unknown). At or above
+    /// 1 the PC is keeping up (after a start it's catching up), whatever the speed reading says.</param>
+    public sealed record Sample(double Speed, double BacklogSeconds, double UploadBacklogSeconds, TimeSpan SinceStart, double FpsRatio = 0);
 
     public enum Action { None, StepDown, StepUp, LowerBitrate }
 
     public sealed record Decision(Action Action, int Level, string Reason);
 
     // thresholds (seconds of evidence before acting)
-    public static readonly TimeSpan Warmup = TimeSpan.FromSeconds(8);
+    /// <summary>The first seconds after a start are catch-up (frames queued while FFmpeg opened its inputs): not judged.</summary>
+    public static readonly TimeSpan Warmup = TimeSpan.FromSeconds(15);
     public static readonly TimeSpan SevereFor = TimeSpan.FromSeconds(4);
     public static readonly TimeSpan MildFor = TimeSpan.FromSeconds(10);
     public static readonly TimeSpan Cooldown = TimeSpan.FromSeconds(20);
@@ -136,8 +139,12 @@ public sealed class PerformanceGovernor
         if (s.SinceStart < Warmup) return new Decision(Action.None, Level, "warming up");
 
         // ---- PC load ----
-        bool severe = (s.Speed > 0 && s.Speed < 0.85) || s.BacklogSeconds > 1.0;
-        bool mild = severe || (s.Speed > 0 && s.Speed < 0.95) || s.BacklogSeconds > 0.4;
+        // frames coming out at the full rate (or faster: catching up) is never "can't keep up", even when the
+        // speed reading lags behind (it did at a start: 35 fps out of 30 read as speed 0.86 → a needless step down)
+        bool keepingUp = s.FpsRatio >= 0.98;
+        bool slow = !keepingUp && s.Speed > 0;
+        bool severe = (slow && s.Speed < 0.85) || s.BacklogSeconds > 1.0;
+        bool mild = severe || (slow && s.Speed < 0.95) || s.BacklogSeconds > 0.4;
         if (mild)
         {
             _healthySince = null;

@@ -119,8 +119,9 @@ public sealed partial class StreamEngine
                 string key = PipelineBuilder.InputKey(src);
                 keys[key] = (kind, src);
                 var frame = GpuFrameFor(key, kind, src);
-                if (frame is not null && kind is not SourceKind.Window) _knownSizes[key] = (frame.Width, frame.Height);
-                (int, int)? natural = frame is not null && SourceTypes.IsGraphic(kind) ? (frame.Width, frame.Height) : null;
+                if (frame is not null && kind is not (SourceKind.Window or SourceKind.Browser)) _knownSizes[key] = (frame.Width, frame.Height);
+                (int, int)? natural = kind == SourceKind.Browser ? BrowserBridge.SizeOf(src)
+                    : frame is not null && SourceTypes.IsGraphic(kind) ? (frame.Width, frame.Height) : null;
                 // a window's picture is already cut and sized by its reader; everything else is cut here
                 double u0 = 0, v0 = 0, u1 = 1, v1 = 1;
                 if (kind != SourceKind.Window && frame is not null)

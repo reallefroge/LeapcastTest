@@ -25,33 +25,64 @@ public static class VodRenderer
             var list = new StringBuilder();
             // pieces are kept between revisions (named after exactly how they're made): an unchanged one isn't made again
             if (pieceCache is not null) Directory.CreateDirectory(pieceCache);
-            var files = Enumerable.Range(0, plan.Pieces.Count).Select(i => pieceCache is null ? Path.Combine(work, $"p{i:0000}.mkv")
-                : Path.Combine(pieceCache, "p-" + PieceKey(source, plan.Pieces[i], plan) + ".mkv")).ToArray();
+            // pieces are encoded on the graphics card when the stream's encoder is one and you're not live (the encode
+            // is over half of a piece's time on the processor); every piece with the same encoder, so they join cleanly
+            string enc = !BackgroundWork.Live && HardwareEncoderOf(videoArgs) is { } hw ? hw : "libx264";
+            string[] Files(string e) => Enumerable.Range(0, plan.Pieces.Count).Select(i => pieceCache is null ? Path.Combine(work, $"p{i:0000}-{e}.mkv")
+                : Path.Combine(pieceCache, "p-" + PieceKey(source, plan.Pieces[i], plan, e) + ".mkv")).ToArray();
+            var files = Files(enc);
             int reused = 0;
             int done = 0;
+            // full effects; if FFmpeg can't (or crashes), simpler effects; at worst the plain shot: the video always gets made
+            async Task<bool> Make(int i, string e, string[] fs, CancellationToken token)
+            {
+                string partial = fs[i] + ".part.mkv";
+                for (int level = 0; level <= 2; level++)
+                {
+                    try { await RunAsync(ffmpeg, PieceArgs(source, plan.Pieces[i], plan, partial, level, e), token); File.Move(partial, fs[i], true); return true; }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception) { if (level < 2) Interlocked.Increment(ref _fallbacks); }
+                }
+                return false;
+            }
+            bool Cached(int i, string[] fs) => pieceCache is not null && File.Exists(fs[i]) && new FileInfo(fs[i]).Length > 0;
+            if (enc != "libx264" && plan.Pieces.Count > 0 && !Cached(0, files) && !await Make(0, enc, files, ct))
+            {
+                Note($"pieces: {enc} couldn't make them here, using x264");
+                enc = "libx264"; files = Files(enc);
+            }
+            bool hwBroken = false;
             // several pieces at once when you're not live (one, gently, while you are)
             await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
                 new ParallelOptions { MaxDegreeOfParallelism = BackgroundWork.Parallel, CancellationToken = ct }, async (i, token) =>
                 {
-                    var p = plan.Pieces[i];
-                    if (pieceCache is not null && File.Exists(files[i]) && new FileInfo(files[i]).Length > 0)
+                    if (Cached(i, files) || (i == 0 && File.Exists(files[0])))
                     {
-                        Interlocked.Increment(ref reused);
+                        if (Cached(i, files)) Interlocked.Increment(ref reused);
                         int dd = Interlocked.Increment(ref done);
-                        progress?.Report((0.05 + 0.75 * dd / plan.Pieces.Count, $"Editing: piece {dd} of {plan.Pieces.Count} (unchanged)"));
+                        progress?.Report((0.05 + 0.75 * dd / plan.Pieces.Count, $"Editing: piece {dd} of {plan.Pieces.Count}{(Cached(i, files) ? " (unchanged)" : "")}"));
                         return;
                     }
-                    string partial = files[i] + ".part.mkv";
-                    // full effects; if FFmpeg can't (or crashes), simpler effects; at worst the plain shot: the video always gets made
-                    for (int level = 0; ; level++)
+                    if (!await Make(i, enc, files, token))
                     {
-                        try { await RunAsync(ffmpeg, PieceArgs(source, p, plan, partial, level), token); File.Move(partial, files[i], true); break; }
-                        catch (OperationCanceledException) { throw; }
-                        catch (Exception) when (level < 2) { Interlocked.Increment(ref _fallbacks); }
+                        if (enc == "libx264") throw new InvalidOperationException($"Piece {i + 1} couldn't be made.");
+                        hwBroken = true;
                     }
                     int d = Interlocked.Increment(ref done);
                     progress?.Report((0.05 + 0.75 * d / plan.Pieces.Count, $"Editing: piece {d} of {plan.Pieces.Count}"));
                 });
+            if (hwBroken)
+            {
+                // a piece the graphics card couldn't encode: all of them again on the processor (one encoder for the whole video)
+                Note($"pieces: {enc} failed on a piece, making them all with x264");
+                enc = "libx264"; files = Files(enc);
+                await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
+                    new ParallelOptions { MaxDegreeOfParallelism = BackgroundWork.Parallel, CancellationToken = ct }, async (i, token) =>
+                    {
+                        if (!Cached(i, files) && !await Make(i, enc, files, token)) throw new InvalidOperationException($"Piece {i + 1} couldn't be made.");
+                    });
+            }
+            PieceEncoder = enc;
             Reused = reused;
             foreach (var file in files) list.AppendLine($"file '{file.Replace("\\", "/").Replace("'", "'\\''")}'");
             string listFile = Path.Combine(work, "pieces.txt");
@@ -135,7 +166,8 @@ public static class VodRenderer
     public static int Fallbacks => _fallbacks;
 
     /// <param name="level">0 = every effect; 1 = no frame blending or moving zoom; 2 = just the shot.</param>
-    public static List<string> PieceArgs(string source, Piece p, EditPlan plan, string output, int level = 0)
+    /// <param name="encoder">The pieces' encoder: x264, or the graphics card's (near-lossless either way: they're re-encoded at the end).</param>
+    public static List<string> PieceArgs(string source, Piece p, EditPlan plan, string output, int level = 0, string encoder = "libx264")
     {
         int W = plan.Width, H = plan.Height, frames = plan.FramesOf(p);
         double F = plan.Fps, len = frames / F;
@@ -218,10 +250,31 @@ public static class VodRenderer
         string graph = "[0:v]" + string.Join(",", v) + "[v];" + audio + "[a]";
         args.AddRange(new[] { "-filter_complex", graph, "-map", "[v]", "-map", "[a]", "-frames:v", frames.ToString(CultureInfo.InvariantCulture),
             "-threads", BackgroundWork.Threads.ToString(CultureInfo.InvariantCulture),
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15", "-g", "60", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2",
-            "-t", I(len), output });
+        });
+        args.AddRange(PieceVideo(encoder));
+        args.AddRange(new[] { "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-t", I(len), output });
         return args;
     }
+
+    /// <summary>The intermediates' video encode: high quality (they're re-encoded once at the end), as fast as possible.</summary>
+    public static string[] PieceVideo(string encoder) => encoder switch
+    {
+        "h264_amf" => new[] { "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "speed", "-rc", "cqp", "-qp_i", "16", "-qp_p", "17", "-g", "60" },
+        "h264_nvenc" => new[] { "-c:v", "h264_nvenc", "-preset", "p2", "-rc", "constqp", "-qp", "16", "-bf", "0", "-g", "60" },
+        "h264_qsv" => new[] { "-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "17", "-g", "60" },
+        _ => new[] { "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15", "-g", "60" },
+    };
+
+    /// <summary>The graphics-card encoder in the stream's video settings, if it uses one.</summary>
+    public static string? HardwareEncoderOf(IReadOnlyList<string> videoArgs)
+    {
+        for (int i = 0; i + 1 < videoArgs.Count; i++)
+            if (videoArgs[i] == "-c:v" && videoArgs[i + 1] is "h264_amf" or "h264_nvenc" or "h264_qsv") return videoArgs[i + 1];
+        return null;
+    }
+
+    /// <summary>The encoder the last render's pieces were made with (logged).</summary>
+    public static string PieceEncoder { get; private set; } = "libx264";
 
     // ------------------------------------------------------------------ the music + sound effects bed
 
@@ -347,9 +400,9 @@ public static class VodRenderer
     public const double MusicLevel = 0.32;
 
     /// <summary>A name for a piece made exactly this way (source, timing, every effect).</summary>
-    private static string PieceKey(string source, Piece p, EditPlan plan)
+    private static string PieceKey(string source, Piece p, EditPlan plan, string encoder = "libx264")
     {
-        var args = PieceArgs(source, p, plan, "OUT", 0).ToList();
+        var args = PieceArgs(source, p, plan, "OUT", 0, encoder).ToList();
         int th = args.IndexOf("-threads"); // how many threads made it doesn't change the picture
         if (th >= 0) args.RemoveRange(th, 2);
         string recipe = string.Join("\u0001", args) + $"|{new FileInfo(source).Length}";

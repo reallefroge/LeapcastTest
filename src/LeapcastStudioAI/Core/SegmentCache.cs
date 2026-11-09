@@ -32,9 +32,79 @@ public sealed class SegmentCache
     {
         _root = root;
         SegmentSeconds = segmentSeconds;
-        // Leftovers from a crash are useless; start clean.
-        try { if (Directory.Exists(_root)) Directory.Delete(_root, true); } catch { }
+        // Leftovers: a recording that was running when the app or the PC went down is set aside to be recovered
+        // (RecoverAsync); anything else (replay history) is useless and goes.
+        try
+        {
+            if (File.Exists(MarkerPath))
+                Directory.Move(_root, $"{_root}-recover-{DateTime.UtcNow.Ticks}");
+            else if (Directory.Exists(_root)) Directory.Delete(_root, true);
+        }
+        catch { try { if (Directory.Exists(_root)) Directory.Delete(_root, true); } catch { } }
         Directory.CreateDirectory(_root);
+    }
+
+    // ------------------------------------------------------------------ crash-safe recordings
+
+    /// <summary>What a recording in progress needs to be rebuilt after a crash: where it starts and where it goes.</summary>
+    public sealed record RecordingMarker(long From, DateTime StartedUtc, string Folder);
+
+    private string MarkerPath => System.IO.Path.Combine(_root, "recording.json");
+
+    private void WriteMarker(RecordingMarker? m)
+    {
+        try
+        {
+            if (m is null) { File.Delete(MarkerPath); return; }
+            Directory.CreateDirectory(_root);
+            File.WriteAllText(MarkerPath, System.Text.Json.JsonSerializer.Serialize(m));
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Rebuilds recordings that were running when the app or the PC went down (the encoder's segments are on
+    /// disk; only the final join never happened). Each becomes "Leapcast &lt;start time&gt; (recovered).mp4" in the
+    /// recording folder it was going to. Returns the files written.
+    /// </summary>
+    public static async Task<List<string>> RecoverAsync(string root, string ffmpeg, string fallbackFolder, CancellationToken ct = default)
+    {
+        var done = new List<string>();
+        string parent = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(root))!;
+        string name = System.IO.Path.GetFileName(System.IO.Path.GetFullPath(root));
+        if (!Directory.Exists(parent)) return done;
+        foreach (var dir in Directory.GetDirectories(parent, name + "-recover-*").OrderBy(d => d, StringComparer.Ordinal))
+        {
+            try
+            {
+                var marker = System.Text.Json.JsonSerializer.Deserialize<RecordingMarker>(File.ReadAllText(System.IO.Path.Combine(dir, "recording.json")));
+                var segs = new List<Segment>();
+                foreach (var sdir in Directory.EnumerateDirectories(dir, "s*"))
+                {
+                    if (!int.TryParse(System.IO.Path.GetFileName(sdir)[1..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var session)) continue;
+                    foreach (var f in new DirectoryInfo(sdir).EnumerateFiles("seg_*.ts"))
+                        if (int.TryParse(System.IO.Path.GetFileNameWithoutExtension(f.Name).AsSpan(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && f.Length > 0)
+                            segs.Add(new Segment(f.FullName, session, n, f.Length, f.LastWriteTimeUtc, true));
+                }
+                segs = segs.Where(s => marker is null || s.Key >= marker.From).OrderBy(s => s.Key).ToList();
+                if (segs.Count > 0)
+                {
+                    string folder = marker?.Folder is { Length: > 0 } mf ? mf : fallbackFolder;
+                    var started = (marker?.StartedUtc ?? segs[0].WrittenUtc).ToLocalTime();
+                    string file = System.IO.Path.Combine(folder, $"Leapcast {started:yyyy-MM-dd HH-mm-ss} (recovered).mp4");
+                    await ConcatAsync(ffmpeg, segs, file, ct);
+                    done.Add(file);
+                }
+                Directory.Delete(dir, true);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch
+            {
+                // couldn't rebuild it now: try again next start, but don't keep a broken one forever
+                try { if (DateTime.UtcNow - Directory.GetCreationTimeUtc(dir) > TimeSpan.FromDays(7)) Directory.Delete(dir, true); } catch { }
+            }
+        }
+        return done;
     }
 
     /// <summary>Starts a new segment session and returns the ffmpeg output pattern for it.</summary>
@@ -152,10 +222,12 @@ public sealed class SegmentCache
         }
     }
 
-    public void StartRecording()
+    /// <param name="folder">Where the recording goes (kept on disk with it, for a recovery after a crash).</param>
+    public void StartRecording(string folder = "")
     {
         long from = CurrentKey();
         lock (_lock) { _recordingFrom = from; RecordingStartedUtc = DateTime.UtcNow; }
+        WriteMarker(new RecordingMarker(from, DateTime.UtcNow, folder));
     }
 
     /// <summary>When the last exported recording's first frame was captured (UTC), if known.</summary>
@@ -185,7 +257,13 @@ public sealed class SegmentCache
             await ConcatAsync(ffmpeg, segs, outputPath, ct);
             return outputPath;
         }
-        finally { lock (_lock) _pinned.Remove((from, to)); }
+        finally
+        {
+            lock (_lock) _pinned.Remove((from, to));
+            // written (or nothing to write): nothing to recover. A new recording started meanwhile keeps its own marker.
+            bool again; lock (_lock) again = _recordingFrom is not null;
+            if (!again) WriteMarker(null);
+        }
     }
 
     /// <summary>Remembers "now" so <see cref="ExportSinceAsync"/> can export exactly what is recorded from here on.</summary>

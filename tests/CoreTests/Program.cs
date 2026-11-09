@@ -342,6 +342,20 @@ var cut2 = WindowCaptureBridge.PlanGpuCut(1280, 800, (0, 0, 0, 0), Anchors.FillF
 Check(cut2 is { ScaleW: 1440, ScaleH: 900, Pad: true }, $"GPU cut, fit mode: scaled to 1440×900 and padded ({cut2})");
 var cut3 = WindowCaptureBridge.PlanGpuCut(2560, 1080, (0, 0, 0, 0), Anchors.FillCrop, 1920, 1080);
 Check(cut3 is { L: 320, R: 320, T: 0, B: 0 }, $"GPU cut: an ultrawide window loses its sides ({cut3})");
+{
+    // web pages are drawn at the size they're shown, never bigger than the page
+    var p540 = new EncodePlan(960, 540, 30, 4000, 22, "libx264", EncoderTier.Rich, false, false, "veryfast", "t", Array.Empty<string>());
+    var alerts = new StudioSource { Name = "Alerts", Type = SourceTypes.Browser, Url = "https://example.invalid/alerts", BrowserWidth = 1920, BrowserHeight = 1080, Anchor = Anchors.Fill };
+    var chatBox = new StudioSource { Name = "Chat", Type = SourceTypes.Browser, Url = "https://example.invalid/chat", BrowserWidth = 400, BrowserHeight = 600, Anchor = Anchors.TopRight, SizePercent = 0 };
+    var cropped = new StudioSource { Name = "Cut", Type = SourceTypes.Browser, Url = "https://example.invalid/cut", BrowserWidth = 1920, BrowserHeight = 1080, Anchor = Anchors.Fill, CropTop = 100 };
+    var bsc = new StudioScene { Name = "b", Sources = new() { alerts, chatBox, cropped } };
+    var ra = StreamEngine.BrowserRenderSize(alerts, p540, null, new[] { bsc });
+    var rc = StreamEngine.BrowserRenderSize(chatBox, p540, null, new[] { bsc });
+    var rx = StreamEngine.BrowserRenderSize(cropped, p540, null, new[] { bsc });
+    var rv = StreamEngine.BrowserRenderSize(alerts, p540, (1080, 1920), new[] { bsc });
+    Check(ra == (960, 540) && rc == (400, 600) && rx == (1920, 1080) && rv.W >= 960,
+        $"a 1080p page on a 540p stream is drawn at 960×540 (a quarter of the pixels); a page shown at its own size, or cropped, keeps it; the bigger vertical canvas wins ({ra}, {rc}, {rx}, {rv})");
+}
 
 // ---------------------------------------------------------------- performance governor (pure logic)
 Console.WriteLine("Hotkeys, add existing source, live show/hide in the graph");
@@ -632,6 +646,30 @@ Console.WriteLine("Voice clips: say \"Clip\" → the last 50 seconds, saved by d
     Check(sc.b > 150 && sc.r < 80 && sp.streams.Contains("h264") && sp.duration is > 9 and < 12,
         $"when the newest piece never ends (no keyframes), the clip is still the newest 10 s with its video ({sp.duration:0.0}s {sp.streams}, last frame rgb {sc})");
 
+    // crash-safe recordings: the app (or the PC) goes down mid-recording; the next start rebuilds it
+    {
+        string crashRoot = Path.Combine(work, "crash-cache", "segments"), recFolder = Path.Combine(work, "crash-recordings");
+        var c1 = new SegmentCache(crashRoot);
+        await Encode("green", 4, 60, c1.BeginSession(), true);   // before Record: not part of the recording
+        c1.EndSession();
+        c1.StartRecording(recFolder);
+        await Encode("green", 8, 60, c1.BeginSession(), true);   // recorded… then the app dies (no Stop)
+        _ = new SegmentCache(crashRoot);                          // next start
+        var recov = await SegmentCache.RecoverAsync(crashRoot, ffmpeg, Path.Combine(work, "fallback"));
+        (bool ok, double duration, string streams) gp = recov.Count == 1 ? await ProbeAsync(recov[0]) : (false, 0.0, "");
+        Check(recov.Count == 1 && gp.ok && gp.duration is > 7 and < 9.5 && Path.GetFileName(recov[0]).EndsWith("(recovered).mp4") && Path.GetDirectoryName(recov[0]) == recFolder,
+            $"a recording cut short by a crash is rebuilt on the next start, from where Record was pressed ({(recov.Count == 1 ? Path.GetFileName(recov[0]) : "nothing")}, {gp.duration:0.0}s)");
+        Check(!Directory.GetDirectories(Path.GetDirectoryName(crashRoot)!, "segments-recover-*").Any() && (await SegmentCache.RecoverAsync(crashRoot, ffmpeg, recFolder)).Count == 0,
+            "…once: the leftovers are cleared after it's rebuilt");
+        var c3 = new SegmentCache(crashRoot);
+        c3.StartRecording(recFolder);
+        await Encode("green", 4, 60, c3.BeginSession(), true);
+        c3.EndSession();
+        await c3.StopRecordingAsync(ffmpeg, Path.Combine(recFolder, "normal.mp4"));
+        _ = new SegmentCache(crashRoot);
+        Check((await SegmentCache.RecoverAsync(crashRoot, ffmpeg, recFolder)).Count == 0, "a recording that was stopped normally isn't \"recovered\" again");
+    }
+
     Check(VoiceClips.Matches("Clip", "clip") && VoiceClips.Matches("clip that!", "clip") && VoiceClips.Matches("ok let's CLIP it", "clip"),
         "\"Clip\", \"clip that!\" and \"let's CLIP it\" trigger a clip");
     Check(!VoiceClips.Matches("clipboard", "clip") && !VoiceClips.Matches("eclipse", "clip") && !VoiceClips.Matches("click", "clip") && !VoiceClips.Matches("", "clip"),
@@ -771,6 +809,24 @@ Check(HardwareProfile.StartLevel(HardwareTier.Low) == 2 && HardwareProfile.Start
     }
     var d1 = Run(1.0, 0.02, 60, 0);
     Check(d1.Action == PerformanceGovernor.Action.None && gov.Level == 0, "keeping up: no change");
+    {
+        // what happened on a real start: 35 frames a second out of 30 (catching up), the speed reading said 0.86
+        var g2 = new PerformanceGovernor(); g2.Reset(0);
+        PerformanceGovernor.Decision dd = new(PerformanceGovernor.Action.None, 0, "");
+        for (int t = 0; t < 40 && dd.Action == PerformanceGovernor.Action.None; t++)
+            dd = g2.Evaluate(new PerformanceGovernor.Sample(0.86, 0.0, 0, TimeSpan.FromSeconds(t), FpsRatio: 34.9 / 30), t0.AddSeconds(t), Every, false, true);
+        var g3 = new PerformanceGovernor(); g3.Reset(0);
+        PerformanceGovernor.Decision d3s = new(PerformanceGovernor.Action.None, 0, "");
+        for (int t = 0; t < 14 && d3s.Action == PerformanceGovernor.Action.None; t++)
+            d3s = g3.Evaluate(new PerformanceGovernor.Sample(0.5, 0.0, 0, TimeSpan.FromSeconds(t)), t0.AddSeconds(t), Every, false, true);
+        Check(dd.Action == PerformanceGovernor.Action.None && g2.Level == 0 && d3s.Action == PerformanceGovernor.Action.None,
+            $"no false alarm: frames coming out at full rate (or faster, catching up) never step down, and the first 15 s after a start aren't judged ({dd.Action}, {d3s.Action})");
+        var g4 = new PerformanceGovernor(); g4.Reset(0);
+        PerformanceGovernor.Decision dg4 = new(PerformanceGovernor.Action.None, 0, "");
+        for (int t = 0; t < 40 && dg4.Action == PerformanceGovernor.Action.None; t++)
+            dg4 = g4.Evaluate(new PerformanceGovernor.Sample(0.8, 0.0, 0, TimeSpan.FromSeconds(t), FpsRatio: 0.8), t0.AddSeconds(t), Every, false, true);
+        Check(dg4.Action == PerformanceGovernor.Action.StepDown, "…a PC really falling behind (24 of 30 frames a second) still steps down");
+    }
     var d2 = Run(0.80, 0.0, 10, 60);
     Check(d2.Action == PerformanceGovernor.Action.StepDown && gov.Level == 1, $"heavy lag (80% speed) steps down within seconds ({d2.Reason})");
     var d3 = Run(0.80, 0.0, 12, 70);
@@ -1822,6 +1878,43 @@ Check(engine.SourceSize(chat) is (160, 90), $"page size known for the editor ({e
     Check(page is not null && page.Refreshes == 2 && page.LastClearCache && engine.PipelineStarts == rps && Px(400 / 640.0, 225 / 360.0).r > 200,
         $"Refresh / Clear cache on a page reloads just the page (reloads {page?.Refreshes}, cache cleared {page?.LastClearCache}, pipeline starts {rps} → {engine.PipelineStarts}: \"{said}\" / \"{said2}\")");
 }
+#if WINDOWS_GPU
+// ---------------------------------------------------------------- GPU compositor (beta)
+Console.WriteLine("GPU compositor (beta): scenes layered on the graphics card (Windows' software renderer here)");
+{
+    FakePlatform.Gpu = true;
+    var gset = WithEncoder(settings, "libx264"); gset.GpuCompositing = true;
+    var other = new StudioScene { Name = "other" };
+    var chat2 = new StudioSource { Name = "Chat 2", Type = SourceTypes.Browser, Url = "https://example.invalid/chat2", BrowserWidth = 160, BrowserHeight = 90,
+        Anchor = Anchors.Free, X = 0.05, Y = 0.05, W = 0 };
+    other.Sources.Add(chat2);
+    chat.X = 0.5; chat.Y = 0.5;
+    await engine.UpdateAsync(new[] { bscene, other }, bscene, gset, false);
+    await Task.Delay(3500);
+    var gIn = Px(400 / 640.0, 225 / 360.0); var gOut = Px(0.25, 0.25);
+    Check(engine.GpuCompositing && gIn.r > 200 && gIn.g < 60 && gOut.r < 60,
+        $"turned on: the picture comes from the GPU canvas, page where placed ({engine.GpuStatusLine}; inside {gIn}, outside {gOut})");
+    int gStartsNow = engine.PipelineStarts;
+    chat.X = 0.1; chat.Y = 0.6;   // moved: 160×90 at (64,216) → centre (144,261)
+    await engine.UpdateAsync(new[] { bscene, other }, bscene, gset, false);
+    await Task.Delay(1200);
+    var moved = Px(144 / 640.0, 261 / 360.0); var was = Px(400 / 640.0, 225 / 360.0);
+    chat.W = 0.4; chat.H = 0;      // resized
+    await engine.UpdateAsync(new[] { bscene, other }, bscene, gset, false);
+    await Task.Delay(1200);
+    await engine.UpdateAsync(new[] { bscene, other }, other, gset, false);   // switched scene
+    await Task.Delay(1500);
+    var sw = Px(144 / 640.0, 261 / 360.0); var other2 = Px((32 + 80) / 640.0, (18 + 45) / 360.0);
+    Check(moved.r > 200 && was.r < 60 && sw.r < 60 && other2.r > 200 && engine.PipelineStarts == gStartsNow,
+        $"moving, resizing and switching scenes never rebuild (starts {gStartsNow} → {engine.PipelineStarts}; moved {moved}, old spot {was}, after the switch {sw} / {other2})");
+    gset.GpuCompositing = false;
+    await engine.UpdateAsync(new[] { bscene, other }, bscene, gset, false);
+    await Task.Delay(2500);
+    Check(!engine.GpuCompositing && engine.Running, "turned off: back to the classic compositor");
+    FakePlatform.Gpu = false;
+    chat.W = 0; chat.X = 0.5; chat.Y = 0.5;
+}
+#endif
 engine.FrameReady -= GrabG;
 await engine.SetPreviewAsync(false);
 
@@ -2381,6 +2474,12 @@ sealed class FakePlatform(string png) : IPlatformServices
     public long? FindWindow(string title) => OperatingSystem.IsWindows() ? WinApi.Find(title) : null;
     public string? RenderText(StudioSource source, int outputHeight) => png;
     public (int X, int Y, int W, int H)? MonitorBounds(int index) => null;
+    /// <summary>The GPU compositor test turns the canvas on (Windows' software renderer: no graphics card on CI).</summary>
+    public static bool Gpu;
+#if WINDOWS_GPU
+    public IGpuCanvas? CreateGpuCanvas(int width, int height, int fps, Func<string, GpuFrame?> frames) =>
+        Gpu ? new D3DCanvas(width, height, fps, frames, software: true) : null;
+#endif
 }
 
 /// <summary>Stand-in for the WASAPI bridge: paced 48 kHz stereo float tones over FIFOs / named pipes.</summary>

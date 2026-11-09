@@ -229,10 +229,36 @@ public partial class AutoConfigWindow : Window
             chosen = c; chosenResult = r;
             if (r.Smooth) break;
         }
+        // 6. spare room on a graphics-card encoder: its slower, sharper settings give a better picture for the same
+        // upload at no cost to the game; kept only if it still holds the full frame rate
+        string preset = _state.Settings.EncoderPreset;
+        string? presetNote = null;
+        if (chosen is not null && chosenResult?.Smooth == true && chosen.Encoder != "libx264")
+        {
+            static int Rank(string p) => p switch { "Quality" => 2, "Balanced" => 1, _ => 0 };
+            foreach (var p in new[] { "Quality", "Balanced" })
+            {
+                if (Rank(p) <= Rank(preset)) break;
+                if (p == "Quality" && chosen.Encoder == "h264_amf") continue;   // AMD: "Quality" is the same as "Balanced"
+                ct.ThrowIfCancellationRequested();
+                Step($"… the encoder has room to spare: trying its sharper \"{p}\" settings");
+                var settings = chosen.Apply(_state.Settings, content);
+                settings.UploadKbps = upload;
+                settings.LowLatencyMode = false;
+                settings.EncoderPreset = p;
+                await _engine.UpdateAsync(_state.Scenes.ToList(), scene, settings, false);
+                var r = await _engine.BenchmarkAsync(settings, 10, ct);
+                bool holds = r.Smooth && r.Fps >= r.TargetFps * 0.97;
+                Replace($"{(holds ? "✓" : "✗")} \"{p}\" encoder settings: {r.Fps:0.0} of {r.TargetFps} FPS" +
+                        (r.Speed > 0 ? $", {r.Speed:0.00}× real time" : "") + (holds ? " — sharper picture, same upload" : " — too heavy, keeping the faster settings"));
+                if (holds) { preset = p; presetNote = $"Encoder settings: \"{p}\" (your graphics card had room for a sharper picture at the same bitrate)."; break; }
+            }
+        }
         await _engine.UpdateAsync(_state.Scenes.ToList(), scene, _state.Settings, false);
         if (chosen is null) throw new InvalidOperationException("Nothing could be tested.");
 
         var result = chosen.Apply(_state.Settings, content);
+        result.EncoderPreset = preset;
         result.UploadKbps = upload;
         if (_scannedUtc is { } scanned && ParseUpload() == upload) result.UploadMeasuredUtc = scanned;
         else if (upload != _state.Settings.UploadKbps) result.UploadMeasuredUtc = null;
@@ -243,6 +269,7 @@ public partial class AutoConfigWindow : Window
         SummaryTitle.Text = chosen.Label + (chosenResult?.Smooth == true ? "" : " (lightest option: close other heavy programs while streaming)");
         var list = chosen.Reasons.ToList();
         list.Add("Smart VBR: static screens use far less upload; low-latency mode off (it costs quality per kbps).");
+        if (presetNote is not null) list.Add(presetNote);
         if (game is not null && FillGameBox.IsChecked == true) list.Add($"\"{game.Name}\" fills the whole stream: no bars, no stretching.");
         if (_state.Settings.Outputs.Count(o => o.Enabled) > 1) list.Add("All your platforms share this one encode.");
         SummaryList.ItemsSource = list;

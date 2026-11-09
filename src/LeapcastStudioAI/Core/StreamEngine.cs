@@ -76,6 +76,7 @@ public sealed partial class StreamEngine : IDisposable
     private readonly IAudioBridge _audio;
     private readonly IPlatformServices _platform;
     private readonly SegmentCache _cache;
+    private readonly string _segmentsRoot;
     /// <summary>The live 9:16 clip canvas's own recent segments (Settings → 9:16 clips).</summary>
     private readonly SegmentCache _clipCache;
     private readonly CameraBridge _cameras;
@@ -293,7 +294,8 @@ public sealed partial class StreamEngine : IDisposable
         // ffmpeg readers/writers (preview, progress, outputs) must never queue behind each other on a small pool
         ThreadPool.GetMinThreads(out int workers, out int io);
         ThreadPool.SetMinThreads(Math.Max(workers, 32), Math.Max(io, 32));
-        _cache = new SegmentCache(Path.Combine(dataRoot, "cache", "segments"));
+        _segmentsRoot = Path.Combine(dataRoot, "cache", "segments");
+        _cache = new SegmentCache(_segmentsRoot);
         _clipCache = new SegmentCache(Path.Combine(dataRoot, "cache", "clips-9x16"));
         _logDir = Path.Combine(dataRoot, "logs");
         _tempDir = Path.Combine(dataRoot, "cache", "overlays");
@@ -963,7 +965,7 @@ public sealed partial class StreamEngine : IDisposable
     public Task StartRecordingAsync() => Locked(async () =>
     {
         if (_cache.IsRecording) return;
-        _cache.StartRecording();
+        _cache.StartRecording(Settings.RecordingFolder);
         try { await ReconcileAsync(requireSuccess: true); }
         catch
         {
@@ -985,6 +987,17 @@ public sealed partial class StreamEngine : IDisposable
             await ReconcileAsync();
         });
         return export is null ? "" : await export;
+    }
+
+    /// <summary>
+    /// Recordings that were running when the app or the PC went down, rebuilt from what the encoder had written
+    /// ("… (recovered).mp4" in the recording folder). Call once at start-up, after FFmpeg is found.
+    /// </summary>
+    public async Task<List<string>> RecoverRecordingsAsync()
+    {
+        if (FfmpegPath is not { } ff) return new();
+        try { return await SegmentCache.RecoverAsync(_segmentsRoot, ff, Settings.RecordingFolder); }
+        catch { return new(); }
     }
 
     /// <summary>When the last recording's first frame was captured (UTC): lines up the session log with the file.</summary>
@@ -1363,7 +1376,9 @@ public sealed partial class StreamEngine : IDisposable
                      .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources, includeHidden: true) : Enumerable.Empty<StudioSource>()))
                      .Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && x.Url.Trim().Length > 0))
             browserUses.TryAdd(PipelineBuilder.InputKey(src), src);
-        var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)));
+        foreach (var (k, src) in browserUses) _knownSizes[k] = BrowserBridge.SizeOf(src);   // its layout size, whatever it's drawn at
+        var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)),
+            src => BrowserRenderSize(src, plan, shape.Vertical ? vSize : null, scenes));
         lock (_windows.CaptureSizes) foreach (var (k, v) in _windows.CaptureSizes) _knownSizes[k] = v;
         // (with the safety delay, encoded timestamps run that much ahead of when things happened)
         string? segPattern = shape.Main ? _cache.BeginSession(origin - safetyDelay) : null;
@@ -1563,6 +1578,32 @@ public sealed partial class StreamEngine : IDisposable
     private static readonly Regex VideoStream = new(@"^\s+Stream #(\d+):\d+.*?: Video: .*?\b(\d{2,5})x(\d{2,5})\b", RegexOptions.Compiled);
 
     /// <summary>Learns each input's real picture size from ffmpeg's log (exact layout instead of guessed aspect ratios).</summary>
+    /// <summary>
+    /// The size a web page is drawn at: as big as it appears on the biggest canvas it's on, never bigger than the
+    /// page itself (a 1920×1080 alert box on a 960×540 stream is drawn at 960×540: a quarter of the pixels to
+    /// render, convert and pipe). A cropped page keeps its full size (crops are in page pixels).
+    /// </summary>
+    public static (int W, int H) BrowserRenderSize(StudioSource src, EncodePlan plan, (int W, int H)? vertical, IEnumerable<StudioScene> scenes)
+    {
+        var (pw, ph) = BrowserBridge.SizeOf(src);
+        string key = PipelineBuilder.InputKey(src);
+        double aspect = pw / (double)ph, f = 0;
+        foreach (var sc in scenes)
+            foreach (var s in sc.Sources.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && PipelineBuilder.InputKey(x) == key))
+            {
+                if (s.CropLeft + s.CropTop + s.CropRight + s.CropBottom > 0) return (pw, ph);
+                var r = LayoutMath.Horizontal(s, plan.Width, plan.Height, aspect, (pw, ph));
+                f = Math.Max(f, Math.Max(r.W / pw, r.H / ph));
+                if (vertical is { } v && LayoutMath.OnVerticalCanvas(s))
+                {
+                    var vr = LayoutMath.Vertical(s, v.W, v.H, aspect, sc.Sources.Any(c => SourceTypes.KindOf(c.Type) == SourceKind.Camera && c.Shown));
+                    f = Math.Max(f, Math.Max(vr.W / pw, vr.H / ph));
+                }
+            }
+        if (f <= 0 || f >= 0.9) return (pw, ph);
+        return (SmartTuner.Even(Math.Max(64, (int)Math.Ceiling(pw * f))), SmartTuner.Even(Math.Max(64, (int)Math.Ceiling(ph * f))));
+    }
+
     private void OnLogLine(string line, PipelineSpec spec, int[] parsing)
     {
         if (line.StartsWith("Output #", StringComparison.Ordinal) || line.StartsWith("Stream mapping", StringComparison.Ordinal)) { parsing[0] = -1; return; }
@@ -1574,6 +1615,7 @@ public sealed partial class StreamEngine : IDisposable
         if (!m.Success || int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) != parsingInput) return;
         if (!spec.InputKeys.TryGetValue(parsingInput, out var key)) return;
         if (key.StartsWith("window|", StringComparison.Ordinal)) return; // fed already cropped/filled: the bridge knows the real size
+        if (key.StartsWith("browser|", StringComparison.Ordinal)) return; // drawn at the size it's shown: its layout size is known
         var size = (int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture), int.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture));
         if (_knownSizes.TryGetValue(key, out var old) && old == size) return;
         _knownSizes[key] = size;
@@ -1770,7 +1812,7 @@ public sealed partial class StreamEngine : IDisposable
     {
         var r = _runner;
         if (r is null) { if (!Reconnecting) _health = "Idle"; return; }
-        var (_, speed, span) = WindowedRates(4);
+        var (fpsNow, speed, span) = WindowedRates(4);
         var outs = _outputs.Snapshot();
         double backlog = Math.Max(_cameras.MaxBacklogSeconds(), Math.Max(_windows.MaxBacklogSeconds(), _browsers.MaxBacklogSeconds()));
         double upload = outs.Where(o => o.State == OutputState.Live).Select(o => o.BufferedSeconds).DefaultIfEmpty(0).Max();
@@ -1799,7 +1841,9 @@ public sealed partial class StreamEngine : IDisposable
         bool adapt = Settings.AdaptivePerformance;
 
         int before = _governor.Level;
-        var d = _governor.Evaluate(new PerformanceGovernor.Sample(speed, backlog, upload, DateTime.UtcNow - r.StartedUtc), DateTime.UtcNow,
+        double target = CurrentPlan?.Fps ?? 0;
+        double fpsRatio = span >= 2 && target > 0 ? fpsNow / target : 0;
+        var d = _governor.Evaluate(new PerformanceGovernor.Sample(speed, backlog, upload, DateTime.UtcNow - r.StartedUtc, fpsRatio), DateTime.UtcNow,
             useful: level => adapt && RungEffect(level) != RungEffect(before),
             // stepping up rebuilds the pipeline: freely when nothing is live; mid-stream only to a rung with the same
             // picture size (a brief pause, destinations stay connected: e.g. back from 30 to 60 FPS) after 5 calm minutes

@@ -84,7 +84,7 @@ public static class VodEditor
         string baseName = revise && project.Video.Length > 0 ? NextVersion(project.Video) : $"{Safe(options.Title)} - {DateTime.Now:yyyy-MM-dd HH-mm}";
         var result = await VodRenderer.RenderAsync(ffmpeg, recording, plan, project.OutputFolder, baseName, videoArgs(plan.Width, plan.Height, plan.Fps), signals,
             new Progress<(double, string)>(x => progress?.Report(new Progress(0.35 + 0.65 * x.Item1, x.Item2))), ct, Path.Combine(project.WorkDir, "pieces"));
-        Took($"rendering ({VodRenderer.Fallbacks} fallback(s), {VodRenderer.Reused} of {plan.Pieces.Count} pieces reused)");
+        Took($"rendering ({VodRenderer.Fallbacks} fallback(s), {VodRenderer.Reused} of {plan.Pieces.Count} pieces reused, pieces encoded with {VodRenderer.PieceEncoder})");
         VodRenderer.Note($"Done in {total.Elapsed:h\\:mm\\:ss}");
         project.Video = result.Video;
         project.Remember(plan);

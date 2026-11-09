@@ -26,14 +26,18 @@ public sealed class WebViewFrameSource : IFrameSource
     private readonly DispatcherTimer _fallback;
     private readonly double _minInterval;
 
-    public int Width { get; }
-    public int Height { get; }
+    /// <summary>The picture's size: the page's own size, or smaller when it's drawn smaller (<see cref="Resize"/>).</summary>
+    public int Width { get; private set; }
+    public int Height { get; private set; }
     public string? Error { get; private set; }
+    /// <summary>The page's layout size (CSS pixels): what the page is built for, whatever size it's drawn at.</summary>
+    private readonly int _pageW, _pageH;
 
     private WebViewFrameSource(StudioSource s, Dispatcher ui)
     {
         _ui = ui;
         (Width, Height) = BrowserBridge.SizeOf(s);
+        (_pageW, _pageH) = (Width, Height);
         _minInterval = 1.0 / BrowserBridge.FpsOf(s);
         _view = new WebView2 { DefaultBackgroundColor = System.Drawing.Color.Transparent };
         _host = new Window
@@ -83,8 +87,7 @@ public sealed class WebViewFrameSource : IFrameSource
                 "(document.head || document.documentElement).appendChild(st); }; " +
                 "if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', add); else add(); })();");
             await core.CallDevToolsProtocolMethodAsync("Emulation.setDefaultBackgroundColorOverride", "{\"color\":{\"r\":0,\"g\":0,\"b\":0,\"a\":0}}");
-            await core.CallDevToolsProtocolMethodAsync("Emulation.setDeviceMetricsOverride",
-                $"{{\"width\":{Width},\"height\":{Height},\"deviceScaleFactor\":1,\"mobile\":false}}");
+            await core.CallDevToolsProtocolMethodAsync("Emulation.setDeviceMetricsOverride", MetricsJson());
             var frames = core.GetDevToolsProtocolEventReceiver("Page.screencastFrame");
             frames.DevToolsProtocolEventReceived += OnScreencastFrame;
             await core.CallDevToolsProtocolMethodAsync("Page.enable", "{}");
@@ -94,8 +97,8 @@ public sealed class WebViewFrameSource : IFrameSource
                 else Error = null;
             };
             core.Navigate(NormalizeUrl(s.Url));
-            await core.CallDevToolsProtocolMethodAsync("Page.startScreencast",
-                $"{{\"format\":\"png\",\"maxWidth\":{Width},\"maxHeight\":{Height},\"everyNthFrame\":1}}");
+            await core.CallDevToolsProtocolMethodAsync("Page.startScreencast", ScreencastJson());
+            _ready = true;
             _ = _ui.InvokeAsync(async () =>
             {
                 await Task.Delay(4000);
@@ -107,6 +110,33 @@ public sealed class WebViewFrameSource : IFrameSource
             Error = "the Microsoft Edge WebView2 Runtime isn't installed (get it from Microsoft's website).";
         }
         catch (Exception ex) { Error = ex.Message; }
+    }
+
+    private volatile bool _ready;
+
+    /// <summary>The page keeps its layout size; Chromium draws it at the picture's size (fewer pixels to draw,
+    /// encode, decode and pipe when the page is shown smaller than it's built, e.g. a 1080p alert box on a 540p stream).</summary>
+    private string MetricsJson() => FormattableString.Invariant(
+        $"{{\"width\":{_pageW},\"height\":{_pageH},\"deviceScaleFactor\":{Math.Min(1.0, Width / (double)_pageW):0.####},\"mobile\":false}}");
+
+    private string ScreencastJson() => $"{{\"format\":\"png\",\"maxWidth\":{Width},\"maxHeight\":{Height},\"everyNthFrame\":1}}";
+
+    public void Resize(int w, int h)
+    {
+        if (_disposed || (w == Width && h == Height)) return;
+        lock (_lock) { Width = w; Height = h; _latest = null; }
+        _ui.BeginInvoke(async () =>
+        {
+            try
+            {
+                var core = _view.CoreWebView2;
+                if (core is null || _disposed || !_ready) return;   // InitAsync applies the new size itself
+                await core.CallDevToolsProtocolMethodAsync("Emulation.setDeviceMetricsOverride", MetricsJson());
+                await core.CallDevToolsProtocolMethodAsync("Page.stopScreencast", "{}");
+                await core.CallDevToolsProtocolMethodAsync("Page.startScreencast", ScreencastJson());
+            }
+            catch { }
+        });
     }
 
     public void Refresh(bool clearCache)
@@ -177,16 +207,20 @@ public sealed class WebViewFrameSource : IFrameSource
                 using var ms = new MemoryStream(png);
                 var decoder = new PngBitmapDecoder(ms, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
                 BitmapSource frame = new FormatConvertedBitmap(decoder.Frames[0], PixelFormats.Bgra32, null, 0);
-                var buf = new byte[Width * Height * 4];
-                int w = Math.Min(Width, frame.PixelWidth), h = Math.Min(Height, frame.PixelHeight);
-                if (w == Width && h == Height) frame.CopyPixels(buf, Width * 4, 0);
+                int W = Width, H = Height;
+                // a full-size picture (the fallback snapshot, or a frame from before a resize): scaled to the picture size
+                if (frame.PixelWidth > W * 1.05 && frame.PixelWidth >= _pageW * 0.95)
+                    frame = new TransformedBitmap(frame, new ScaleTransform(W / (double)frame.PixelWidth, H / (double)frame.PixelHeight));
+                var buf = new byte[W * H * 4];
+                int w = Math.Min(W, frame.PixelWidth), h = Math.Min(H, frame.PixelHeight);
+                if (w == W && h == H) frame.CopyPixels(buf, W * 4, 0);
                 else
                 {
                     var part = new byte[w * h * 4];
                     frame.CopyPixels(new Int32Rect(0, 0, w, h), part, w * 4, 0);
-                    for (int y = 0; y < h; y++) Buffer.BlockCopy(part, y * w * 4, buf, y * Width * 4, w * 4);
+                    for (int y = 0; y < h; y++) Buffer.BlockCopy(part, y * w * 4, buf, y * W * 4, w * 4);
                 }
-                lock (_lock) _latest = buf;
+                lock (_lock) { if (W == Width && H == Height) _latest = buf; }
             }
             catch { }
             finally { _decoding = false; }

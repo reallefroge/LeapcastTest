@@ -106,6 +106,10 @@ static class VodTests
     private static async Task RunInnerAsync(string ffmpeg, string work, Action<bool, string> check)
     {
         AmongUsPlan(check);
+        check(VodRenderer.HardwareEncoderOf(new[] { "-c:v", "h264_amf", "-quality", "quality" }) == "h264_amf"
+              && VodRenderer.HardwareEncoderOf(new[] { "-c:v", "libx264", "-crf", "18" }) is null
+              && VodRenderer.PieceVideo("h264_amf").Contains("cqp") && VodRenderer.PieceVideo("libx264").Contains("ultrafast"),
+            "VOD editor: with a graphics-card encoder for the stream, pieces are encoded on it (x264 otherwise)");
         string dir = Path.Combine(work, "vod");
         Directory.CreateDirectory(dir);
         string src = Path.Combine(dir, "stream.mp4");

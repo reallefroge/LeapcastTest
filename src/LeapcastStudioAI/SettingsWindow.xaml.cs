@@ -131,6 +131,7 @@ public partial class SettingsWindow : Window
         VoiceFolderBox.Text = current.VoiceClipFolder;
         InstantSwitchBox.IsChecked = current.InstantSwitching;
         PreviewBackgroundBox.IsChecked = current.PreviewLiveInBackground;
+        GpuCompositingBox.IsChecked = current.GpuCompositing;
         YouTubePickBox.IsChecked = current.YouTubePickBroadcast;
         YouTubeClientIdBox.Text = current.YouTubeClientId;
         YouTubeSecretBox.Password = SecretStore.Unprotect(current.YouTubeClientSecretProtected);
@@ -246,6 +247,7 @@ public partial class SettingsWindow : Window
         s.VoiceClipSensitivity = TagOf(VoiceSensitivityBox, "High");
         s.InstantSwitching = InstantSwitchBox.IsChecked == true;
         s.PreviewLiveInBackground = PreviewBackgroundBox.IsChecked == true;
+        s.GpuCompositing = GpuCompositingBox.IsChecked == true;
         s.YouTubePickBroadcast = YouTubePickBox.IsChecked == true;
         if (s.YouTubeClientId != YouTubeClientIdBox.Text.Trim()) s.YouTubeRefreshProtected = ""; // a different app: sign in again
         s.YouTubeClientId = YouTubeClientIdBox.Text.Trim();

@@ -29,9 +29,27 @@ public sealed class CountedFramePipe : IDisposable
     /// <summary>ffmpeg input path (\\.\pipe\… on Windows, a FIFO elsewhere).</summary>
     public string Path { get; }
 
+    private readonly int _frameBytes;
+    private readonly ConcurrentBag<byte[]> _free = new();
+
+    /// <summary>A buffer for one queued frame: recycled once it's written (a handful circulate, not one per frame).</summary>
+    private byte[] Copy(byte[] src)
+    {
+        if (ReferenceEquals(src, _blank) || src.Length != _frameBytes) return src;
+        if (!_free.TryTake(out var b)) b = GC.AllocateUninitializedArray<byte>(_frameBytes);
+        Buffer.BlockCopy(src, 0, b, 0, _frameBytes);
+        return b;
+    }
+
+    private void Recycle(byte[] b)
+    {
+        if (!ReferenceEquals(b, _blank) && b.Length == _frameBytes && _free.Count < 8) _free.Add(b);
+    }
+
     public CountedFramePipe(string scratchDir, int frameBytes, double fps, double origin, Func<byte[]?> latest, byte[] blank)
     {
-        _fps = fps; _origin = origin; _latest = latest; _blank = blank;
+        // the source's buffers are reused by its reader: what's queued here is copied (and blank is ours)
+        _fps = fps; _origin = origin; _latest = latest; _blank = (byte[])blank.Clone(); _frameBytes = frameBytes;
         // up to 3 s of backlog (start-up, momentary stalls), capped at ~96 MB for full-screen cameras
         int cap = (int)Math.Clamp(Math.Min(fps * 3, 96L * 1024 * 1024 / Math.Max(1, frameBytes)), 4, fps * 3);
         _queue = new BlockingCollection<byte[]>(new ConcurrentQueue<byte[]>(), cap);
@@ -78,8 +96,8 @@ public sealed class CountedFramePipe : IDisposable
                 {
                     double wait = _origin + k / _fps - WallNow();
                     if (wait > 0.002) { Thread.Sleep(TimeSpan.FromSeconds(Math.Min(wait, 0.05))); continue; }
-                    var frame = _latest() ?? _blank;
-                    if (_queue.TryAdd(frame)) Interlocked.Increment(ref Sampled); else Interlocked.Increment(ref Dropped);
+                    var frame = Copy(_latest() ?? _blank);
+                    if (_queue.TryAdd(frame)) Interlocked.Increment(ref Sampled); else { Recycle(frame); Interlocked.Increment(ref Dropped); }
                     k++;
                 }
             }) { IsBackground = true, Name = "Leapcast camera sampler" };
@@ -93,11 +111,13 @@ public sealed class CountedFramePipe : IDisposable
             {
                 // Never skip a frame number: timestamps must stay exact. Queued pictures were captured on time;
                 // only if ffmpeg fell more than the queue behind do we fall back to the newest picture.
-                if (_queue.TryTake(out var q, 20, ct)) { s.Write(q); }
+                if (_queue.TryTake(out var q, 20, ct)) { s.Write(q); Recycle(q); }
                 else
                 {
                     if (_origin + n / _fps > WallNow()) continue; // not due yet (sampler is just a bit late)
-                    s.Write(_latest() ?? _blank);
+                    var f = Copy(_latest() ?? _blank);
+                    s.Write(f);
+                    Recycle(f);
                     Interlocked.Increment(ref FromLatest);
                 }
                 n++;
@@ -332,9 +352,10 @@ public sealed class CameraBridge : IDisposable
                 var s = p.StandardOutput.BaseStream;
                 try
                 {
+                    var ring = new FrameRing(size);
                     while (true)
                     {
-                        var buf = new byte[size];
+                        var buf = ring.Next();
                         int got = 0;
                         while (got < size)
                         {
@@ -405,6 +426,23 @@ public sealed class CameraBridge : IDisposable
     }
 
     public void Dispose() { _disposed = true; CloseAll(); }
+}
+
+/// <summary>
+/// A reader's few frame buffers, used in turn instead of a new one per frame: 30–60 large arrays a second per
+/// camera/window otherwise land on .NET's large-object heap, and collecting those is what causes small hitches.
+/// Whoever needs a picture for longer than a frame or two copies it (<see cref="CountedFramePipe"/> does).
+/// </summary>
+public sealed class FrameRing(int size, int count = 4)
+{
+    private readonly byte[][] _bufs = new byte[count][];
+    private int _i;
+    public byte[] Next()
+    {
+        var b = _bufs[_i] ??= GC.AllocateUninitializedArray<byte>(size);
+        _i = (_i + 1) % _bufs.Length;
+        return b;
+    }
 }
 
 /// <summary>Raw picture helpers (YUV 4:2:0, the layout the readers deliver).</summary>

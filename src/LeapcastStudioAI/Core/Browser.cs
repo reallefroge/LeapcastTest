@@ -9,6 +9,8 @@ public interface IFrameSource : IDisposable
     byte[]? Latest();
     /// <summary>Why the source can't produce pictures (shown to the user), or null.</summary>
     string? Error { get; }
+    /// <summary>Draws the page at this size from now on (its layout stays the same): it's shown smaller than it's built.</summary>
+    void Resize(int width, int height) { }
     /// <summary>Loads the page again (<paramref name="clearCache"/>: the browser's cache is emptied first, so
     /// every file comes fresh from the site). The last picture stays up until the page draws again.</summary>
     void Refresh(bool clearCache) { }
@@ -42,7 +44,9 @@ public sealed class BrowserBridge : IDisposable
 
     public static int FpsOf(StudioSource s) => Math.Clamp(s.BrowserFps, 1, 60);
 
-    public Dictionary<string, BrowserFeed> Open(IReadOnlyDictionary<string, StudioSource> browsers, double origin, Action<string>? warn = null)
+    /// <param name="renderSize">The size each page is drawn at (null: its own size).</param>
+    public Dictionary<string, BrowserFeed> Open(IReadOnlyDictionary<string, StudioSource> browsers, double origin, Action<string>? warn = null,
+        Func<StudioSource, (int W, int H)>? renderSize = null)
     {
         ClosePipes();
         foreach (var key in _sources.Keys.Except(browsers.Keys).ToList()) { _sources[key].Dispose(); _sources.Remove(key); }
@@ -58,6 +62,7 @@ public sealed class BrowserBridge : IDisposable
                 _sources[key] = fs;
             }
             if (fs.Error is { } err) warn?.Invoke($"\"{src.Name}\": {err}");
+            if (renderSize is not null) { var (rw, rh) = renderSize(src); fs.Resize(rw, rh); }
             var (w, h) = (fs.Width, fs.Height);
             int fps = FpsOf(src);
             var blank = Yuva.Blank(w, h); // fully transparent until the page has drawn
@@ -84,7 +89,9 @@ public sealed class BrowserBridge : IDisposable
     public GpuFrame? LatestBgra(string key)
     {
         _snapshot.TryGetValue(key, out var fs);
-        return fs?.Latest() is { } f && f.Length >= fs.Width * fs.Height * 4 ? new GpuFrame(f, fs.Width, fs.Height, FramePixels.Bgra) : null;
+        if (fs is null) return null;
+        int w = fs.Width, h = fs.Height;
+        return fs.Latest() is { } f && f.Length == w * h * 4 ? new GpuFrame(f, w, h, FramePixels.Bgra) : null;
     }
 
     /// <summary>Deepest frame backlog of any browser pipe (seconds).</summary>
@@ -132,7 +139,7 @@ public sealed class Yuva
 
     public byte[]? From(byte[]? bgra)
     {
-        if (bgra is null || bgra.Length < _w * _h * 4) return null;
+        if (bgra is null || bgra.Length != _w * _h * 4) return null;   // (a picture from before a resize: not this size)
         if (ReferenceEquals(bgra, _from) && _out is not null) return _out;
         var o = new byte[Size(_w, _h)];
         Convert(bgra, _w, _h, o);

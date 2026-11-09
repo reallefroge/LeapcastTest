@@ -371,6 +371,18 @@ public partial class MainWindow : Window
         }
         _ready = true;
         await ApplyToEngineAsync(restart: false);
+        // a recording that was running when the app or the PC went down: rebuilt from what was written
+        _ = Task.Run(async () =>
+        {
+            var recovered = await _engine.RecoverRecordingsAsync();
+            if (recovered.Count == 0) return;
+            _ = Dispatcher.BeginInvoke(() =>
+            {
+                Status($"Recovered {(recovered.Count == 1 ? "a recording" : $"{recovered.Count} recordings")} from when Leapcast closed unexpectedly.");
+                MessageBox.Show(this, "Leapcast closed while you were recording. Your recording was saved up to that moment:\n\n" +
+                    string.Join("\n", recovered.Select(Path.GetFileName)), "Recording recovered", MessageBoxButton.OK, MessageBoxImage.Information);
+            });
+        });
         SetBadge("READY · " + EncoderCatalog.DisplayName(_engine.PlanFor(_state.Settings).Encoder).ToUpperInvariant(), "#1E3328", "#6FDB9A");
         EngineStatus.Text = _state.Settings.Outputs.Count == 0
             ? "Ready. Add your Twitch, YouTube or TikTok in the Multistream panel, then start the preview or go live."
@@ -2140,6 +2152,7 @@ public partial class MainWindow : Window
                   + $" | preview {_engine.PreviewRate.ToString().ToLowerInvariant()}"
                   + (_audio.DesktopListener is { } dl ? $" | safety listener skipped {dl.SkippedSeconds:0} s of silence" : "")
                   + (_engine.CamerasDenoising is var dn && dn >= 0 ? $" | webcams denoising {dn}" : "")
+                  + (_state.Settings.GpuCompositing ? " | " + _engine.GpuStatusLine : "")
                   + (BackgroundWork.Live && VodEditWindow.Busy ? " | VOD editor running (slowed)" : "");
             File.AppendAllText(path, line + Environment.NewLine);
         }
@@ -2289,10 +2302,12 @@ public partial class MainWindow : Window
                 Item("Align " + anchor.ToLowerInvariant(), () => AnchorKeepingSize(s, anchor), Anchors.Resolve(s) == anchor);
             }
             menu.Items.Add(new Separator());
+            if (k == SourceKind.Camera) Item("Flip horizontally", () => s.Mirror = !s.Mirror, s.Mirror);
             if (SourceTypes.IsVideo(k)) Item("Show on the vertical canvas", () => s.VShow = !s.VShow, s.VShow);
         }
         else
         {
+            if (SourceTypes.KindOf(s.Type) == SourceKind.Camera) Item("Flip horizontally", () => s.Mirror = !s.Mirror, s.Mirror);
             Item("Automatic vertical layout", () => s.VAuto = true, s.VAuto);
             Item("Hide on the vertical canvas", () => s.VShow = false);
         }
