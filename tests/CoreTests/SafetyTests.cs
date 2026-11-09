@@ -258,6 +258,11 @@ static class SafetyTests
             double g1 = al3.Current.Gamma;
             check(g1 < g0 && g1 > 1.05, $"Camera auto light: the lights coming on is eased into over a few seconds (gamma {g0:0.00} → {g1:0.00} after 1 s)");
             check(LightSettings.Neutral.Filter("cl0").StartsWith("eq@cl0=gamma=1:contrast=1"), "Camera auto light: the filter it drives");
+            // the stand-in picture while a reader restarts at a new size
+            var big = Frames.BlankI420(8, 4);
+            for (int y = 0; y < 4; y++) for (int x = 0; x < 8; x++) big[y * 8 + x] = (byte)(x < 4 ? 50 : 200);
+            var small = Frames.ResizeI420(big, 8, 4, 4, 2);
+            check(small.Length == 12 && small[0] == 50 && small[3] == 200 && small[8] == 128, $"Resize stand-in: a picture resized for a moment keeps its content ({string.Join(",", small.Take(8))})");
         }
     }
 

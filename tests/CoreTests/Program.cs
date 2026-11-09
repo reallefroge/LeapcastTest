@@ -1651,6 +1651,30 @@ Check(Red(552 / 640.0, 300 / 360.0) > 150 && engine.PipelineStarts == moveStarts
 movable.Anchor = Anchors.Free; movable.W = 0.3; // resizing rebuilds (applied on mouse-up)
 await engine.UpdateAsync(new[] { mscene }, mscene, WithEncoder(settings, "libx264"), false);
 Check(engine.PipelineStarts == moveStarts + 1, "resizing rebuilds the pipeline once");
+// resizing a webcam: the device isn't reopened (the reader keeps its size, the pipeline scales), and a rebuild
+// starts from the last picture, never a black one
+var camScene = new StudioScene { Name = "cam resize" };
+camScene.Sources.Add(new StudioSource { Name = "Card", Type = SourceTypes.Image, FilePath = redPng, Anchor = Anchors.Fill });
+var rcam = new StudioSource { Name = "Webcam", Type = SourceTypes.Camera, DeviceName = "synthetic", Anchor = Anchors.Free, X = 0.6, Y = 0.6, W = 0.3, CameraDenoise = false };
+camScene.Sources.Add(rcam);
+await engine.UpdateAsync(new[] { camScene }, camScene, WithEncoder(settings, "libx264"), false);
+await Task.Delay(2500);
+int camStarts = engine.CameraReaderStarts, crStarts = engine.PipelineStarts;
+rcam.W = 0.22; // smaller
+await engine.UpdateAsync(new[] { camScene }, camScene, WithEncoder(settings, "libx264"), false);
+await Task.Delay(1500);
+rcam.W = 0.3; // back up
+await engine.UpdateAsync(new[] { camScene }, camScene, WithEncoder(settings, "libx264"), false);
+await Task.Delay(1500);
+int afterSmall = engine.CameraReaderStarts;
+rcam.W = 0.9; // much bigger: reopened once, bigger, with room to grow
+await engine.UpdateAsync(new[] { camScene }, camScene, WithEncoder(settings, "libx264"), false);
+await Task.Delay(1500);
+rcam.W = 0.8;
+await engine.UpdateAsync(new[] { camScene }, camScene, WithEncoder(settings, "libx264"), false);
+await Task.Delay(1500);
+Check(afterSmall == camStarts && engine.CameraReaderStarts == camStarts + 1 && engine.PipelineStarts == crStarts + 4,
+    $"resizing a webcam doesn't reopen it (reader starts {camStarts} → {afterSmall} after shrinking and growing back, → {engine.CameraReaderStarts} after growing 3× and a bit smaller)");
 engine.FrameReady -= Grab;
 await engine.SetPreviewAsync(false);
 await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);

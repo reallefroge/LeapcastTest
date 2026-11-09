@@ -221,7 +221,8 @@ public sealed class CameraBridge : IDisposable
         double aspect = 16.0 / 9;
         foreach (var s in uses)
         {
-            int need = Anchors.Resolve(s) == Anchors.Fill ? outW : (int)Math.Round(outW * Math.Clamp(s.SizePercent, 1, 100) / 100.0);
+            // as drawn: full width, a free size (dragged on the preview), or a corner's size percent
+            int need = (int)Math.Round(LayoutMath.Horizontal(s, outW, outH, 16.0 / 9).W);
             w = Math.Max(w, need);
             if (SmartTuner.TryParseResolution(s.CameraResolution, out var cw, out var ch) && ch > 0) aspect = cw / (double)ch;
         }
@@ -244,17 +245,38 @@ public sealed class CameraBridge : IDisposable
         foreach (var (key, (device, uses)) in cameras)
         {
             var (w, h) = NeededSize(uses, outW, outH);
-            string sig = string.Join("\u001f", device.Args) + $"|{w}x{h}|{fps}";
-            if (!_readers.TryGetValue(key, out var reader) || reader.Signature != sig || reader.Exited)
+            string dev = string.Join("\u001f", device.Args), tail = $"|{fps}";
+            _readers.TryGetValue(key, out var reader);
+            // resized on the canvas: a camera that's already read big enough keeps going (no reopening the device,
+            // no flicker); one too small is reopened bigger, with room to grow
+            if (reader is not null && !reader.Exited && reader.Signature.StartsWith(dev + "|", StringComparison.Ordinal) && reader.Signature.EndsWith(tail, StringComparison.Ordinal)
+                && Math.Abs(reader.Width / (double)reader.Height - w / (double)h) < 0.03 * (w / (double)h))
             {
-                if (reader is not null) reader.Dispose();
+                if (reader.Width >= w && reader.Width <= w * 1.8) { w = reader.Width; h = reader.Height; }
+                else if (reader.Width < w)
+                {
+                    int gw = Math.Min(outW, SmartTuner.Even((int)Math.Round(Math.Max(w * 1.35, outW * 0.5))));
+                    h = Math.Min(outH, SmartTuner.Even((int)Math.Round(gw * (double)h / w))); w = gw;
+                }
+            }
+            string sig = dev + $"|{w}x{h}" + tail;
+            byte[]? carry = null;
+            if (reader is null || reader.Signature != sig || reader.Exited)
+            {
+                if (reader is not null)
+                {
+                    // while the device reopens: the last picture, resized (a short freeze instead of a black flash)
+                    var last = reader.Snapshot();
+                    if (last is not null && last.Length == reader.Width * reader.Height * 3 / 2) carry = Frames.ResizeI420(last, reader.Width, reader.Height, w, h);
+                    reader.Dispose();
+                }
                 reader = StartReader(ffmpeg, device, w, h, fps, sig, uses.FirstOrDefault()?.Name ?? "Camera");
                 lock (_readers) _readers[key] = reader;
             }
             int bytes = w * h * 3 / 2;
-            var blank = new byte[bytes];
-            Array.Fill(blank, (byte)16, 0, w * h);
-            Array.Fill(blank, (byte)128, w * h, bytes - w * h);
+            // what the pipe sends before the reader's next picture: its last one (a rebuild shows you, not black)
+            var latest = reader.Snapshot();
+            var blank = carry ?? (latest is not null && latest.Length == bytes ? latest : null) ?? Frames.BlankI420(w, h);
             var r = reader;
             var pipe = new CountedFramePipe(_scratch, bytes, fps, origin, r.Snapshot, blank);
             _pipes.Add(pipe);
@@ -263,8 +285,12 @@ public sealed class CameraBridge : IDisposable
         return result;
     }
 
+    /// <summary>Camera readers opened so far (tests: a resize mustn't reopen the device).</summary>
+    public int Starts { get; private set; }
+
     private Reader StartReader(string ffmpeg, InputSpec device, int w, int h, int fps, string sig, string name)
     {
+        Starts++;
         var reader = new Reader { Signature = sig, Width = w, Height = h, Ffmpeg = ffmpeg, Device = device, Fps = fps, Name = name };
         Launch(reader);
         return reader;
@@ -369,4 +395,37 @@ public sealed class CameraBridge : IDisposable
     }
 
     public void Dispose() { _disposed = true; CloseAll(); }
+}
+
+/// <summary>Raw picture helpers (YUV 4:2:0, the layout the readers deliver).</summary>
+public static class Frames
+{
+    public static byte[] BlankI420(int w, int h)
+    {
+        var b = new byte[w * h * 3 / 2];
+        Array.Fill(b, (byte)16, 0, w * h);
+        Array.Fill(b, (byte)128, w * h, b.Length - w * h);
+        return b;
+    }
+
+    /// <summary>Nearest-neighbour resize of a YUV 4:2:0 picture (a stand-in for a moment, so speed over quality).</summary>
+    public static byte[] ResizeI420(byte[] src, int sw, int sh, int dw, int dh)
+    {
+        if (src.Length < sw * sh * 3 / 2 || sw < 2 || sh < 2) return BlankI420(dw, dh);
+        var d = new byte[dw * dh * 3 / 2];
+        void Plane(int srcOff, int pw, int ph, int dstOff, int qw, int qh)
+        {
+            for (int y = 0; y < qh; y++)
+            {
+                int sy = Math.Min(ph - 1, (int)((long)y * ph / qh));
+                int srow = srcOff + sy * pw, drow = dstOff + y * qw;
+                for (int x = 0; x < qw; x++) d[drow + x] = src[srow + Math.Min(pw - 1, (int)((long)x * pw / qw))];
+            }
+        }
+        int sc = (sw / 2) * (sh / 2), dc = (dw / 2) * (dh / 2);
+        Plane(0, sw, sh, 0, dw, dh);
+        Plane(sw * sh, sw / 2, sh / 2, dw * dh, dw / 2, dh / 2);
+        Plane(sw * sh + sc, sw / 2, sh / 2, dw * dh + dc, dw / 2, dh / 2);
+        return d;
+    }
 }

@@ -128,6 +128,7 @@ public sealed class StreamEngine : IDisposable
     public string WindowCaptureStats() => _windows.Stats();
     public long WindowFrames(StudioSource s) => _windows.FramesOf(PipelineBuilder.InputKey(s));
     public int WindowReaderStarts(StudioSource s) => _windows.StartsOf(PipelineBuilder.InputKey(s));
+    public int CameraReaderStarts => _cameras.Starts;
     /// <summary>Tests: behave as if the game had closed its window.</summary>
     public void SimulateWindowClosed(StudioSource s) => _windows.SimulateWindowClosed(PipelineBuilder.InputKey(s));
     /// <summary>Returns an output's saved stream key (decrypted). Set by the app.</summary>

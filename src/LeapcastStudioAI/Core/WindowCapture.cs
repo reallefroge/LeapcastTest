@@ -109,6 +109,8 @@ public sealed class WindowCaptureBridge : IDisposable
         new Thread(Supervise) { IsBackground = true, Name = "Leapcast window capture supervisor" }.Start();
     }
 
+    private static bool SameShape(int w1, int h1, int w2, int h2) => Math.Abs(w1 / (double)h1 - w2 / (double)h2) < 0.03 * (w2 / (double)h2);
+
     /// <summary>What a window source needs from its reader for one pipeline run.</summary>
     public sealed record Need(StudioSource Source, int Width, int Height, string Fill, bool Light = false);
 
@@ -125,27 +127,49 @@ public sealed class WindowCaptureBridge : IDisposable
             {
                 var s = need.Source;
                 var crop = (Math.Max(0, s.CropLeft), Math.Max(0, s.CropTop), Math.Max(0, s.CropRight), Math.Max(0, s.CropBottom));
-                string sig = $"{s.WindowTitle.Trim()}|{need.Width}x{need.Height}|{need.Fill}|{fps}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}|{need.Light}";
-                if (!_readers.TryGetValue(key, out var reader) || reader.Signature != sig)
+                string what = $"{s.WindowTitle.Trim()}|{need.Fill}|{fps}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}|{need.Light}";
+                int nw = need.Width, nh = need.Height;
+                _readers.TryGetValue(key, out var reader);
+                // resized on the canvas: a reader that's already big enough keeps going (the pipeline scales it
+                // down), so nothing restarts and nothing flickers; one that's too small grows with room to spare
+                if (reader is not null && !reader.Retired && reader.Signature.EndsWith("|" + what, StringComparison.Ordinal)
+                    && need.Fill == Anchors.FillFit && SameShape(reader.Width, reader.Height, nw, nh))
                 {
-                    if (reader is not null) Stop(reader);
+                    if (reader.Width >= nw && reader.Width <= nw * 1.6) { nw = reader.Width; nh = reader.Height; }
+                    else if (reader.Width < nw)
+                    {
+                        int gw = SmartTuner.Even((int)Math.Min(3840, Math.Round(nw * 1.35)));
+                        nh = SmartTuner.Even((int)Math.Round(gw * (double)nh / nw)); nw = gw;
+                    }
+                }
+                string sig = $"{nw}x{nh}|{what}";
+                byte[]? carry = null;
+                if (reader is null || reader.Signature != sig)
+                {
+                    if (reader is not null)
+                    {
+                        // until the new reader's first picture: the last one, resized (never a black flash)
+                        lock (reader.Lock) if (reader.Latest is { } last && last.Length == reader.Width * reader.Height * 3 / 2) carry = Frames.ResizeI420(last, reader.Width, reader.Height, nw, nh);
+                        Stop(reader);
+                    }
                     reader = new Reader
                     {
-                        Key = key, Title = s.WindowTitle.Trim(), Name = s.Name, Signature = sig, Width = need.Width, Height = need.Height,
+                        Key = key, Title = s.WindowTitle.Trim(), Name = s.Name, Signature = sig, Width = nw, Height = nh,
                         Fill = need.Fill, Fps = fps, Cursor = s.CaptureCursor, Crop = crop, Light = need.Light,
                     };
                     reader.UsedGpu = GpuCapture && !string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase);
                     _readers[key] = reader;
                     TryStart(reader);
                 }
-                int bytes = need.Width * need.Height * 3 / 2;
-                var blank = new byte[bytes];
-                Array.Fill(blank, (byte)16, 0, need.Width * need.Height);
-                Array.Fill(blank, (byte)128, need.Width * need.Height, bytes - need.Width * need.Height);
+                int bytes = nw * nh * 3 / 2;
+                // what the pipe sends before the reader's next picture: its last one (a rebuild shows the game, not black)
+                byte[]? now;
+                lock (reader.Lock) now = reader.Latest is { } l && l.Length == bytes ? l : null;
+                var blank = carry ?? now ?? Frames.BlankI420(nw, nh);
                 var r = reader;
                 var pipe = new CountedFramePipe(_scratch, bytes, fps, origin, () => { lock (r.Lock) return r.Latest; }, blank);
                 _pipes.Add(pipe);
-                result[key] = new WindowFeed(pipe.Path, need.Width, need.Height);
+                result[key] = new WindowFeed(pipe.Path, nw, nh);
             }
         }
         return result;
