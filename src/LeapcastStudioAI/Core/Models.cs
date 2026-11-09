@@ -150,6 +150,8 @@ public sealed class StudioSource
     public string CameraFormat { get; set; } = "";
     /// <summary>Temporal denoise before encoding. Webcam sensor noise is one of the biggest bitrate wasters.</summary>
     public bool CameraDenoise { get; set; } = true;
+    /// <summary>Auto light: the camera is brightened in a dark room and calmed in a bright one, automatically.</summary>
+    public bool CameraAutoLight { get; set; } = true;
     public bool Mirror { get; set; }
     /// <summary>Extra camera delay compensation in ms (positive = camera shown earlier), like OBS's sync offset.</summary>
     public int SyncOffsetMs { get; set; }
@@ -490,12 +492,16 @@ public sealed class StudioSettings
     /// <summary>Stream safety: desktop audio (and so the stream, recordings and clips) runs this far behind, so a
     /// filtered word can be muted before it goes out. Off: no delay (the slur filter can't work).</summary>
     public bool SafetyDelay { get; set; }
-    public double SafetyDelaySeconds { get; set; } = 3;
+    public double SafetyDelaySeconds { get; set; } = 2;
     /// <summary>Mute slurs heard in desktop audio (needs the safety delay).</summary>
     public bool MuteSlurs { get; set; } = true;
     public bool MuteAbleist { get; set; } = true;
     /// <summary>More words to mute, one per line.</summary>
     public string MuteWords { get; set; } = "";
+    /// <summary>Hide letters read out loud (an Among Us lobby code) so viewers can't join (needs the safety delay).</summary>
+    public bool MuteCodes { get; set; }
+    /// <summary>Your microphone goes through the filter too (words and codes you say).</summary>
+    public bool FilterMic { get; set; }
     /// <summary>Turn sudden, very loud desktop audio right down (ear-rape protection). Works with or without the delay.</summary>
     public bool LoudGuard { get; set; } = true;
 
@@ -527,7 +533,8 @@ public sealed class StudioSettings
         AlertSuperChats, AlertDonations, Math.Clamp(AlertSeconds, 3, 20), AlertSound);
 
     public AudioSafetyConfig SafetyConfig() => new(
-        SafetyDelay ? Math.Clamp(SafetyDelaySeconds, 2, 5) : 0, MuteSlurs && SafetyDelay, MuteAbleist, MuteWords ?? "", LoudGuard);
+        SafetyDelay ? Math.Clamp(SafetyDelaySeconds, 2, 5) : 0, MuteSlurs && SafetyDelay, MuteAbleist, MuteWords ?? "", LoudGuard,
+        MuteCodes && SafetyDelay, FilterMic && SafetyDelay && (MuteSlurs || MuteCodes));
     /// <summary>Names captions spell your way, one per line: "Khrysalis = Chrysalis, Crysalis" (Wizard101's are built in).</summary>
     public string CaptionSpellings { get; set; } = "";
     /// <summary>Wizard101: when the health globe empties (HP 0), save the fight that led to it.</summary>

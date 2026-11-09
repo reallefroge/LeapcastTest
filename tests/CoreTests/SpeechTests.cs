@@ -9,6 +9,29 @@ using LeapcastStudioAI;
 /// </summary>
 static class SpeechTests
 {
+    /// <summary>Quick mode: only the spoken stream-safety cases, with the first English voice.</summary>
+    public static async Task SafetyOnlyAsync(Action<bool, string> check)
+    {
+        string? name;
+        using (var probe = new SpeechSynthesizer())
+            name = probe.GetInstalledVoices().Where(v => v.Enabled && v.VoiceInfo.Culture.TwoLetterISOLanguageName == "en").Select(v => v.VoiceInfo.Name).FirstOrDefault();
+        if (name is null) { check(false, "Safety (spoken): an English text-to-speech voice"); return; }
+        await SafetyTests.SpokenAsync(check, (text, rate) => Speak(name, text, rate));
+    }
+
+    private static short[] Speak(string name, string text, int rate)
+    {
+        using var synth = new SpeechSynthesizer();
+        synth.SelectVoice(name);
+        var ms = new MemoryStream();
+        synth.SetOutputToAudioStream(ms, new SpeechAudioFormatInfo(rate == 0 ? SpeechPcmConverter.OutRate : rate, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
+        synth.Speak(text);
+        var b = ms.ToArray();
+        var s = new short[b.Length / 2];
+        Buffer.BlockCopy(b, 0, s, 0, s.Length * 2);
+        return s;
+    }
+
     public static async Task RunAsync(Action<bool, string> check)
     {
         List<string> voices;

@@ -9,7 +9,9 @@ public sealed record AudioSafetyConfig(
     bool MuteSlurs,           // needs the delay: a word has to be heard before it can be taken out
     bool MuteAbleist,         // the r-word too
     string CustomWords,       // more words to mute (one per line or comma-separated)
-    bool LoudGuard)           // turn sudden, very loud audio right down (ear-rape protection)
+    bool LoudGuard,           // turn sudden, very loud audio right down (ear-rape protection)
+    bool MuteCodes = false,   // letters read out (game lobby codes) are hidden too
+    bool FilterMic = false)   // your microphone goes through the same filter (codes and words you say)
 {
     public static readonly AudioSafetyConfig Off = new(0, false, false, "", false);
     public bool Any => DelaySeconds > 0 || LoudGuard;
@@ -43,6 +45,54 @@ public static class SlurWords
     public static HashSet<string> Custom(string? text) =>
         new((text ?? "").Split(new[] { '\n', '\r', ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(Norm).Where(x => x.Length > 1));
 
+    /// <summary>All the words the filter takes out (for the keyword listener).</summary>
+    public static IEnumerable<string> All(bool ableist, IReadOnlySet<string>? custom) =>
+        BuiltIn.Value.Concat(ableist ? Ableist.Value : Enumerable.Empty<string>()).Concat(custom ?? (IEnumerable<string>)Array.Empty<string>()).Distinct();
+
+    /// <summary>
+    /// How a word sounds, roughly: consonants kept in order (soft and hard spellings of the same sound made equal),
+    /// the first vowel kept, every later run of vowels one "a", endings that only make a plural or a casual form
+    /// dropped (and whether one was).
+    /// </summary>
+    public static (string Key, bool Ending) Sound(string word)
+    {
+        string w = Norm(word);
+        if (w.Length < 3) return (w, false);
+        w = w.Replace("ph", "f").Replace("ck", "k").Replace("qu", "kw").Replace("q", "k").Replace("x", "ks");
+        w = Regex.Replace(w, "c(?=[eiy])", "s").Replace('c', 'k');
+        w = Regex.Replace(w, "(.)\\1+", "$1");              // gg → g
+        w = Regex.Replace(w, "(?<=.)h", "");                  // silent h after a letter
+        var m = Regex.Match(w, "[aeiouy]+");                  // the first vowel stays itself (nag ≠ n?g)
+        if (m.Success) w = w[..m.Index] + char.ToUpperInvariant(m.Value[0] == 'y' ? 'i' : m.Value[0]) + w[(m.Index + m.Length)..];
+        w = Regex.Replace(w, "[aeiouy]+", "a");               // later vowels → a
+        string w2 = Regex.Replace(w, "(as|az|s|z)$", "");     // plural endings
+        string w3 = Regex.Replace(w2, "(ar|a)$", "");         // -er / -a / -ah / -uh
+        return (w3, w3 != w);
+    }
+
+    public static string SoundKey(string word) => Sound(word).Key;
+
+    // the words a near-miss is caught for: only these, because checked against 200,000 English words their
+    // sound-alikes are only themselves said differently (others' sound-alikes include "speaker", "decay", "cafe")
+    private static readonly string[] EncodedNear = { "avttre", "snttbg" };
+    private static readonly Lazy<HashSet<string>> NearKeys = new(() => new HashSet<string>(EncodedNear.Select(e => SoundKey(Rot13(e)))));
+    private static readonly Lazy<string> AbleistKey = new(() => SoundKey(Rot13("ergneq")));
+
+    /// <summary>
+    /// A filtered word, or one that sounds just like the n-word or the f-word with only its ending changed (said
+    /// casually, cut short, misheard: "-a", "-ah", "-uh", "-az", "-er"). Ordinary words never match: a different
+    /// first vowel or any different consonant (bigger, trigger, nag, nigh, neighbor, Niagara) is a different word.
+    /// </summary>
+    public static bool Near(string word, bool ableist, IReadOnlySet<string>? custom)
+    {
+        if (Is(word, ableist, custom)) return true;
+        string w = Norm(word);
+        if (w.Length < 4) return false;
+        var (k, ending) = Sound(w);
+        if (!ending && k.Length < 5) return false;
+        return NearKeys.Value.Contains(k) || (ableist && k == AbleistKey.Value);
+    }
+
     /// <summary>Is this one recognized word one to take out?</summary>
     public static bool Is(string word, bool ableist, IReadOnlySet<string>? custom)
     {
@@ -67,26 +117,52 @@ public sealed class ContentGains
     private const int Size = 4096;
     private readonly long[] _slot = new long[Size];
     private readonly float[] _gain = new float[Size];
+    // mutes: a confirmed mute (−1) or a tentative one (its id, which can be released); 0 = none
+    private readonly long[] _muteSlot = new long[Size];
+    private readonly int[] _mute = new int[Size];
     private readonly object _lock = new();
 
-    public ContentGains() { Array.Fill(_slot, long.MinValue); }
+    public ContentGains() { Array.Fill(_slot, long.MinValue); Array.Fill(_muteSlot, long.MinValue); }
+
+    private static int Index(long slot) => (int)(((slot % Size) + Size) % Size);
 
     public void Limit(long slot, float gain)
     {
         lock (_lock)
         {
-            int i = (int)(((slot % Size) + Size) % Size);
+            int i = Index(slot);
             if (_slot[i] != slot) { _slot[i] = slot; _gain[i] = 1; }
             _gain[i] = Math.Min(_gain[i], gain);
         }
     }
 
-    /// <summary>Mutes the timeline between two moments (seconds), with a little room either side.</summary>
-    public void Mute(double fromSeconds, double toSeconds)
+    /// <summary>Mutes the timeline between two moments (seconds). <paramref name="tentative"/>: an id the mute can be released by.</summary>
+    public void Mute(double fromSeconds, double toSeconds, int tentative = 0)
     {
         long a = (long)Math.Floor(fromSeconds * 100), b = (long)Math.Ceiling(toSeconds * 100);
-        for (long s = Math.Max(0, a); s <= b; s++) Limit(s, 0);
+        lock (_lock)
+            for (long s = Math.Max(0, a); s <= b; s++)
+            {
+                int i = Index(s);
+                if (_muteSlot[i] != s) { _muteSlot[i] = s; _mute[i] = 0; }
+                // a confirmed mute is never downgraded to a tentative one
+                if (_mute[i] != -1) _mute[i] = tentative == 0 ? -1 : _mute[i] == 0 ? tentative : _mute[i];
+            }
     }
+
+    /// <summary>Lifts a tentative mute (only its own slots: a confirmed or another mute stays).</summary>
+    public void Release(int tentative, double fromSeconds, double toSeconds)
+    {
+        long a = (long)Math.Floor(fromSeconds * 100), b = (long)Math.Ceiling(toSeconds * 100);
+        lock (_lock)
+            for (long s = Math.Max(0, a); s <= b; s++)
+            {
+                int i = Index(s);
+                if (_muteSlot[i] == s && _mute[i] == tentative) _mute[i] = 0;
+            }
+    }
+
+    public bool Muted(long slot) { lock (_lock) { int i = Index(slot); return _muteSlot[i] == slot && _mute[i] != 0; } }
 
     public float this[long slot]
     {
@@ -94,7 +170,8 @@ public sealed class ContentGains
         {
             lock (_lock)
             {
-                int i = (int)(((slot % Size) + Size) % Size);
+                int i = Index(slot);
+                if (_muteSlot[i] == slot && _mute[i] != 0) return 0;
                 return _slot[i] == slot ? _gain[i] : 1;
             }
         }
@@ -158,47 +235,317 @@ public sealed class LoudGuard
     }
 }
 
+/// <summary>A word the recognizer heard, with when (seconds on the stream's timeline).</summary>
+public readonly record struct HeardWord(string Text, double Start, double End);
+
 /// <summary>
-/// The slur filter's ears: transcribes desktop audio (16 kHz) as it comes in and reports every filtered word
-/// with when it was said on the stream's timeline, as early as the recognizer suspects it (its running guess,
-/// not only finished sentences), so it can be muted before the delayed audio goes out.
+/// Letters said out loud, the way a game code (an Among Us lobby code) is read: "C, E, U, W, Y, B", "see e you
+/// double-you why bee", "charlie echo…". Strong letters are words people only say when spelling (a bare "e", "w");
+/// weak ones are also ordinary words ("see", "you", "why", "are", "I").
 /// </summary>
-public sealed class SlurSpotter : IDisposable
+public static class CodeLetters
 {
-    private readonly System.Collections.Concurrent.BlockingCollection<short[]> _queue = new(boundedCapacity: 400);
-    private readonly Thread _thread;
-    private readonly Func<string, bool> _isSlur;
-    private readonly Action<double, double, string> _found;
+    private static readonly HashSet<string> Weak = new()
+    {
+        "a", "i", "o", "see", "sea", "be", "bee", "you", "yew", "why", "wye", "are", "oh", "owe", "eye", "aye", "tea", "tee", "pea", "pee",
+        "queue", "cue", "jay", "kay", "gee", "dee", "ex", "em", "en", "ay",
+    };
+    private static readonly HashSet<string> StrongNames = new() { "ef", "el", "ell", "ess", "vee", "zee", "zed", "aitch" };
+    private static readonly HashSet<string> Nato = new()
+    {
+        "alpha", "alfa", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet", "juliett", "kilo", "lima",
+        "mike", "november", "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey", "whisky", "yankee", "zulu",
+    };
+    /// <summary>Words that make what comes next a code.</summary>
+    public static readonly HashSet<string> Arming = new() { "code", "codes", "lobby", "lobbies" };
+    /// <summary>Sounds people make between letters (they don't end the run).</summary>
+    public static readonly HashSet<string> Fillers = new() { "uh", "um", "er", "ah", "hmm", "huh", "mm" };
+
+    public enum Kind { None, Weak, Strong, Nato, Double }
+
+    public static Kind Of(string word)
+    {
+        string w = SlurWords.Norm(word);
+        if (w.Length == 0) return Kind.None;
+        if (w == "double") return Kind.Double;
+        if (w.Length == 1) return w is "a" or "i" or "o" ? Kind.Weak : Kind.Strong;
+        // "b's", "c's" (the recognizer's plural of a letter)
+        if (w.Length == 2 && w[1] == 's' && word.Contains('\'')) return Kind.Strong;
+        if (StrongNames.Contains(w)) return Kind.Strong;
+        if (Weak.Contains(w)) return Kind.Weak;
+        if (Nato.Contains(w)) return Kind.Nato;
+        return Kind.None;
+    }
+
+    /// <summary>A run of letters said one after another.</summary>
+    public sealed record Run(IReadOnlyList<HeardWord> Letters, int Strong, int NatoCount, bool Closed, bool Armed)
+    {
+        public int Count => Letters.Count;
+        public double From => Letters[0].Start;
+        public double To => Letters[^1].End;
+        /// <summary>Mean time from one letter's start to the next (s): reading letters out is slow and even.</summary>
+        public double Pace => Count > 1 ? (Letters[^1].Start - Letters[0].Start) / (Count - 1) : 0;
+        public int StrongCount => Strong + (NatoCount >= 3 ? NatoCount : 0);
+
+        /// <summary>
+        /// A code: after "code"/"lobby" any two letters; otherwise three that could only be spelling, or (the
+        /// fallback) four or more letters in a row at the pace of someone reading them out.
+        /// </summary>
+        public bool IsCode => (Armed && Count >= 2) || StrongCount >= 3
+            || (Count >= 4 && (StrongCount >= 2 || (StrongCount >= 1 && Pace >= 0.3) || Pace >= 0.38));
+
+        /// <summary>Could still become a code: hold it back until it's decided.</summary>
+        public bool Suspect => !Closed && (Armed || StrongCount >= 1 || (Count >= 3 && Pace >= 0.33) || (Count >= 2 && Pace >= 0.45));
+    }
+
+    public const double MaxGap = 1.3;   // longer than this between letters: a new run
+
+    /// <summary>The runs of letters in what was heard (time order). <paramref name="now"/>: how far the recognizer has heard.</summary>
+    public static List<Run> Runs(IReadOnlyList<HeardWord> words, double now)
+    {
+        var runs = new List<Run>();
+        var cur = new List<HeardWord>();
+        int strong = 0, nato = 0;
+        double lastArm = double.NegativeInfinity;
+        bool armed = false;
+        void End(bool closedByWord)
+        {
+            if (cur.Count > 0)
+                runs.Add(new Run(cur.ToList(), strong, nato, closedByWord || now - cur[^1].End > MaxGap, armed));
+            cur.Clear(); strong = 0; nato = 0;
+        }
+        for (int i = 0; i < words.Count; i++)
+        {
+            var w = words[i];
+            var k = Of(w.Text);
+            string n = SlurWords.Norm(w.Text);
+            if (cur.Count > 0 && w.Start - cur[^1].End > MaxGap) End(false);
+            if (k == Kind.Double)
+            {
+                // "double you" is W; "double e" is two e's
+                if (i + 1 < words.Count && Of(words[i + 1].Text) is Kind.Strong or Kind.Weak && words[i + 1].Start - w.End < 0.8)
+                {
+                    string next = SlurWords.Norm(words[i + 1].Text);
+                    if (cur.Count == 0) armed = w.Start - lastArm < 10;
+                    if (next is "you" or "u") { cur.Add(new HeardWord("w", w.Start, words[i + 1].End)); strong++; }
+                    else { cur.Add(w with { Text = next }); cur.Add(words[i + 1]); strong += 2; }
+                    i++;
+                    continue;
+                }
+                End(true);
+                continue;
+            }
+            if (k == Kind.None)
+            {
+                if (CodeLetters.Fillers.Contains(n)) continue;
+                End(true);
+                if (Arming.Contains(n)) lastArm = w.End;
+                continue;
+            }
+            if (cur.Count == 0) armed = w.Start - lastArm < 10;
+            cur.Add(w);
+            if (k == Kind.Strong) strong++;
+            if (k == Kind.Nato) nato++;
+        }
+        End(false);
+        return runs;
+    }
+}
+
+/// <summary>
+/// Decides what's muted. Two ears report to it: a quick keyword listener that only knows the filtered words (it
+/// says "maybe" early, and that stretch is held back at once) and the full recognizer, which knows ~100,000 words
+/// and has the last say: a filtered word, or one that sounds just like it, is muted for good; an ordinary word
+/// ("bigger", "trigger") lets the stretch go out untouched. While it's undecided, it stays muted. Spoken codes
+/// (letters read out) are held back the same way and let go if they turn out to be ordinary words.
+/// </summary>
+public sealed class SafetyJudge
+{
+    private sealed class Hold { public int Id; public double From, To, Since; public string Word = ""; }
+    private readonly ContentGains _gains;
+    private readonly object _lock = new();
+    private int _nextId = 1;
+    private readonly List<Hold> _slurHolds = new(), _codeHolds = new();
+    private readonly List<HeardWord> _history = new();     // finished words, last ~20 s (a code can span two sentences)
+    private readonly HashSet<long> _done = new();           // confirmed mutes already reported
+    private readonly List<(double From, double To)> _codesMuted = new();
+
+    public Func<string, bool> IsSlur { get; set; }
+    public bool Codes { get; set; }
+    /// <summary>A stretch muted for good: (from, to, what: "word" or "code").</summary>
+    public event Action<double, double, string>? Muted;
+    public int Held { get; private set; }
+    public int Released { get; private set; }
+
+    public SafetyJudge(ContentGains gains, Func<string, bool> isSlur, bool codes) { _gains = gains; IsSlur = isSlur; Codes = codes; }
+
+    /// <summary>The keyword listener thinks it heard a filtered word around [from, to]: held back until the full recognizer decides.</summary>
+    public void Suspect(double from, double to, string word, double now)
+    {
+        lock (_lock)
+        {
+            from -= 0.12; to += 0.12;
+            if (_slurHolds.FirstOrDefault(h => h.From < to && h.To > from) is { } h)
+            {
+                if (from < h.From || to > h.To) { h.From = Math.Min(h.From, from); h.To = Math.Max(h.To, to); _gains.Mute(h.From, h.To, h.Id); }
+                return;
+            }
+            var hold = new Hold { Id = _nextId++, From = from, To = to, Since = now, Word = word };
+            _slurHolds.Add(hold);
+            _gains.Mute(from, to, hold.Id);
+            Held++;
+        }
+    }
+
+    /// <summary>
+    /// The full recognizer's words: <paramref name="final"/> = a finished sentence (otherwise its running guess).
+    /// <paramref name="now"/>: how far it has listened (s on the timeline).
+    /// </summary>
+    public void Heard(IReadOnlyList<HeardWord> words, double now, bool final)
+    {
+        lock (_lock)
+        {
+            // 1. filtered words: muted for good
+            foreach (var w in words)
+                if (IsSlur(w.Text)) Confirm(w.Start - 0.15, w.End + 0.15, "word");
+
+            // 2. what the keyword listener held back: decided by the words heard there
+            double heardTo = words.Count > 0 ? Math.Max(now - 0.3, words[^1].End) : now;
+            for (int i = _slurHolds.Count - 1; i >= 0; i--)
+            {
+                var h = _slurHolds[i];
+                var over = words.Concat(_history).Where(w => w.End > h.From + 0.1 && w.Start < h.To - 0.1).ToList();
+                if (over.Any(w => IsSlur(w.Text))) { Confirm(h.From, h.To, "word"); _slurHolds.RemoveAt(i); continue; }
+                // ordinary words there, and the recognizer has moved on past them (its guess won't change): let it go
+                bool settled = final || heardTo > h.To + 0.25;
+                if (settled && (over.Count > 0 || final || now > h.To + 0.8)) { Release(h); _slurHolds.RemoveAt(i); continue; }
+                // gone out long ago: forget it (still undecided: it stayed muted)
+                if (now - h.Since > 12) _slurHolds.RemoveAt(i);
+            }
+
+            // 3. spoken codes
+            if (Codes) Codes_(words, now);
+            else foreach (var h in _codeHolds.ToList()) { Release(h); _codeHolds.Remove(h); }
+
+            if (final)
+            {
+                _history.AddRange(words);
+                _history.RemoveAll(w => w.End < now - 20);
+            }
+            if (_done.Count > 5000) _done.Clear();
+            _codesMuted.RemoveAll(c => c.To < now - 30);
+        }
+    }
+
+    private void Codes_(IReadOnlyList<HeardWord> words, double now)
+    {
+        double start = words.Count > 0 ? words[0].Start : double.MaxValue;
+        var all = _history.Where(w => w.End <= start + 0.05).Concat(words).ToList();
+        var runs = CodeLetters.Runs(all, now);
+        var keep = new HashSet<Hold>();
+        foreach (var r in runs)
+        {
+            double a = r.From - 0.1, b = r.To + 0.12;
+            var touching = _codeHolds.Where(h => h.From < b && h.To > a).ToList();
+            if (r.IsCode)
+            {
+                foreach (var h in touching) { _gains.Mute(h.From, h.To); _codeHolds.Remove(h); }
+                if (!_codesMuted.Any(c => c.From < b && c.To > a)) Muted?.Invoke(a, b, "code");
+                _codesMuted.RemoveAll(c => c.From < b && c.To > a);
+                _codesMuted.Add((Math.Min(a, touching.Select(h => h.From).DefaultIfEmpty(a).Min()), b));
+                _gains.Mute(a, b);
+            }
+            else if (r.Suspect)
+            {
+                // a run already muted for good (a longer run whose start was cut off by a revised guess) stays muted
+                if (_codesMuted.Any(c => c.From < b && c.To > a)) { _gains.Mute(a, b); continue; }
+                var h = touching.FirstOrDefault();
+                if (h is null) { h = new Hold { Id = _nextId++, From = a, To = b, Since = now, Word = "code" }; _codeHolds.Add(h); Held++; }
+                h.From = Math.Min(h.From, a); h.To = Math.Max(h.To, b);
+                _gains.Mute(h.From, h.To, h.Id);
+                keep.Add(h);
+                foreach (var o in touching.Skip(1)) keep.Add(o);
+            }
+        }
+        // held back, but no longer part of a run that could be a code: let it go once the words there are known
+        double heardTo = all.Count > 0 ? Math.Max(now - 0.3, all[^1].End) : now;
+        for (int i = _codeHolds.Count - 1; i >= 0; i--)
+        {
+            var h = _codeHolds[i];
+            if (keep.Contains(h)) continue;
+            if (heardTo > h.To + 0.2 || now > h.To + CodeLetters.MaxGap) { Release(h); _codeHolds.RemoveAt(i); }
+        }
+    }
+
+    private void Confirm(double from, double to, string what)
+    {
+        _gains.Mute(from, to);
+        if (_done.Add((long)Math.Round(from * 5))) Muted?.Invoke(from, to, what);
+    }
+
+    private void Release(Hold h) { _gains.Release(h.Id, h.From, h.To); Released++; }
+}
+
+/// <summary>
+/// The safety filter's ears: transcribes the audio (16 kHz) as it comes in with two recognizers, a quick keyword
+/// listener (only the filtered words) and the full one, and tells the <see cref="SafetyJudge"/> what each heard and
+/// when on the stream's timeline, as early as they suspect it (their running guesses, not only finished sentences).
+/// </summary>
+public sealed class SpeechListener : IDisposable
+{
+    private sealed class Ear
+    {
+        public readonly System.Collections.Concurrent.BlockingCollection<short[]> Queue = new(boundedCapacity: 400);
+        public Thread? Thread;
+        public long Fed;
+    }
+    private readonly Ear _main = new();
+    private readonly Ear? _keys;
+    private readonly SafetyJudge _judge;
     private readonly double _t0;
     private readonly VoskApi.Model _model;
-    private long _fed;
     private volatile bool _stop;
 
     /// <param name="timelineStart">Where the first audio fed sits on the stream's timeline (seconds).</param>
-    /// <param name="found">(from, to, word) on the timeline, in seconds.</param>
-    public SlurSpotter(VoskApi.Model model, double timelineStart, Func<string, bool> isSlur, Action<double, double, string> found)
+    /// <param name="keywords">The filtered words for the quick listener (null: none, e.g. only codes are filtered).</param>
+    public SpeechListener(VoskApi.Model model, double timelineStart, SafetyJudge judge, IReadOnlyCollection<string>? keywords)
     {
-        _t0 = timelineStart; _isSlur = isSlur; _found = found; _model = model;
+        _t0 = timelineStart; _judge = judge; _model = model;
         var rec = new VoskApi.Recognizer(model, alternatives: 0);
         bool partialWords = rec.TryPartialWords();
-        _thread = new Thread(() => Run(rec, partialWords)) { IsBackground = true, Name = "Leapcast slur filter", Priority = ThreadPriority.AboveNormal };
-        _thread.Start();
+        _main.Thread = new Thread(() => RunMain(rec, partialWords)) { IsBackground = true, Name = "Leapcast safety (words)", Priority = ThreadPriority.AboveNormal };
+        _main.Thread.Start();
+        if (keywords is { Count: > 0 })
+            try
+            {
+                var kr = VoskApi.Recognizer.Keywords(model, keywords);
+                bool kpw = kr.TryPartialWords();
+                _keys = new Ear();
+                _keys.Thread = new Thread(() => RunKeys(kr, kpw)) { IsBackground = true, Name = "Leapcast safety (keywords)", Priority = ThreadPriority.AboveNormal };
+                _keys.Thread.Start();
+            }
+            catch { _keys = null; } // an older libvosk without grammars: the full recognizer alone
     }
 
-    /// <summary>Diagnostics: what the recognizer heard and when (tests).</summary>
+    /// <summary>Diagnostics: what the recognizers heard and when (tests).</summary>
     public Action<string>? Trace { get; set; }
-    private string _lastTrace = "";
+    public bool HasKeywordListener => _keys is not null;
 
-    /// <summary>Where the recognizer has got to on the timeline (s).</summary>
-    public double HeardUntil => _t0 + Interlocked.Read(ref _fed) / 16000.0;
+    /// <summary>Where the full recognizer has got to on the timeline (s).</summary>
+    public double HeardUntil => _t0 + Interlocked.Read(ref _main.Fed) / 16000.0;
 
-    /// <summary>Audio in (16 kHz mono); never blocks the audio thread (drops if the recognizer is far behind).</summary>
-    public void Feed(short[] pcm) { if (!_stop) _queue.TryAdd(pcm); }
-
-    private void Run(VoskApi.Recognizer rec, bool partialWords)
+    /// <summary>Audio in (16 kHz mono); never blocks the audio thread (drops if a recognizer is far behind).</summary>
+    public void Feed(short[] pcm)
     {
-        // warm the recognizer up on a throwaway stream first: its first second of decoding is slow, and a slow
-        // start is exactly what the delay can't absorb
+        if (_stop) return;
+        _main.Queue.TryAdd(pcm);
+        _keys?.Queue.TryAdd(pcm);
+    }
+
+    private void WarmUp()
+    {
+        // a throwaway stream first: a recognizer's first second of decoding is slow, and a slow start is exactly
+        // what the delay can't absorb
         try
         {
             using var warm = new VoskApi.Recognizer(_model, alternatives: 0);
@@ -208,65 +555,106 @@ public sealed class SlurSpotter : IDisposable
             warm.Final();
         }
         catch { }
+    }
 
-        var reported = new HashSet<long>(); // (start in 10 ms) already muted
+    private void RunMain(VoskApi.Recognizer rec, bool partialWords)
+    {
+        WarmUp();
         int maxBacklog = 0;
-        string lastPartial = "";
+        string lastText = "", lastTrace = "";
         try
         {
-            foreach (var pcm in _queue.GetConsumingEnumerable())
+            foreach (var pcm in _main.Queue.GetConsumingEnumerable())
             {
                 if (_stop) break;
                 var json = rec.Accept(pcm, pcm.Length);
-                _fed += pcm.Length;
-                double now = _t0 + _fed / 16000.0;
-                if (json is not null) { Trace?.Invoke($"{now:0.00}s result: {string.Join(" ", Words(json, "result").Select(w => w.Word))}"); Check(json, "result", now); lastPartial = ""; continue; }
-                // the running guess costs time: only when caught up (a slow PC must not fall behind the delay)
-                if (_queue.Count > 0)
+                Interlocked.Add(ref _main.Fed, pcm.Length);
+                double now = _t0 + Interlocked.Read(ref _main.Fed) / 16000.0;
+                if (json is not null)
                 {
-                    if (Trace is { } tb && _queue.Count > maxBacklog) { maxBacklog = _queue.Count; tb($"{now:0.00}s behind by {_queue.Count * 0.1:0.0} s"); }
+                    var words = Words(json, "result");
+                    Trace?.Invoke($"{now:0.00}s result: {string.Join(" ", words.Select(w => $"{Show(w.Text)}@{w.Start:0.00}"))}");
+                    _judge.Heard(words, now, final: true);
+                    lastText = "";
+                    continue;
+                }
+                // the running guess costs time: only when caught up (a slow PC must not fall behind the delay)
+                if (_main.Queue.Count > 0)
+                {
+                    if (Trace is { } tb && _main.Queue.Count > maxBacklog) { maxBacklog = _main.Queue.Count; tb($"{now:0.00}s behind by {_main.Queue.Count * 0.1:0.0} s"); }
                     continue;
                 }
                 var partial = rec.Partial();
-                // word times in the running guess when this libvosk gives them; otherwise (or when it leaves them
-                // out) the running text itself: a new filtered word in it was said within the last moment
                 var timed = partialWords ? Words(partial, "partial_result") : new();
-                if (Trace is { } tr) { string tx = Text(partial); if (tx != _lastTrace) { _lastTrace = tx; tr($"{now:0.00}s q{_queue.Count} partial{(timed.Count > 0 ? "+times" : "")}: {tx}"); } }
-                if (timed.Count > 0) Check(partial, "partial_result", now);
-                else
+                string text = Text(partial);
+                if (Trace is { } tr && text != lastTrace) { lastTrace = text; tr($"{now:0.00}s partial{(timed.Count > 0 ? "+times" : "")}: {string.Join(" ", text.Split(' ').Select(Show))}"); }
+                if (timed.Count > 0 || text.Length == 0) { _judge.Heard(timed, now, final: false); continue; }
+                // no word times in the running guess (an older libvosk): a new filtered word in it was said within the
+                // last moment or so (the finished sentence, with times, settles everything else)
+                if (text != lastText)
                 {
-                    // no word times in the running guess: a new slur in it was said within the last moment or so
-                    string text = Text(partial);
-                    if (text != lastPartial)
-                    {
-                        var before = lastPartial.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        var after = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        for (int i = 0; i < after.Length; i++)
-                            if ((i >= before.Length || before[i] != after[i]) && _isSlur(after[i]))
-                            {
-                                long key = (long)(now * 2);
-                                if (reported.Add(-key)) _found(now - 1.6, now + 0.25, after[i]);
-                            }
-                        lastPartial = text;
-                    }
+                    var before = lastText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    var after = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    for (int i = 0; i < after.Length; i++)
+                        if ((i >= before.Length || before[i] != after[i]) && _judge.IsSlur(after[i]))
+                            _judge.Heard(new[] { new HeardWord(after[i], now - 1.45, now + 0.1) }, now, final: false);
+                    lastText = text;
                 }
             }
         }
         catch { }
         finally { rec.Dispose(); }
+    }
 
-        void Check(string js, string prop, double now)
+    private void RunKeys(VoskApi.Recognizer rec, bool partialWords)
+    {
+        WarmUp();
+        string lastText = "";
+        try
         {
-            foreach (var (w, s, e) in Words(js, prop))
+            foreach (var pcm in _keys!.Queue.GetConsumingEnumerable())
             {
-                if (!_isSlur(w)) continue;
-                double from = _t0 + s, to = _t0 + e;
-                if (to < from || to > now + 1) { from = now - 1.6; to = now + 0.25; } // odd times: be generous
-                if (reported.Add((long)(from * 100))) _found(from - 0.15, to + 0.15, w);
+                if (_stop) break;
+                var json = rec.Accept(pcm, pcm.Length);
+                Interlocked.Add(ref _keys.Fed, pcm.Length);
+                double now = _t0 + Interlocked.Read(ref _keys.Fed) / 16000.0;
+                if (json is not null) { Suspects(Words(json, "result"), "", now, "result"); lastText = ""; continue; }
+                if (_keys.Queue.Count > 0) continue;
+                var partial = rec.Partial();
+                string text = Text(partial);
+                if (text == lastText) continue;
+                Suspects(partialWords ? Words(partial, "partial_result") : new(), text, now, "partial");
+                lastText = text;
             }
-            if (reported.Count > 5000) reported.Clear();
+        }
+        catch { }
+        finally { rec.Dispose(); }
+
+        void Suspects(List<HeardWord> timed, string text, double now, string what)
+        {
+            var hits = timed.Where(w => w.Text != "[unk]" && w.Text.Length > 0).ToList();
+            if (hits.Count > 0)
+            {
+                foreach (var w in hits)
+                {
+                    bool odd = w.End < w.Start || w.End > now + 0.5 || w.Start < now - 6;
+                    if (odd) _judge.Suspect(now - 1.2, now + 0.2, w.Text, now);
+                    else _judge.Suspect(w.Start, w.End, w.Text, now);
+                }
+                Trace?.Invoke($"{now:0.00}s keyword {what}: {string.Join(" ", hits.Select(w => $"{SlurWords.Rot13(w.Text)}@{w.Start:0.00}"))}");
+            }
+            else if (timed.Count == 0 && text.Length > 0)
+            {
+                var said = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(x => x != "[unk]").ToList();
+                if (said.Count == 0) return;
+                _judge.Suspect(now - 1.2, now + 0.2, said[^1], now);
+                Trace?.Invoke($"{now:0.00}s keyword {what} (no times): {string.Join(" ", said.Select(SlurWords.Rot13))}");
+            }
         }
     }
+
+    /// <summary>Filtered words appear in logs encoded (#…, ROT13), never spelled out.</summary>
+    private string Show(string w) => _judge.IsSlur(w) ? "#" + SlurWords.Rot13(w) : w;
 
     private static string Text(string json)
     {
@@ -274,16 +662,17 @@ public sealed class SlurSpotter : IDisposable
         catch { return ""; }
     }
 
-    internal static List<(string Word, double Start, double End)> Words(string json, string prop)
+    internal List<HeardWord> Words(string json, string prop)
     {
-        var o = new List<(string, double, double)>();
+        var o = new List<HeardWord>();
         try
         {
             using var d = JsonDocument.Parse(json);
             if (d.RootElement.TryGetProperty(prop, out var arr) && arr.ValueKind == JsonValueKind.Array)
                 foreach (var w in arr.EnumerateArray())
-                    o.Add((w.GetProperty("word").GetString() ?? "", w.TryGetProperty("start", out var s) ? s.GetDouble() : 0,
-                        w.TryGetProperty("end", out var e) ? e.GetDouble() : 0));
+                    o.Add(new HeardWord(w.GetProperty("word").GetString() ?? "",
+                        _t0 + (w.TryGetProperty("start", out var s) ? s.GetDouble() : 0),
+                        _t0 + (w.TryGetProperty("end", out var e) ? e.GetDouble() : 0)));
         }
         catch { }
         return o;
@@ -292,15 +681,17 @@ public sealed class SlurSpotter : IDisposable
     public void Dispose()
     {
         _stop = true;
-        _queue.CompleteAdding();
-        _thread.Join(2000);
+        _main.Queue.CompleteAdding();
+        _keys?.Queue.CompleteAdding();
+        _main.Thread?.Join(2000);
+        _keys?.Thread?.Join(2000);
     }
 }
 
 /// <summary>
-/// One desktop audio feed's safety stage, between the device and the stream (48 kHz stereo, 10 ms at a time, in
-/// timeline order): the loud-audio guard and the slur filter look at the audio as it arrives; it then waits in a
-/// delay line for <see cref="AudioSafetyConfig.DelaySeconds"/> and goes out with their decisions applied.
+/// One audio feed's safety stage, between the device and the stream (48 kHz stereo, 10 ms at a time, in timeline
+/// order): the loud-audio guard and the listener look at the audio as it arrives; it then waits in a delay line
+/// for <see cref="AudioSafetyConfig.DelaySeconds"/> and goes out with their decisions applied.
 /// </summary>
 public sealed class DesktopSafety : IDisposable
 {
@@ -308,7 +699,9 @@ public sealed class DesktopSafety : IDisposable
     private readonly ContentGains _gains = new();
     internal ContentGains Gains => _gains;
     private LoudGuard? _guard;
-    private SlurSpotter? _spotter;
+    private SpeechListener? _listener;
+    private readonly SafetyJudge _judge;
+    private readonly bool _mic;
     private readonly Func<VoskApi.Model?>? _model;
     private Task<VoskApi.Model?>? _modelTask;
     private readonly float[]? _line;     // delay line (stereo interleaved)
@@ -319,36 +712,58 @@ public sealed class DesktopSafety : IDisposable
     private readonly Downsampler _down = new();
     private readonly List<short> _pending = new();
     private long _latest;
-    /// <summary>The last filtered word's margin: how long before it would have gone out it was muted (s).</summary>
+    private string _listenKey = "";
+    /// <summary>The last muted stretch's margin: how long before it would have gone out it was decided (s).</summary>
     public double LastMargin { get; private set; } = double.NaN;
     private HashSet<string> _custom;
     public event Action<string>? Log;
     public int Muted { get; private set; }
+    public int CodesMuted { get; private set; }
     public int LoudTriggers => _guard?.Triggers ?? 0;
     public double DelaySeconds => _delaySlots / 100.0;
-    /// <summary>Diagnostics (tests): the recognizer's running results.</summary>
+    public SafetyJudge Judge => _judge;
+    /// <summary>Diagnostics (tests): the recognizers' running results.</summary>
     public Action<string>? Trace { get; set; }
+    public bool KeywordListener => _listener?.HasKeywordListener ?? false;
 
-    /// <summary>Live changes (word list, filter and guard on/off); the delay itself stays as built.</summary>
+    private bool Listening => (_cfg.MuteSlurs || _cfg.MuteCodes) && _delaySlots > 0;
+
+    /// <summary>Live changes (word list, filters and guard on/off); the delay itself stays as built.</summary>
     public void Update(AudioSafetyConfig cfg)
     {
         _custom = SlurWords.Custom(cfg.CustomWords);
-        if (cfg.LoudGuard && _guard is null) _guard = new LoudGuard();
-        if (!cfg.LoudGuard) _guard = null;
-        if (!cfg.MuteSlurs && _spotter is not null) { _spotter.Dispose(); _spotter = null; }
-        _cfg = cfg with { DelaySeconds = _delaySlots / 100.0, MuteSlurs = cfg.MuteSlurs && _delaySlots > 0 };
+        bool guard = cfg.LoudGuard && !_mic;
+        if (guard && _guard is null) _guard = new LoudGuard();
+        if (!guard) _guard = null;
+        _cfg = cfg with { DelaySeconds = _delaySlots / 100.0, MuteSlurs = cfg.MuteSlurs && _delaySlots > 0, MuteCodes = cfg.MuteCodes && _delaySlots > 0 };
+        _judge.Codes = _cfg.MuteCodes;
+        // the keyword listener knows a fixed list: a changed list (or filter off) starts the ears afresh
+        if (_listener is not null && (!Listening || ListenKey() != _listenKey)) { _listener.Dispose(); _listener = null; }
     }
 
-    public DesktopSafety(AudioSafetyConfig cfg, Func<VoskApi.Model?>? model)
+    public DesktopSafety(AudioSafetyConfig cfg, Func<VoskApi.Model?>? model, bool mic = false)
     {
-        _cfg = cfg; _model = model;
+        _cfg = cfg; _model = model; _mic = mic;
         _custom = SlurWords.Custom(cfg.CustomWords);
-        if (cfg.LoudGuard) _guard = new LoudGuard();
+        if (cfg.LoudGuard && !mic) _guard = new LoudGuard();
         _delaySlots = (int)Math.Round(Math.Max(0, cfg.DelaySeconds) * 100);
         if (_delaySlots > 0) _line = new float[_delaySlots * ContentGains.SlotSamples * 2];
+        _judge = new SafetyJudge(_gains, w => _cfg.MuteSlurs && SlurWords.Near(w, _cfg.MuteAbleist, _custom), cfg.MuteCodes && _delaySlots > 0);
+        _judge.Muted += (from, to, what) =>
+        {
+            if (what == "code") CodesMuted++; else Muted++;
+            // it goes out DelaySeconds after it arrived: how much of that was left when it was decided
+            LastMargin = from + _delaySlots / 100.0 - Interlocked.Read(ref _latest) / 48000.0;
+            string feed = _mic ? "your microphone" : "desktop audio";
+            Log?.Invoke(what == "code"
+                ? $"Stream safety: hid a spoken code at {TimeSpan.FromSeconds(Math.Max(0, from)):hh\\:mm\\:ss} ({feed})."
+                : $"Stream safety: muted a filtered word at {TimeSpan.FromSeconds(Math.Max(0, from)):hh\\:mm\\:ss} ({feed}).");
+        };
         // load the recognizer now (off the audio thread), so it's ready and warm before the first word
-        if (cfg.MuteSlurs && _delaySlots > 0 && model is not null) _modelTask = Task.Run(() => { try { return model(); } catch { return null; } });
+        if (Listening && model is not null) _modelTask = Task.Run(() => { try { return model(); } catch { return null; } });
     }
+
+    private string ListenKey() => $"{_cfg.MuteSlurs}|{_cfg.MuteAbleist}|{string.Join(",", _custom.OrderBy(x => x))}";
 
     /// <summary>Takes 10 ms that just arrived (sample index <paramref name="index"/> on the timeline) and returns the 10 ms to send now, in place.</summary>
     public void Process(float[] stereo, long index)
@@ -366,25 +781,23 @@ public sealed class DesktopSafety : IDisposable
                 if (_delaySlots > 3) for (int k = 1; k <= 3; k++) _gains.Limit(slot - k, Math.Min(1, g * (1 + k * 0.6f)));
             }
         }
-        if (_cfg.MuteSlurs && _delaySlots > 0)
+        if (Listening)
         {
             // the recognizer's model loads off the audio thread (the first time takes a moment)
-            if (_spotter is null && _model is not null) _modelTask ??= Task.Run(() => { try { return _model(); } catch { return null; } });
-            if (_spotter is null && _modelTask is { IsCompletedSuccessfully: true, Result: { } m })
-                _spotter = new SlurSpotter(m, index / 48000.0, w => SlurWords.Is(w, _cfg.MuteAbleist, _custom), (from, to, word) =>
-                {
-                    _gains.Mute(from, to);
-                    Muted++;
-                    // it goes out DelaySeconds after it arrived: how much of that was left when it was caught
-                    LastMargin = from + _delaySlots / 100.0 - Interlocked.Read(ref _latest) / 48000.0;
-                    Log?.Invoke($"Stream safety: muted a filtered word at {TimeSpan.FromSeconds(Math.Max(0, from)):hh\\:mm\\:ss} (desktop audio).");
-                });
-            if (_spotter is not null && Trace is not null) _spotter.Trace = Trace;
-            if (_spotter is not null)
+            if (_listener is null && _model is not null) _modelTask ??= Task.Run(() => { try { return _model(); } catch { return null; } });
+            if (_listener is null && _modelTask is { IsCompletedSuccessfully: true, Result: { } m })
             {
-                // the recognizer gets 100 ms at a time (10 ms pieces would cost it far more work)
+                _listenKey = ListenKey();
+                var keywords = _cfg.MuteSlurs ? SlurWords.All(_cfg.MuteAbleist, _custom).ToList() : null;
+                _listener = new SpeechListener(m, index / 48000.0, _judge, keywords);
+                _pending.Clear();
+            }
+            if (_listener is not null && Trace is not null) _listener.Trace = Trace;
+            if (_listener is not null)
+            {
+                // the recognizers get 100 ms at a time (10 ms pieces would cost them far more work)
                 _pending.AddRange(_down.Process(stereo));
-                if (_pending.Count >= 1600) { _spotter.Feed(_pending.ToArray()); _pending.Clear(); }
+                if (_pending.Count >= 1600) { _listener.Feed(_pending.ToArray()); _pending.Clear(); }
             }
         }
 
@@ -416,7 +829,7 @@ public sealed class DesktopSafety : IDisposable
         _lastGain = target;
     }
 
-    public void Dispose() { _spotter?.Dispose(); _spotter = null; }
+    public void Dispose() { _listener?.Dispose(); _listener = null; }
 
     /// <summary>48 kHz stereo float → 16 kHz mono 16-bit for the recognizer (low-passed so nothing folds back).</summary>
     private sealed class Downsampler

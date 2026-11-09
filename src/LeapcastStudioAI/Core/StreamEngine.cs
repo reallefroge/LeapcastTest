@@ -284,6 +284,7 @@ public sealed class StreamEngine : IDisposable
     {
         _audio = audio;
         _platform = platform;
+        _lightTimer = new Timer(_ => AutoLightTick(), null, 1500, 1000);
         // ffmpeg readers/writers (preview, progress, outputs) must never queue behind each other on a small pool
         ThreadPool.GetMinThreads(out int workers, out int io);
         ThreadPool.SetMinThreads(Math.Max(workers, 32), Math.Max(io, 32));
@@ -466,6 +467,45 @@ public sealed class StreamEngine : IDisposable
         RefreshLayout();
         await ReconcileAsync(); // e.g. vertical canvas switched on, an output enabled with its own encoder
     });
+
+    // ------------------------------------------------------------------ camera auto light
+
+    private readonly Timer _lightTimer;
+    private readonly Dictionary<string, CameraAutoLight> _light = new();
+    private int _lightBusy;
+
+    private IReadOnlyDictionary<string, LightSettings> CameraLightNow()
+    {
+        lock (_light) return _light.ToDictionary(x => x.Key, x => x.Value.Current);
+    }
+
+    /// <summary>Where each camera's auto light is (for the log / tests): "key: gamma …".</summary>
+    public string CameraLightStats()
+    {
+        lock (_light) return string.Join(" | ", _light.Select(x => FormattableString.Invariant($"{x.Key}: mean {x.Value.LastMean:0.00} → gamma {x.Value.Current.Gamma:0.00}")));
+    }
+
+    /// <summary>Once a second: measure each auto-lit camera's latest frame, send a correction when it changed enough to see.</summary>
+    private void AutoLightTick()
+    {
+        if (Interlocked.Exchange(ref _lightBusy, 1) == 1) return;
+        try
+        {
+            var r = _runner; var spec = _runnerSpec;
+            if (r is null || spec is null || spec.CameraLightFilters.Count == 0) return;
+            foreach (var key in spec.CameraLightFilters.Select(f => f.Key).Distinct())
+            {
+                if (_cameras.Latest(key) is not { } frame) continue;
+                var (mean, p95) = CameraAutoLight.Measure(frame.Frame, frame.Width, frame.Height);
+                CameraAutoLight light;
+                lock (_light) { if (!_light.TryGetValue(key, out light!)) _light[key] = light = new CameraAutoLight(); }
+                if (light.Update(mean, p95) is not { } next) continue;
+                r.SendCommands(spec.CameraLightFilters.Where(f => f.Key == key).SelectMany(f => next.Commands(f.Name)));
+            }
+        }
+        catch { }
+        finally { Volatile.Write(ref _lightBusy, 0); }
+    }
 
     /// <summary>The safety delay the running pipeline was built with (0 = none).</summary>
     public double SafetyDelayActive => _runnerRequest?.SafetyDelay ?? 0;
@@ -1125,7 +1165,8 @@ public sealed class StreamEngine : IDisposable
         double safetyDelay = _audio.DelaysDesktopAudio ? safety.DelaySeconds : 0;
         if (encode) pipes = _audio.OpenPipes(origin);
         var delayedAudio = new HashSet<Guid>(safetyDelay > 0
-            ? AudioSources().Where(x => SourceTypes.KindOf(x.Type) == SourceKind.DesktopAudio && pipes.ContainsKey(x.Id)).Select(x => x.Id)
+            ? AudioSources().Where(x => (SourceTypes.KindOf(x.Type) == SourceKind.DesktopAudio
+                                         || (safety.FilterMic && SourceTypes.KindOf(x.Type) == SourceKind.Microphone)) && pipes.ContainsKey(x.Id)).Select(x => x.Id)
             : Enumerable.Empty<Guid>());
 
         // Webcams: one warm reader per device, fed to this run through counted pipes.
@@ -1209,6 +1250,7 @@ public sealed class StreamEngine : IDisposable
             MasterVolumeDb = Settings.MasterVolumeDb,
             WallclockOrigin = origin,
             SafetyDelay = safetyDelay,
+            CameraLight = CameraLightNow(),
             DelayedAudio = delayedAudio,
             InputOverride = InputOverride,
             InputThreadQueueSupported = InputThreadQueueSupported,
@@ -1668,6 +1710,7 @@ public sealed class StreamEngine : IDisposable
         try { Task.Run(StopAllAsync).Wait(TimeSpan.FromSeconds(10)); } catch { }
         _outputs.Dispose();
         _audio.Dispose();
+        _lightTimer.Dispose();
         _cameras.Dispose();
         _windows.Dispose();
         _browsers.Dispose();

@@ -33,6 +33,7 @@ public sealed class WasapiAudioBridge : IAudioBridge
         public NamedPipeServerStream? Pipe;
         public Thread? Writer;
         public bool Desktop;
+        public bool Mic;
         /// <summary>Stream safety (desktop audio): delay line, slur filter, loud-audio guard. Null: straight through.</summary>
         public volatile DesktopSafety? Safety;
 
@@ -252,6 +253,7 @@ public sealed class WasapiAudioBridge : IAudioBridge
     {
         bool mic = SourceTypes.KindOf(src.Type) == SourceKind.Microphone;
         feed.Desktop = SourceTypes.KindOf(src.Type) == SourceKind.DesktopAudio;
+        feed.Mic = mic;
         using var en = new MMDeviceEnumerator();
         MMDevice device = string.IsNullOrWhiteSpace(src.AudioDeviceId)
             ? en.GetDefaultAudioEndpoint(mic ? DataFlow.Capture : DataFlow.Render, Role.Multimedia)
@@ -315,9 +317,9 @@ public sealed class WasapiAudioBridge : IAudioBridge
                 string name = $"leapcast_{feed.SourceId:N}_{Environment.TickCount64}";
                 feed.Safety?.Dispose();
                 feed.Safety = null;
-                if (feed.Desktop && _safety.Any)
+                if ((feed.Desktop && _safety.Any) || (feed.Mic && _safety.FilterMic && _safety.DelaySeconds > 0))
                 {
-                    var safety = new DesktopSafety(_safety, SafetyModel);
+                    var safety = new DesktopSafety(_safety, SafetyModel, mic: feed.Mic);
                     safety.Log += m => SafetyLog?.Invoke(m);
                     feed.Safety = safety;
                 }

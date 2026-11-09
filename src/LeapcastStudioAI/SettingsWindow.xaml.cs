@@ -54,7 +54,8 @@ public partial class SettingsWindow : Window
     {
         if (SlurHint is null || SafetyDelayBox is null) return;
         bool on = SafetyDelayBox.IsChecked == true;
-        SlurHint.Text = "Racial, ethnic and anti-LGBTQ slurs are built in. Desktop audio is transcribed on this PC as it plays; a filtered word is cut out (silence) before it reaches the stream."
+        SlurHint.Text = "Racial, ethnic and anti-LGBTQ slurs are built in. Desktop audio is transcribed on this PC as it plays; a filtered word is cut out (silence) before it reaches the stream. "
+                        + "Ordinary words that sound similar (bigger, trigger, Niagara) are never cut. No speech recognizer hears every word, so a slur that's mumbled, shouted over or drowned out by game sound can still get through."
                         + (on ? "" : "  ⚠ Turn on the safety delay above for this to work: without it, a word is on stream before it can be heard.");
         SlurHint.Foreground = (Brush)FindResource(on ? "MutedBrush" : "WarnBrush");
     }
@@ -65,7 +66,7 @@ public partial class SettingsWindow : Window
         {
             ContentBox, ProfileBox, ResolutionBox, FrameRateBox, BitrateBox, EncoderBox, PresetBox, RateBox, AudioBox, LowLatencyBox,
             VerticalBox, VerticalResBox, VerticalBitrateBox, UploadBox, TestButton, VerticalClipsBox, InstantSwitchBox,
-            SafetyDelayBox, SafetyDelaySecondsBox,
+            SafetyDelayBox, SafetyDelaySecondsBox, FilterMicBox,
         };
         var bannered = new HashSet<Panel>();
         foreach (var c in locked)
@@ -140,11 +141,13 @@ public partial class SettingsWindow : Window
         SafetyDelayBox.IsChecked = current.SafetyDelay;
         string sec = current.SafetyDelaySeconds.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
         SafetyDelaySecondsBox.SelectedItem = SafetyDelaySecondsBox.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Content == sec)
-                                            ?? SafetyDelaySecondsBox.Items[1]; // 3 s
+                                            ?? SafetyDelaySecondsBox.Items[0]; // 2 s
         MuteSlursBox.IsChecked = current.MuteSlurs;
         MuteAbleistBox.IsChecked = current.MuteAbleist;
         MuteWordsBox.Text = current.MuteWords ?? "";
         LoudGuardBox.IsChecked = current.LoudGuard;
+        MuteCodesBox.IsChecked = current.MuteCodes;
+        FilterMicBox.IsChecked = current.FilterMic;
         SafetyChanged(null, null);
         ChatTwitchBox.Text = current.ChatTwitchChannel.Length > 0 ? current.ChatTwitchChannel : current.ChatClipChannel;
         ChatYouTubeBox.Text = current.ChatYouTube;
@@ -257,6 +260,8 @@ public partial class SettingsWindow : Window
         s.MuteAbleist = MuteAbleistBox.IsChecked == true;
         s.MuteWords = MuteWordsBox.Text.Trim();
         s.LoudGuard = LoudGuardBox.IsChecked == true;
+        s.MuteCodes = MuteCodesBox.IsChecked == true;
+        s.FilterMic = FilterMicBox.IsChecked == true;
         s.ChatTwitchChannel = ChatTwitchBox.Text.Trim();
         s.ChatYouTube = ChatYouTubeBox.Text.Trim();
         s.StreamlabsTokenProtected = StreamlabsTokenBox.Password.Trim().Length > 0 ? SecretStore.Protect(StreamlabsTokenBox.Password.Trim()) : "";

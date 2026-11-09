@@ -67,6 +67,7 @@ public partial class SourcePropertiesWindow : Window
         SelectTag(CamResBox, string.IsNullOrWhiteSpace(source.CameraResolution) ? "Default" : source.CameraResolution);
         SelectTag(CamFpsBox, source.CameraFps.ToString(CultureInfo.InvariantCulture));
         DenoiseBox.IsChecked = source.CameraDenoise;
+        AutoLightBox.IsChecked = source.CameraAutoLight;
         MirrorBox.IsChecked = source.Mirror;
         SyncOffsetBox.Text = source.SyncOffsetMs.ToString(CultureInfo.InvariantCulture);
         if (_kind == SourceKind.Camera) _ = LoadCamerasAsync();
@@ -215,6 +216,7 @@ public partial class SourcePropertiesWindow : Window
         s.CameraResolution = TagOf(CamResBox, "Default");
         s.CameraFps = Int(TagOf(CamFpsBox, "0"), 0, 0, 120);
         s.CameraDenoise = DenoiseBox.IsChecked == true;
+        s.CameraAutoLight = AutoLightBox.IsChecked == true;
         s.Mirror = MirrorBox.IsChecked == true;
         s.SyncOffsetMs = Int(SyncOffsetBox.Text, 0, -1000, 2000);
         s.FilePath = ImageBox.Text.Trim();

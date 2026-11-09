@@ -1,0 +1,35 @@
+name: Stream safety - quick spoken test
+
+# Only the stream-safety tests (unit + Windows voices through the real-time filter), in a few minutes.
+on:
+  push:
+    branches: [ safety-quick ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spoken:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Speech model
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download speech-model-vosk-small-en-us-0.15 -R $env:GITHUB_REPOSITORY -p vosk-model-small-en-us-0.15.zip -D $env:RUNNER_TEMP --clobber
+          Expand-Archive (Join-Path $env:RUNNER_TEMP vosk-model-small-en-us-0.15.zip) -DestinationPath $env:RUNNER_TEMP -Force
+      - name: Spoken safety tests
+        shell: pwsh
+        run: |
+          $env:LEAPCAST_VOSK_MODEL = Join-Path $env:RUNNER_TEMP "vosk-model-small-en-us-0.15"
+          dotnet run -c Release --project tests/CoreTests -- --spoken-safety 2>&1 | Tee-Object -FilePath safety.txt
+          $code = $LASTEXITCODE
+          Get-Content safety.txt | Where-Object { $_ -match 'FAIL|spoken|Safety \(spoken' } | Select-Object -First 30 | ForEach-Object { Write-Host "::warning title=safety::$($_.Trim())" }
+          if ($code -ne 0) { throw "Safety tests failed" }

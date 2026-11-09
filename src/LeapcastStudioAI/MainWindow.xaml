@@ -41,6 +41,7 @@
         <MenuItem Header="Recording…" Click="SettingsMenu_Click" Tag="Recording"/>
         <MenuItem Header="Canvas &amp; scenes…" Click="SettingsMenu_Click" Tag="Canvas"/>
         <MenuItem Header="Connection…" Click="SettingsMenu_Click" Tag="Connection"/>
+        <MenuItem Header="Stream safety (delay, slur filter, codes)…" Click="SettingsMenu_Click" Tag="Safety"/>
         <MenuItem Header="Advanced…" Click="SettingsMenu_Click" Tag="Advanced"/>
       </MenuItem>
       <MenuItem x:Name="DocksMenu" Header="_Docks" SubmenuOpened="DocksMenu_SubmenuOpened">
@@ -65,6 +66,7 @@
         <MenuItem x:Name="AutoConfigMenu" Header="Auto-configuration wizard…" Click="AutoConfig_Click"/>
         <MenuItem Header="Edit a recording into a video…" Click="VodEdit_Click" ToolTip="Turns an hour or more of stream into an edited ~15-minute video"/>
         <MenuItem Header="Stream settings…" Click="SettingsMenu_Click" Tag="Stream"/>
+        <MenuItem Header="Stream safety…" Click="SettingsMenu_Click" Tag="Safety" ToolTip="Safety delay, slur filter, game codes, loud-audio protection"/>
         <MenuItem Header="Add destination…" Click="AddOutput_Click"/>
         <MenuItem Header="Connection test…" Click="SettingsMenu_Click" Tag="Connection"/>
         <Separator/>

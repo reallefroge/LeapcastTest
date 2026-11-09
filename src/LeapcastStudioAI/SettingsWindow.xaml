@@ -172,15 +172,23 @@
               <ComboBoxItem Content="2"/><ComboBoxItem Content="3"/><ComboBoxItem Content="4"/><ComboBoxItem Content="5"/>
             </ComboBox>
             <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
-                       Text="Desktop audio (the game, Discord) waits this long inside Leapcast, so a slur can be heard and muted before it goes out (3 s is safest; 2 s works on fast PCs). Your stream, recordings and clips run this far behind; your preview doesn't. Off: no delay, nothing is behind."/>
+                       Text="Desktop audio (the game, Discord) waits this long inside Leapcast, so a slur or a code can be heard and muted before it goes out. 2 s is enough: a quick listener holds back anything that might be a filtered word the moment it's said, and the full recognizer lets it go if it was an ordinary word. Your stream, recordings and clips run this far behind; your preview doesn't. Off: no delay, nothing is behind."/>
 
             <TextBlock Text="SLUR FILTER (DESKTOP AUDIO)" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
-            <CheckBox x:Name="MuteSlursBox" Content="Mute slurs said in desktop audio"/>
+            <CheckBox x:Name="MuteSlursBox" Content="Mute slurs said in desktop audio (and anything that sounds just like the n-word or the f-word)"/>
             <CheckBox x:Name="MuteAbleistBox" Content="Also mute the r-word" Margin="0,4,0,0"/>
             <TextBlock Text="More words to mute (one per line)" Style="{StaticResource FieldLabel}"/>
             <TextBox x:Name="MuteWordsBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="54" MaxHeight="120" VerticalScrollBarVisibility="Auto"/>
             <TextBlock x:Name="SlurHint" Style="{StaticResource Hint}" TextWrapping="Wrap"
                        Text="Racial, ethnic and anti-LGBTQ slurs are built in. Desktop audio is transcribed on this PC as it plays; a filtered word is cut out (silence) before it reaches the stream. Needs the safety delay."/>
+
+            <TextBlock Text="GAME CODES" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
+            <CheckBox x:Name="MuteCodesBox" Content="Hide codes read out loud (Among Us lobby codes)"/>
+            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="Letters spelled out one by one (&#x201C;C, E, U, W, Y, B&#x201D;, &#x201C;see, e, you, double-you…&#x201D;) are cut out so viewers can't join your lobby. Caught right after someone says &#x201C;code&#x201D; or &#x201C;lobby&#x201D;, and otherwise any 4 or more letters in a row read at a spelling pace. Ordinary words that happen to be letters (&#x201C;oh I see you&#x201D;) said normally are left alone. Needs the safety delay."/>
+            <CheckBox x:Name="FilterMicBox" Content="Also filter my microphone (codes and words I say)" Margin="0,8,0,0"/>
+            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                       Text="Your own voice gets the same filters, for when you read a code out to your friends. It costs a little more CPU (a second listener)."/>
 
             <TextBlock Text="LOUD AUDIO PROTECTION" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
             <CheckBox x:Name="LoudGuardBox" Content="Turn sudden, very loud desktop audio right down (ear-rape protection)"/>

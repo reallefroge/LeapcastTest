@@ -76,6 +76,8 @@ public sealed class PipelineRequest
     /// together. The preview isn't delayed.
     /// </summary>
     public double SafetyDelay { get; init; }
+    /// <summary>Auto light: where each camera's correction is now (a rebuild carries on from there).</summary>
+    public IReadOnlyDictionary<string, LightSettings>? CameraLight { get; init; }
     public IReadOnlySet<Guid> DelayedAudio { get; init; } = new HashSet<Guid>();
 
     /// <summary>Test/alternate platform hook: return an input for a source instead of the Windows device input.</summary>
@@ -116,6 +118,8 @@ public sealed record PipelineSpec(
     IReadOnlyList<AudioGainStage> AudioGains)
 {
     public bool HasVertical { get; init; }
+    /// <summary>Auto-light filters in the graph: camera input key → eq instance name.</summary>
+    public IReadOnlyList<(string Key, string Name)> CameraLightFilters { get; init; } = Array.Empty<(string, string)>();
     /// <summary>The 9:16 clip canvas is composited and encoded (its scenes switch with "eq@cfade").</summary>
     public bool HasClip { get; init; }
     /// <summary>ffmpeg input index → input key (to learn real picture sizes from ffmpeg's log).</summary>
@@ -234,6 +238,7 @@ public static class PipelineBuilder
         var plan = r.Plan;
         int W = plan.Width, H = plan.Height, F = plan.Fps;
         _bridged = r.WindowInputs;
+        _lightNames = new(); _lightKeys = new(); _lightStart = r.CameraLight;
         var scenes = r.Scenes is { Count: > 0 }
             ? r.Scenes
             : new[] { new StudioScene { Name = "Scene", Sources = new(r.Sources ?? Array.Empty<StudioSource>()) } };
@@ -716,8 +721,10 @@ public static class PipelineBuilder
         if (r.Preview)
             args.AddRange(new[] { "-map", "[prev]", "-c:v", "rawvideo", "-f", "rawvideo", "pipe:1" });
 
+        var lightFilters = _lightKeys?.ToList() ?? new();
         return new PipelineSpec(args, warnings, encoded, r.Preview, filterGraph, N, gains)
         {
+            CameraLightFilters = lightFilters,
             HasVertical = vertical, HasClip = clip, InputKeys = inputKeys, PreviewLayout = (PW, VPW, PH), PreviewStageWidth = SPW,
             SceneOverlays = sceneOverlays, Visibility = visibility, HasMasterVolume = hasMaster,
         };
@@ -924,6 +931,9 @@ public static class PipelineBuilder
 
     /// <summary>Windows captured by the bridge in the build in progress (their crop happens in the reader).</summary>
     [ThreadStatic] private static IReadOnlyDictionary<string, WindowCaptureBridge.WindowFeed>? _bridged;
+    [ThreadStatic] private static Dictionary<string, string>? _lightNames;
+    [ThreadStatic] private static List<(string Key, string Name)>? _lightKeys;
+    [ThreadStatic] private static IReadOnlyDictionary<string, LightSettings>? _lightStart;
 
     private static string Crop(StudioSource s)
     {
@@ -939,6 +949,14 @@ public static class PipelineBuilder
         if (kind != SourceKind.Camera) return scale ?? "";
         var sb = new StringBuilder(scale ?? "");
         if (s.CameraDenoise) sb.Append("hqdn3d=1.5:1.5:6:6,");
+        // auto light: after the scale (so it touches only the pixels shown), adjusted live by the engine
+        if (s.CameraAutoLight && _lightNames is not null)
+        {
+            string key = InputKey(s), sig = $"{key}|{Crop(s)}|{scale}|{s.CameraDenoise}|{s.Mirror}";
+            if (!_lightNames.TryGetValue(sig, out var name)) { name = $"cl{_lightNames.Count}"; _lightNames[sig] = name; _lightKeys!.Add((key, name)); }
+            var start = _lightStart?.TryGetValue(key, out var st) == true ? st : LightSettings.Neutral;
+            sb.Append(start.Filter(name)).Append(',');
+        }
         if (s.Mirror) sb.Append("hflip,");
         return sb.ToString();
     }

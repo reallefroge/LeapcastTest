@@ -68,6 +68,17 @@ if (args.Length > 0 && args[0] == "--safety")
     SafetyTests.Run((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) sf++; });
     return sf == 0 ? 0 : 1;
 }
+// quick mode: only stream safety, spoken (Windows voices, real time)
+if (args.Length > 0 && args[0] == "--spoken-safety")
+{
+    int ssf = 0;
+    void SCheck(bool ok, string what) { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) ssf++; }
+    SafetyTests.Run(SCheck);
+#if WINDOWS_SPEECH
+    await SpeechTests.SafetyOnlyAsync(SCheck);
+#endif
+    return ssf == 0 ? 0 : 1;
+}
 // quick mode: only Whisper captions
 if (args.Length > 0 && args[0] == "--whisper")
 {

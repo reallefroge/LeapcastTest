@@ -44,6 +44,7 @@ public static class VoskApi
     [DllImport(Lib)] internal static extern void vosk_model_free(IntPtr model);
     [DllImport(Lib)] internal static extern IntPtr vosk_recognizer_new(IntPtr model, float sampleRate);
     [DllImport(Lib)] internal static extern void vosk_recognizer_set_max_alternatives(IntPtr rec, int max);
+    [DllImport(Lib)] internal static extern IntPtr vosk_recognizer_new_grm(IntPtr model, float sampleRate, [MarshalAs(UnmanagedType.LPUTF8Str)] string grammar);
     [DllImport(Lib)] internal static extern void vosk_recognizer_set_words(IntPtr rec, int words);
     [DllImport(Lib)] internal static extern int vosk_recognizer_accept_waveform_s(IntPtr rec, short[] data, int length);
     [DllImport(Lib)] internal static extern IntPtr vosk_recognizer_result(IntPtr rec);
@@ -70,6 +71,20 @@ public static class VoskApi
     public sealed class Recognizer : IDisposable
     {
         private IntPtr _h;
+        /// <summary>
+        /// A keyword listener: only these words (anything else comes out as "[unk]"). Fast, and it hears a listed word
+        /// even said quickly or half-swallowed; words not in the model's vocabulary are left out of the list.
+        /// </summary>
+        public static Recognizer Keywords(Model model, IEnumerable<string> words, float rate = SpeechPcmConverter.OutRate)
+        {
+            string grammar = JsonSerializer.Serialize(words.Distinct().Append("[unk]").ToArray());
+            var h = vosk_recognizer_new_grm(model.Handle, rate, grammar);
+            if (h == IntPtr.Zero) throw new InvalidOperationException("The keyword listener couldn't start.");
+            return new Recognizer(h);
+        }
+
+        private Recognizer(IntPtr handle) { _h = handle; vosk_recognizer_set_words(_h, 1); }
+
         public Recognizer(Model model, int alternatives = 3, float rate = SpeechPcmConverter.OutRate)
         {
             _h = vosk_recognizer_new(model.Handle, rate);

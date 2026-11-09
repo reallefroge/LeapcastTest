@@ -337,6 +337,14 @@ public sealed class CameraBridge : IDisposable
     }
 
     /// <summary>Deepest frame backlog of any camera pipe (seconds).</summary>
+    /// <summary>The newest frame from a camera (YUV 4:2:0) and its size, for auto light.</summary>
+    public (byte[] Frame, int Width, int Height)? Latest(string key)
+    {
+        Reader? r;
+        lock (_readers) _readers.TryGetValue(key, out r);
+        return r?.Snapshot() is { } f ? (f, r.Width, r.Height) : null;
+    }
+
     public double MaxBacklogSeconds() => _pipes.ToList().Select(p => p.BacklogSeconds).DefaultIfEmpty(0).Max();
 
     /// <summary>Diagnostics: reader frames and pipe counters.</summary>

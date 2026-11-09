@@ -81,6 +81,8 @@
             <ComboBoxItem Content="60" Tag="60"/>
           </ComboBox>
           <CheckBox x:Name="DenoiseBox" Content="Denoise (saves bandwidth in low light)"/>
+          <CheckBox x:Name="AutoLightBox" Content="Auto light (brightens a dark room, calms a bright one)"
+                    ToolTip="Checks the picture once a second and adjusts brightness, contrast and colour gently. Uses almost no CPU."/>
           <CheckBox x:Name="MirrorBox" Content="Mirror"/>
           <TextBlock Text="Sync offset (ms)" Style="{StaticResource FieldLabel}"/>
           <DockPanel>
