@@ -1933,6 +1933,34 @@ await engine.StopAllAsync();
 Check(!engine.Running && !engine.Live && engine.OutputStatuses().Count == 0, "stop all leaves nothing running");
 foreach (var srv in new[] { srvA5, srvB5 }) { srv.WaitForExit(4000); try { srv.Kill(true); } catch { } }
 
+Console.WriteLine("A recording is never ended by the app: an encoder that dies (even seconds after starting) is restarted, the recording carries on");
+{
+    await engine.UpdateAsync(new[] { light }, light, WithEncoder(settings, "libx264"), false);
+    var rclock = Stopwatch.StartNew();
+    await engine.StartRecordingAsync();
+    await Task.Delay(3000);
+    int killed = 0;
+    for (int k = 0; k < 3; k++)
+    {
+        // quick deaths in a row: each run only lives a few seconds
+        int? kid = engine.PipelineProcessId;
+        if (kid is { } kp) { try { Process.GetProcessById(kp).Kill(true); killed++; } catch { } }
+        for (int w = 0; w < 100 && !(engine.Running && engine.PipelineProcessId is { } np && np != kid); w++) await Task.Delay(100);
+        await Task.Delay(1500);
+    }
+    await Task.Delay(5000);
+    bool still = engine.Recording && engine.Running;
+    double wall = rclock.Elapsed.TotalSeconds;
+    string recK = await engine.StopRecordingAsync();
+    var rk = await ProbeAsync(recK);
+    string log = ReadShared(Path.Combine(work, "data", "logs", "stream-health.log"));
+    Check(killed == 3 && still && rk.ok && rk.duration > 8,
+        $"killed the encoder {killed}× (runs of a few seconds): still recording and running afterwards ({still}), the file covers {rk.duration:0.0}s of {wall:0.0}s");
+    Check(log.Contains("ENCODER STOPPED") && log.Contains("recording kept") && File.Exists(Path.Combine(work, "data", "logs", "ffmpeg-crash.log")),
+        "each stop is written to stream-health.log with its reason, and the dead run's FFmpeg log is kept (ffmpeg-crash.log)");
+    await engine.StopAllAsync();
+}
+
 engine.Dispose();
 Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(S)");
 return failures == 0 ? 0 : 1;

@@ -1272,8 +1272,40 @@ public sealed partial class StreamEngine : IDisposable
     private async Task RestartAsync()
     {
         await StopRunnerAsync();
-        if (DesiredShape().Run) await StartRunnerAsync(false);
+        if (!DesiredShape().Run) return;
+        try { await StartRunnerAsync(false); }
+        catch (Exception ex) when (MustKeepRunning)
+        {
+            // a recording or a stream is never ended by a rebuild that failed: keep trying
+            LogEvent($"RESTART FAILED ({ex.Message}): trying again in 5 s");
+            Message?.Invoke(this, new EngineMessageEventArgs($"Couldn't restart the picture ({ex.Message}). Trying again in 5 s; your {WhatsRunning()} keeps going.", true));
+            ScheduleReconnect(TimeSpan.FromSeconds(5));
+        }
     }
+
+    /// <summary>Something you started is on: a recording, a destination or the replay buffer. The app never ends
+    /// these by itself; only you do.</summary>
+    private bool MustKeepRunning => _outputs.AnyActive || _cache.IsRecording || ReplayBuffer;
+
+    private string WhatsRunning() =>
+        _outputs.AnyActive && _cache.IsRecording ? "stream and recording" : _outputs.AnyActive ? "stream" : _cache.IsRecording ? "recording" : "replay buffer";
+
+    /// <summary>A line in logs\stream-health.log (why something stopped or restarted: for finding the cause later).</summary>
+    private void LogEvent(string text)
+    {
+        try
+        {
+            Directory.CreateDirectory(_logDir);
+            File.AppendAllText(Path.Combine(_logDir, "stream-health.log"), $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {text}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
+    /// <summary>The governor's rung before its last change, and when: a run that dies right after a change goes back.</summary>
+    private int _levelBeforeChange = -1;
+    private DateTime _levelChangedUtc = DateTime.MinValue;
+    /// <summary>After a lighter/heavier rung broke the encoder, the governor holds still for a while.</summary>
+    private DateTime _governorHoldUntil = DateTime.MinValue;
 
     private string RequireFfmpeg() =>
         FfmpegPath ?? throw new InvalidOperationException("FFmpeg wasn't found. Reinstall Leapcast or set the FFmpeg path in Settings → Advanced.");
@@ -1589,6 +1621,7 @@ public sealed partial class StreamEngine : IDisposable
             if (_runner != runner) return; // already replaced
             string err = Explain(runner.ErrorSummary());
             var ranFor = DateTime.UtcNow - runner.StartedUtc;
+            try { File.Copy(Path.Combine(_logDir, "ffmpeg-last.log"), Path.Combine(_logDir, "ffmpeg-crash.log"), true); } catch { } // for finding the cause
             bool hadFrames = _lastProgress is { Frame: > 0 };
             await StopRunnerAsync();
             _lastError = err;
@@ -1600,27 +1633,39 @@ public sealed partial class StreamEngine : IDisposable
                 return;
             }
 
-            if (_outputs.AnyActive && Settings.AutoReconnect && ranFor > TimeSpan.FromSeconds(8))
+            if (MustKeepRunning)
             {
-                // the encoder itself died while live: outputs wait (they stay "reconnecting") for the new one
-                if (ranFor > TimeSpan.FromSeconds(60)) _reconnectAttempt = 0;
-                int delay = new[] { 2, 4, 8, 15, 30 }[Math.Min(_reconnectAttempt, 4)];
+                // the encoder died while you're recording / live: it's restarted, again and again if it must; the
+                // destinations wait ("reconnecting") and the recording carries on in the new run. Never ended here.
+                bool afterChange = _levelBeforeChange >= 0 && DateTime.UtcNow - _levelChangedUtc < TimeSpan.FromSeconds(45) && ranFor < TimeSpan.FromSeconds(30);
+                if (afterChange && _governor.Level != _levelBeforeChange)
+                {
+                    // it broke right after the governor changed the settings: back to the ones that were working
+                    LogEvent($"ENCODER STOPPED {ranFor.TotalSeconds:0}s after switching to \"{PerfLevel.At(_governor.Level).Name}\": back to \"{PerfLevel.At(_levelBeforeChange).Name}\"");
+                    _governor.Force(_levelBeforeChange);
+                    _governorHoldUntil = DateTime.UtcNow + TimeSpan.FromMinutes(10);
+                    _levelBeforeChange = -1;
+                }
+                // every second without an encoder is a second missing from the recording: the first tries are quick
+                if (ranFor > TimeSpan.FromSeconds(30)) _reconnectAttempt = 0;
+                double delay = new[] { 0.5, 1, 2, 4, 8, 15, 30 }[Math.Min(_reconnectAttempt, 6)];
                 _reconnectAttempt++;
-                Message?.Invoke(this, new EngineMessageEventArgs($"The encoder stopped ({err}). Restarting in {delay}s…", true));
+                LogEvent($"ENCODER STOPPED after {ranFor.TotalSeconds:0}s (exit {code}): {err} | restarting in {delay:0.#}s (attempt {_reconnectAttempt}), {WhatsRunning()} kept");
+                Message?.Invoke(this, new EngineMessageEventArgs($"The encoder stopped ({err}). Restarting in {Math.Max(1, Math.Round(delay)):0}s; your {WhatsRunning()} keeps going.", true));
                 ScheduleReconnect(TimeSpan.FromSeconds(delay));
             }
             else
             {
-                if (_outputs.AnyActive) { await _outputs.StopAllAsync(); _liveSince = null; }
+                // only the preview was running
+                LogEvent($"PREVIEW STOPPED after {ranFor.TotalSeconds:0}s (exit {code}): {err}");
                 Message?.Invoke(this, new EngineMessageEventArgs(err, true));
-                // keep recording/replay/preview going if possible
                 if (DesiredShape().Run && ranFor > TimeSpan.FromSeconds(8))
                 {
                     try { await StartRunnerAsync(false); } catch (Exception ex) { Message?.Invoke(this, new EngineMessageEventArgs(ex.Message, true)); }
                 }
                 else
                 {
-                    PreviewOn = false; ReplayBuffer = false;
+                    PreviewOn = false;
                     if (!DesiredShape().Run) CloseDevices();
                 }
                 ModesChanged?.Invoke();
@@ -1743,13 +1788,14 @@ public sealed partial class StreamEngine : IDisposable
             {
                 if (!ReferenceEquals(_runner, r)) return;
                 try { File.Copy(Path.Combine(_logDir, "ffmpeg-last.log"), Path.Combine(_logDir, "ffmpeg-stalled.log"), true); } catch { } // for bug reports
+                LogEvent("STALLED: no frames for 10 s, rebuilding the pipeline");
                 Message?.Invoke(this, new EngineMessageEventArgs("The video pipeline stopped producing frames, so Leapcast restarted it.", true));
                 _audio.Configure(AudioSources());
                 await RestartAsync();
             });
             return;
         }
-        if (_governorPaused) return;
+        if (_governorPaused || DateTime.UtcNow < _governorHoldUntil) return;
         bool adapt = Settings.AdaptivePerformance;
 
         int before = _governor.Level;
@@ -1779,6 +1825,8 @@ public sealed partial class StreamEngine : IDisposable
                     ? " (brief pause, stream stays connected)." : " (destinations reconnect)."),
             _ => $"Performance recovered. Back to {PerfLevel.At(d.Level).Name.ToLowerInvariant()}.",
         };
+        if (d.Action != PerformanceGovernor.Action.LowerBitrate) { _levelBeforeChange = before; _levelChangedUtc = DateTime.UtcNow; }
+        LogEvent("GOVERNOR " + text);
         _ = Locked(async () =>
         {
             if (_runner is null) return;

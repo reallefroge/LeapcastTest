@@ -479,8 +479,9 @@ public sealed class OutputManager : IDisposable
                 : StreamEngine.Explain(errors.LastOrDefault(e => e.Contains("rror", StringComparison.Ordinal) || e.Contains("fail", StringComparison.OrdinalIgnoreCase)) ?? errors.LastOrDefault() ?? "disconnected");
             bool busEnded = p.Bus?.Ended ?? true;
             if (busEnded) { p.State = OutputState.Reconnecting; p.Message = "Waiting for the encoder…"; }
-            else if (AutoReconnect && (p.LiveSince is not null || p.Attempt > 0))
+            else if (p.LiveSince is not null || p.Attempt > 0)
             {
+                // a destination that was live is never dropped by the app: it reconnects until you end the stream
                 Message?.Invoke($"{p.Output.Name}: {why.TrimEnd('.')}. Reconnecting…", true);
                 Restart(p, immediate: false);
             }

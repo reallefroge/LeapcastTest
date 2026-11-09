@@ -153,7 +153,7 @@
             <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
                        Text="One-time setup (about 5 minutes): 1) console.cloud.google.com → create a project. 2) APIs &amp; Services → Library → enable &quot;YouTube Data API v3&quot;. 3) OAuth consent screen → External; add your Google account under Test users. 4) Credentials → Create credentials → OAuth client ID → Desktop app. 5) Paste the client ID and secret here. Leapcast opens Google's sign-in in your browser the first time."/>
             <TextBlock Text="RELIABILITY" Style="{StaticResource SectionHeader}" Margin="3,16,3,4"/>
-            <CheckBox x:Name="ReconnectBox" Content="Reconnect automatically"/>
+            <CheckBox x:Name="ReconnectBox" Content="Reconnect automatically" Visibility="Collapsed"/><!-- always on: a stream or recording is never ended by the app -->
             <CheckBox x:Name="AdjustBox" Content="Lower bitrate when the connection struggles"/>
             <CheckBox x:Name="AdaptBox" Content="Use lighter settings when the PC is overloaded"/>
           
