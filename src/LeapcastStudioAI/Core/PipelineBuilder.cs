@@ -78,6 +78,10 @@ public sealed class PipelineRequest
     public double SafetyDelay { get; init; }
     /// <summary>Auto light: where each camera's correction is now (a rebuild carries on from there).</summary>
     public IReadOnlyDictionary<string, LightSettings>? CameraLight { get; init; }
+    /// <summary>Cameras whose denoise starts off (a bright room: switched on live when it gets dark).</summary>
+    public IReadOnlySet<string>? CameraDenoiseOff { get; init; }
+    /// <summary>How fast the preview runs at the start (changed live with <see cref="PipelineSpec.PreviewGates"/>).</summary>
+    public PreviewRate PreviewRate { get; init; } = PreviewRate.Full;
     public IReadOnlySet<Guid> DelayedAudio { get; init; } = new HashSet<Guid>();
 
     /// <summary>Test/alternate platform hook: return an input for a source instead of the Windows device input.</summary>
@@ -120,6 +124,10 @@ public sealed record PipelineSpec(
     public bool HasVertical { get; init; }
     /// <summary>Auto-light filters in the graph: camera input key → eq instance name.</summary>
     public IReadOnlyList<(string Key, string Name)> CameraLightFilters { get; init; } = Array.Empty<(string, string)>();
+    /// <summary>Camera denoisers that are switched on/off live (input key, filter name).</summary>
+    public IReadOnlyList<(string Key, string Name)> CameraDenoiseFilters { get; init; } = Array.Empty<(string, string)>();
+    /// <summary>The preview's gates (setpts filters): <see cref="PipelineBuilder.PreviewGateCommands"/> sets how fast it runs.</summary>
+    public IReadOnlyList<string> PreviewGates { get; init; } = Array.Empty<string>();
     /// <summary>The 9:16 clip canvas is composited and encoded (its scenes switch with "eq@cfade").</summary>
     public bool HasClip { get; init; }
     /// <summary>ffmpeg input index → input key (to learn real picture sizes from ffmpeg's log).</summary>
@@ -238,7 +246,7 @@ public static class PipelineBuilder
         var plan = r.Plan;
         int W = plan.Width, H = plan.Height, F = plan.Fps;
         _bridged = r.WindowInputs;
-        _lightNames = new(); _lightKeys = new(); _lightStart = r.CameraLight;
+        _lightNames = new(); _lightKeys = new(); _lightStart = r.CameraLight; _denoiseKeys = new(); _denoiseOff = r.CameraDenoiseOff;
         var scenes = r.Scenes is { Count: > 0 }
             ? r.Scenes
             : new[] { new StudioScene { Name = "Scene", Sources = new(r.Sources ?? Array.Empty<StudioSource>()) } };
@@ -397,7 +405,7 @@ public static class PipelineBuilder
                 bool big = Large(LayoutMath.Horizontal(src, W, H, AspectFor(src, r.KnownSizes)), W, H);
                 if (big) sceneOverlays[k].Add(name);
                 visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
-                string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, scale)}format={(alpha ? "rgba" : "yuv420p")}");
+                string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, scale)}format={AlphaFormat(alpha, kind)}");
                 string on = !src.Shown ? ":enable=0" : big ? Enabled(k) : "";
                 sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                 cur = $"{p}c{j}";
@@ -439,7 +447,7 @@ public static class PipelineBuilder
                     bool big = Large(rect, VW, VH);
                     if (big) sceneOverlays[k].Add(name);
                     visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
-                    string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, VerticalScale(src, VW, VH))}format={(alpha ? "rgba" : "yuv420p")}");
+                    string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, VerticalScale(src, VW, VH))}format={AlphaFormat(alpha, kind)}");
                     string on = !src.Shown ? ":enable=0" : big ? Enabled(k) : "";
                     sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                     cur = $"{p}c{j}";
@@ -587,6 +595,10 @@ public static class PipelineBuilder
         int PH = r.PreviewHeight, PW = r.PreviewWidth;
         int VPW = vertical ? SmartTuner.Even((int)Math.Round(PH * VW / (double)VH)) : 0;
         int SPW = staged is not null ? PW : 0;
+        var gates = new List<string>();
+        // every preview picture is scaled, converted and copied to the app: a gate right after the frame-rate cut
+        // drops them (live, no restart) while nobody is looking, or keeps 1 in 3 while you're in another app
+        string Gate() { string g = $"setpts@pv{gates.Count}"; gates.Add(g); return $"{g}={GateExpr(r.PreviewRate)},select=not(isnan(t)),"; }
         if (r.Preview)
         {
             int pf = Math.Min(r.PreviewFps, F);
@@ -596,14 +608,14 @@ public static class PipelineBuilder
                 // studio mode: the staged scene, picked live from every scene's composite (streamselect "map")
                 graph.Add(N == 1 ? "[stg0]null[stagesrc]"
                     : $"{string.Concat(Enumerable.Range(0, N).Select(k => $"[stg{k}]"))}{StageFilter}=inputs={N}:map={st}[stagesrc]");
-                graph.Add($"[stagesrc]fps={pf},scale={PW}:{PH}:flags=bilinear,format=bgra[sprev]");
+                graph.Add($"[stagesrc]fps={pf},{Gate()}scale={PW}:{PH}:flags=bilinear,format=bgra[sprev]");
                 parts.Add("[sprev]");
             }
-            graph.Add($"[hprevsrc]fps={pf},scale={PW}:{PH}:flags=bilinear,format=bgra[hprev]");
+            graph.Add($"[hprevsrc]fps={pf},{Gate()}scale={PW}:{PH}:flags=bilinear,format=bgra[hprev]");
             parts.Add("[hprev]");
             if (vertical)
             {
-                graph.Add($"[vprevsrc]fps={pf},scale={VPW}:{PH}:flags=bilinear,format=bgra[vprev]");
+                graph.Add($"[vprevsrc]fps={pf},{Gate()}scale={VPW}:{PH}:flags=bilinear,format=bgra[vprev]");
                 parts.Add("[vprev]");
             }
             graph.Add(parts.Count == 1 ? "[hprev]null[prev]" : $"{string.Concat(parts)}hstack=inputs={parts.Count}[prev]");
@@ -719,12 +731,15 @@ public static class PipelineBuilder
                 $"[f=segment:segment_time={r.SegmentSeconds}:segment_format=mpegts:onfail=ignore]" + TeeEscape(r.ClipSegmentPattern!.Replace('\\', '/')) });
         }
         if (r.Preview)
-            args.AddRange(new[] { "-map", "[prev]", "-c:v", "rawvideo", "-f", "rawvideo", "pipe:1" });
+            // passthrough: a paused preview leaves gaps; ffmpeg mustn't fill them with copies
+            args.AddRange(new[] { "-map", "[prev]", "-fps_mode:v", "passthrough", "-c:v", "rawvideo", "-f", "rawvideo", "pipe:1" });
 
         var lightFilters = _lightKeys?.ToList() ?? new();
         return new PipelineSpec(args, warnings, encoded, r.Preview, filterGraph, N, gains)
         {
             CameraLightFilters = lightFilters,
+            CameraDenoiseFilters = _denoiseKeys?.ToList() ?? new(),
+            PreviewGates = gates,
             HasVertical = vertical, HasClip = clip, InputKeys = inputKeys, PreviewLayout = (PW, VPW, PH), PreviewStageWidth = SPW,
             SceneOverlays = sceneOverlays, Visibility = visibility, HasMasterVolume = hasMaster,
         };
@@ -838,10 +853,16 @@ public static class PipelineBuilder
             "-video_size", $"{feed.Width}x{feed.Height}", "-framerate", I(r.Plan.Fps), "-thread_queue_size", "8", "-i", feed.Path }, false);
     }
 
+    /// <summary>
+    /// A layer's pixel format: video as YUV, graphics with transparency as RGBA, except browser pages, which arrive
+    /// already in the YUV-with-alpha the overlay blends (converted once per page change, not every frame).
+    /// </summary>
+    private static string AlphaFormat(bool alpha, SourceKind kind) => !alpha ? "yuv420p" : kind == SourceKind.Browser ? "yuva420p" : "rgba";
+
     private static InputSpec? BrowserFeedInput(SourceKind kind, string key, PipelineRequest r)
     {
         if (kind != SourceKind.Browser || !r.BrowserInputs.TryGetValue(key, out var feed)) return null;
-        return new InputSpec(new[] { "-f", "rawvideo", "-pix_fmt", "bgra", "-video_size", $"{feed.Width}x{feed.Height}",
+        return new InputSpec(new[] { "-f", "rawvideo", "-pix_fmt", BrowserBridge.PixelFormat, "-video_size", $"{feed.Width}x{feed.Height}",
             "-framerate", I(feed.Fps), "-thread_queue_size", "16", "-i", feed.Path }, false);
     }
 
@@ -934,6 +955,21 @@ public static class PipelineBuilder
     [ThreadStatic] private static Dictionary<string, string>? _lightNames;
     [ThreadStatic] private static List<(string Key, string Name)>? _lightKeys;
     [ThreadStatic] private static IReadOnlyDictionary<string, LightSettings>? _lightStart;
+    [ThreadStatic] private static List<(string Key, string Name)>? _denoiseKeys;
+    [ThreadStatic] private static IReadOnlySet<string>? _denoiseOff;
+
+    /// <summary>The preview gate's expression for a rate: every frame, 1 in 3, or none (a frame with no time is dropped).</summary>
+    public static string GateExpr(PreviewRate rate) => rate switch
+    {
+        PreviewRate.Slow => "if(mod(N,3),0/0,PTS)",
+        PreviewRate.Trickle => "if(mod(N,8),0/0,PTS)",   // a couple of pictures a second: enough to spot a death screen
+        PreviewRate.Paused => "0/0",
+        _ => "PTS",
+    };
+
+    /// <summary>Live commands that set how fast the preview runs.</summary>
+    public static IEnumerable<string> PreviewGateCommands(PipelineSpec spec, PreviewRate rate) =>
+        spec.PreviewGates.Select(g => $"{g} -1 expr {GateExpr(rate)}");
 
     private static string Crop(StudioSource s)
     {
@@ -948,7 +984,15 @@ public static class PipelineBuilder
     {
         if (kind != SourceKind.Camera) return scale ?? "";
         var sb = new StringBuilder(scale ?? "");
-        if (s.CameraDenoise) sb.Append("hqdn3d=1.5:1.5:6:6,");
+        if (s.CameraDenoise && s.CameraAutoLight && _denoiseKeys is not null)
+        {
+            // with auto light, denoise runs only while the room is dark (switched live; in a bright room there's
+            // little noise to remove and it saves the work on every frame)
+            string key = InputKey(s), name = $"hqdn3d@dn{_denoiseKeys.Count}";
+            _denoiseKeys.Add((key, name));
+            sb.Append($"{name}=1.5:1.5:6:6:enable={(_denoiseOff?.Contains(key) == true ? 0 : 1)},");
+        }
+        else if (s.CameraDenoise) sb.Append("hqdn3d=1.5:1.5:6:6,");
         // auto light: after the scale (so it touches only the pixels shown), adjusted live by the engine
         if (s.CameraAutoLight && _lightNames is not null)
         {
@@ -1074,3 +1118,9 @@ public static class PipelineBuilder
         return sb.ToString();
     }
 }
+
+/// <summary>
+/// How fast the preview runs: all frames (you're looking), a third (Leapcast is behind another window), an eighth
+/// (not visible, but death clips watch the picture), none (minimized or preview off, nothing watching).
+/// </summary>
+public enum PreviewRate { Full, Slow, Trickle, Paused }

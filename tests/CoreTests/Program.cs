@@ -1517,6 +1517,21 @@ var rep2 = await engine.SaveReplayAsync();
 var rp2 = await ProbeAsync(rep2);
 Check(rp2.ok && rp2.duration > 5, $"replay spanning both transitions is continuous: {rp2.duration:0.0}s");
 
+// the preview's pictures are made only as fast as someone is looking (live, no restart); the encode never notices
+int CountFrames(double a, double b) { lock (samples) return samples.Count(x => x.t >= a && x.t < b); }
+int pvStarts = engine.PipelineStarts;
+double pv0 = tclock.Elapsed.TotalSeconds; await Task.Delay(2000); int pvFull = CountFrames(pv0 + 0.3, pv0 + 2);
+engine.SetPreviewRate(PreviewRate.Slow);
+double pv1 = tclock.Elapsed.TotalSeconds; await Task.Delay(2000); int pvSlow = CountFrames(pv1 + 0.4, pv1 + 2);
+engine.SetPreviewRate(PreviewRate.Paused);
+double pv2 = tclock.Elapsed.TotalSeconds; await Task.Delay(2500); int pvPaused = CountFrames(pv2 + 0.5, pv2 + 2.5);
+engine.SetPreviewRate(PreviewRate.Full);
+double pv3 = tclock.Elapsed.TotalSeconds; await Task.Delay(1500); int pvBack = CountFrames(pv3 + 0.5, pv3 + 1.5);
+var rep3 = await engine.SaveReplayAsync();
+var rp3 = await ProbeAsync(rep3);
+Check(pvPaused == 0 && pvSlow > 0 && pvSlow < pvFull * 0.5 && pvBack > 0 && engine.PipelineStarts == pvStarts && rp3.ok && rp3.duration > 5,
+    $"preview runs only as fast as someone looks: {pvFull} pictures full, {pvSlow} at a third, {pvPaused} paused, {pvBack} back (1 s); no restart ({pvStarts} → {engine.PipelineStarts}); the recording kept going ({rp3.duration:0.0} s)");
+
 gameSrc.CropLeft = 10; // editing a source changes the graph → rebuild
 await engine.UpdateAsync(both, sceneA, tset, false);
 await Task.Delay(1500);

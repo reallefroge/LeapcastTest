@@ -605,9 +605,25 @@ public sealed class SpeechListener : IDisposable
 {
     private sealed class Ear
     {
-        public readonly System.Collections.Concurrent.BlockingCollection<short[]> Queue = new(boundedCapacity: 400);
+        // audio to transcribe, or (Pcm null) a stretch of silence that was skipped
+        public readonly System.Collections.Concurrent.BlockingCollection<(short[]? Pcm, int Skip)> Queue = new(boundedCapacity: 400);
         public Thread? Thread;
-        public long Fed;
+        public long Fed;            // samples the recognizer was given
+        public long Skipped;        // samples of silence not given to it (still on the timeline)
+        public readonly List<(long At, long Total)> Skips = new();   // recognizer position → silence skipped before it
+        /// <summary>Recognizer time (s since its start) → timeline seconds.</summary>
+        public double Timeline(double t0, double recSeconds)
+        {
+            long at = (long)(recSeconds * 16000), skipped = 0;
+            lock (Skips) foreach (var (a, total) in Skips) { if (a <= at) skipped = total; else break; }
+            return t0 + recSeconds + skipped / 16000.0;
+        }
+        public double Now(double t0) => t0 + (Interlocked.Read(ref Fed) + Interlocked.Read(ref Skipped)) / 16000.0;
+        public void Skip(int n)
+        {
+            long total = Interlocked.Add(ref Skipped, n);
+            lock (Skips) Skips.Add((Interlocked.Read(ref Fed), total));
+        }
     }
     private readonly Ear _main = new();
     private readonly Ear? _keys;
@@ -640,14 +656,35 @@ public sealed class SpeechListener : IDisposable
     public bool HasKeywordListener => _keys is not null;
 
     /// <summary>Where the full recognizer has got to on the timeline (s).</summary>
-    public double HeardUntil => _t0 + Interlocked.Read(ref _main.Fed) / 16000.0;
+    public double HeardUntil => _main.Now(_t0);
+
+    /// <summary>What the full recognizer is hearing right now (its unfinished sentence).</summary>
+    public string Partial => _partial;
+    private volatile string _partial = "";
+    /// <summary>Every finished sentence (timeline seconds): the desktop transcript comes from here too.</summary>
+    public event Action<IReadOnlyList<HeardWord>>? Finished;
+    /// <summary>Silence isn't transcribed (it costs the same work as speech): how much was skipped (s).</summary>
+    public double SkippedSeconds => Interlocked.Read(ref _main.Skipped) / 16000.0;
+    private int _quiet;   // 100 ms pieces of silence in a row
 
     /// <summary>Audio in (16 kHz mono); never blocks the audio thread (drops if a recognizer is far behind).</summary>
     public void Feed(short[] pcm)
     {
         if (_stop) return;
-        _main.Queue.TryAdd(pcm);
-        _keys?.Queue.TryAdd(pcm);
+        // silence (nothing playing): after the recognizer has had ~1.2 s of it (enough to finish the sentence),
+        // the rest isn't given to it; the timeline still moves on
+        long sum = 0;
+        for (int i = 0; i < pcm.Length; i += 4) { int v = pcm[i]; sum += v * v; }
+        bool quiet = sum / Math.Max(1, (pcm.Length + 3) / 4) < 40 * 40;   // under about -58 dBFS
+        _quiet = quiet ? _quiet + 1 : 0;
+        if (_quiet > 12)
+        {
+            _main.Queue.TryAdd((null, pcm.Length));
+            _keys?.Queue.TryAdd((null, pcm.Length));
+            return;
+        }
+        _main.Queue.TryAdd((pcm, 0));
+        _keys?.Queue.TryAdd((pcm, 0));
     }
 
     private void WarmUp()
@@ -672,15 +709,18 @@ public sealed class SpeechListener : IDisposable
         var times = new GuessTimes();
         try
         {
-            foreach (var pcm in _main.Queue.GetConsumingEnumerable())
+            foreach (var (pcm, skip) in _main.Queue.GetConsumingEnumerable())
             {
                 if (_stop) break;
+                if (pcm is null) { _main.Skip(skip); _partial = ""; continue; }
                 var json = rec.Accept(pcm, pcm.Length);
                 Interlocked.Add(ref _main.Fed, pcm.Length);
-                double now = _t0 + Interlocked.Read(ref _main.Fed) / 16000.0;
+                double now = _main.Now(_t0);
                 if (json is not null)
                 {
-                    var words = Words(json, "result");
+                    var words = Words(json, "result", _main);
+                    _partial = "";
+                    try { Finished?.Invoke(words); } catch { }
                     Trace?.Invoke($"{now:0.00}s result: {string.Join(" ", words.Select(w => $"{Show(w.Text)}@{w.Start:0.00}"))}");
                     _judge.Heard(words, now, final: true);
                     times.Finished(words.Count > 0 ? words[^1].End : now);
@@ -694,6 +734,7 @@ public sealed class SpeechListener : IDisposable
                 }
                 // the guess as text (asking for its word times makes it ~1.5 s later): times from when each word showed up
                 string text = Text(rec.Partial());
+                _partial = text;
                 var guess = times.Update(text, now);
                 if (Trace is { } tr && text != lastTrace) { lastTrace = text; tr($"{now:0.00}s partial: {string.Join(" ", guess.Select(w => $"{Show(w.Text)}~{w.Start:0.00}"))}"); }
                 _judge.Heard(guess, now, final: false);
@@ -710,15 +751,16 @@ public sealed class SpeechListener : IDisposable
         int reported = 0;     // words of the current guess already reported
         try
         {
-            foreach (var pcm in _keys!.Queue.GetConsumingEnumerable())
+            foreach (var (pcm, skip) in _keys!.Queue.GetConsumingEnumerable())
             {
                 if (_stop) break;
+                if (pcm is null) { _keys.Skip(skip); continue; }
                 var json = rec.Accept(pcm, pcm.Length);
                 Interlocked.Add(ref _keys.Fed, pcm.Length);
-                double now = _t0 + Interlocked.Read(ref _keys.Fed) / 16000.0;
+                double now = _keys.Now(_t0);
                 if (json is not null)
                 {
-                    var words = Words(json, "result").Where(w => w.Text != "[unk]" && w.Text.Length > 0).ToList();
+                    var words = Words(json, "result", _keys).Where(w => w.Text != "[unk]" && w.Text.Length > 0).ToList();
                     foreach (var w in words) _judge.Suspect(w.Start, w.End, w.Text, now);
                     if (words.Count > 0) Trace?.Invoke($"{now:0.00}s keyword result: {string.Join(" ", words.Select(w => $"{SlurWords.Rot13(w.Text)}@{w.Start:0.00}"))}");
                     times.Finished(now); reported = 0;
@@ -751,7 +793,7 @@ public sealed class SpeechListener : IDisposable
         catch { return ""; }
     }
 
-    internal List<HeardWord> Words(string json, string prop)
+    private List<HeardWord> Words(string json, string prop, Ear ear)
     {
         var o = new List<HeardWord>();
         try
@@ -760,8 +802,8 @@ public sealed class SpeechListener : IDisposable
             if (d.RootElement.TryGetProperty(prop, out var arr) && arr.ValueKind == JsonValueKind.Array)
                 foreach (var w in arr.EnumerateArray())
                     o.Add(new HeardWord(w.GetProperty("word").GetString() ?? "",
-                        _t0 + (w.TryGetProperty("start", out var s) ? s.GetDouble() : 0),
-                        _t0 + (w.TryGetProperty("end", out var e) ? e.GetDouble() : 0)));
+                        ear.Timeline(_t0, w.TryGetProperty("start", out var s) ? s.GetDouble() : 0),
+                        ear.Timeline(_t0, w.TryGetProperty("end", out var e) ? e.GetDouble() : 0)));
         }
         catch { }
         return o;
@@ -814,6 +856,29 @@ public sealed class DesktopSafety : IDisposable
     /// <summary>Diagnostics (tests): the recognizers' running results.</summary>
     public Action<string>? Trace { get; set; }
     public bool KeywordListener => _listener?.HasKeywordListener ?? false;
+    /// <summary>Also run a separate keyword-only recognizer (twice the work; no faster with the running guess).</summary>
+    public static bool UseKeywordListener { get; set; }
+    /// <summary>The recognizer is running on this feed (it then also provides the feed's transcript).</summary>
+    public bool Hearing => _listener is not null;
+    /// <summary>What's being said right now on this feed.</summary>
+    public string Partial => _listener?.Partial ?? "";
+    /// <summary>When the last finished sentence came (UTC).</summary>
+    public DateTime LastResultUtc { get; private set; }
+    /// <summary>Silence not transcribed so far (s): work saved.</summary>
+    public double SkippedSeconds => _listener?.SkippedSeconds ?? 0;
+    /// <summary>Every finished sentence, with real times (UTC): this feed's transcript.</summary>
+    public event Action<IReadOnlyList<CaptionWord>>? Transcribed;
+
+    private void OnFinished(IReadOnlyList<HeardWord> words)
+    {
+        LastResultUtc = DateTime.UtcNow;
+        if (words.Count == 0 || Transcribed is null) return;
+        // timeline seconds → UTC: the audio arrives as it plays, so the newest sample is about now
+        double latest = Interlocked.Read(ref _latest) / 48000.0;
+        var nowUtc = DateTime.UtcNow;
+        DateTime U(double t) => nowUtc - TimeSpan.FromSeconds(Math.Max(0, latest - t));
+        try { Transcribed(words.Select(w => new CaptionWord(w.Text, U(w.Start), U(w.End))).ToList()); } catch { }
+    }
 
     private bool Listening => (_cfg.MuteSlurs || _cfg.MuteCodes) && _delaySlots > 0;
 
@@ -877,8 +942,11 @@ public sealed class DesktopSafety : IDisposable
             if (_listener is null && _modelTask is { IsCompletedSuccessfully: true, Result: { } m })
             {
                 _listenKey = ListenKey();
-                var keywords = _cfg.MuteSlurs ? SlurWords.All(_cfg.MuteAbleist, _custom).ToList() : null;
+                // the recognizer's quick running guess (~0.25 s behind the voice) is as early as a separate keyword
+                // listener would be, at half the work: one recognizer per audio source
+                var keywords = _cfg.MuteSlurs && UseKeywordListener ? SlurWords.All(_cfg.MuteAbleist, _custom).ToList() : null;
                 _listener = new SpeechListener(m, index / 48000.0, _judge, keywords);
+                _listener.Finished += OnFinished;
                 _pending.Clear();
             }
             if (_listener is not null && Trace is not null) _listener.Trace = Trace;

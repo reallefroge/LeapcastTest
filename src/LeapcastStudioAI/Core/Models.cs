@@ -472,6 +472,8 @@ public sealed class StudioSettings
     /// seamless fade either way: every scene's shown sources keep running.
     /// </summary>
     public bool InstantSwitching { get; set; }
+    /// <summary>Keep the preview at full speed while another app is in front (e.g. it's on a second monitor while you play).</summary>
+    public bool PreviewLiveInBackground { get; set; }
     /// <summary>YouTube: pick the broadcast (scheduled or new) when going live, instead of only using the stream key.</summary>
     public bool YouTubePickBroadcast { get; set; } = true;
     /// <summary>Google OAuth "Desktop app" client (Google Cloud console) for the YouTube Data API.</summary>

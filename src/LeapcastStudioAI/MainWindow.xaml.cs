@@ -175,6 +175,10 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Activated += (_, _) => UpdatePreviewRate();
+        Deactivated += (_, _) => Dispatcher.BeginInvoke(UpdatePreviewRate, System.Windows.Threading.DispatcherPriority.Background); // after another Leapcast window took focus
+        StateChanged += (_, _) => UpdatePreviewRate();
+        IsVisibleChanged += (_, _) => UpdatePreviewRate();
         _death.Died += (start, at) => Dispatcher.BeginInvoke(() => SaveDeathClip(start, at));
         _chat.Command += m => Dispatcher.BeginInvoke(() => SaveChatClip(m));
         _chat.Message += m => _sessionLog?.Mark("chat", m.ReceivedUtc);
@@ -530,7 +534,9 @@ public partial class MainWindow : Window
             var rep = PipelineBuilder.AudioRepresentatives(_state.Scenes).FirstOrDefault(r => PipelineBuilder.InputKey(r) == key);
             if (rep is not null && _audio.IsCapturing(rep.Id)) deskId = rep.Id;
         }
-        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}|{deskId}|{s.VoiceClipSensitivity}|{s.VoiceClipEnabled}" : "";
+        // the safety filter's recognizer on desktop audio provides the desktop transcript too (one recognizer, not two)
+        bool shared = _audio.DesktopSafetyListens && _engine.SafetyDelayActive > 0 && deskId is not null;
+        string wantKey = want ? $"{s.VoiceClipWord.Trim().ToLowerInvariant()}|{micId}|{deskId}|{s.VoiceClipSensitivity}|{s.VoiceClipEnabled}|{shared}" : "";
         if (wantKey == _voiceKey) { VoiceTag.Visibility = _voice?.Running == true && s.VoiceClipEnabled ? Visibility.Visible : Visibility.Collapsed; return; }
         StopVoice();
         if (!want) return;
@@ -565,7 +571,7 @@ public partial class MainWindow : Window
                 : $"transcribing {(micId is null ? "Windows' default microphone" : "the scene's microphone")} for clip captions");
             listener.Start(s.VoiceClipWord, feed, s.VoiceClipSensitivity);
             if (micId is null) _voiceMic = WasapiAudioBridge.CaptureDefaultMicForSpeech(tap);
-            StartDesktopTranscript(deskId);
+            StartDesktopTranscript(deskId, shared);
             _voice = listener;
             _voiceKey = wantKey;
             if (s.ClipCaptions) EnsureWhisperModel();
@@ -620,8 +626,17 @@ public partial class MainWindow : Window
     private System.Windows.Threading.DispatcherTimer? _deskPad;
     private readonly Transcript _deskTranscript = new();
 
-    private void StartDesktopTranscript(Guid? deskId)
+    private Action<IReadOnlyList<CaptionWord>>? _deskShared;
+
+    private void StartDesktopTranscript(Guid? deskId, bool shared)
     {
+        if (shared)
+        {
+            _deskShared = w => { _deskTranscript.Add(w); _sessionLog?.AddDesktop(w); };
+            _audio.DesktopTranscribed += _deskShared;
+            VoiceLog("desktop audio transcript: shared with the stream safety filter's recognizer");
+            return;
+        }
         try
         {
             var feed = new BlockingAudioStream();
@@ -645,6 +660,7 @@ public partial class MainWindow : Window
 
     private void StopDesktopTranscript()
     {
+        if (_deskShared is not null) { _audio.DesktopTranscribed -= _deskShared; _deskShared = null; }
         _audio.SetDesktopSpeechTap(null, null);
         _deskPad?.Stop();
         _deskPad = null;
@@ -659,8 +675,13 @@ public partial class MainWindow : Window
     private async Task DesktopCaughtUpAsync(DateTime utc, TimeSpan max)
     {
         var until = DateTime.UtcNow + max;
-        while (_deskVoice is { } d && d.LastResultUtc < utc + Echo.Window && string.IsNullOrEmpty(d.Partial) is false && DateTime.UtcNow < until)
+        while (DateTime.UtcNow < until)
+        {
+            var (last, partial) = _deskVoice is { } d ? (d.LastResultUtc, d.Partial)
+                : _audio.DesktopListener is { } l ? (l.LastResultUtc, l.Partial) : (DateTime.MaxValue, "");
+            if (last >= utc + Echo.Window || string.IsNullOrEmpty(partial)) break;
             await Task.Delay(250);
+        }
     }
 
     private void StopVoice()
@@ -685,11 +706,12 @@ public partial class MainWindow : Window
         var s = _state.Settings;
         try
         {
-            if (_deskVoice is { } desk)
+            if (_deskVoice is not null || _deskShared is not null)
             {
                 // a "clip" from the game or a friend on Discord, leaking from the speakers into the mic, isn't yours
                 await DesktopCaughtUpAsync(spokenUtc, TimeSpan.FromSeconds(2));
-                if (Echo.FromDesktop(s.VoiceClipWord, spokenUtc, _deskTranscript.Between(spokenUtc - TimeSpan.FromSeconds(3), spokenUtc + TimeSpan.FromSeconds(3)), desk.Partial))
+                string deskPartial = _deskVoice?.Partial ?? _audio.DesktopListener?.Partial ?? "";
+                if (Echo.FromDesktop(s.VoiceClipWord, spokenUtc, _deskTranscript.Between(spokenUtc - TimeSpan.FromSeconds(3), spokenUtc + TimeSpan.FromSeconds(3)), deskPartial))
                 {
                     VoiceLog($"ignored “{heard}”: the desktop audio said it too (speaker sound in the mic)");
                     return;
@@ -933,8 +955,16 @@ public partial class MainWindow : Window
         UpdateChatClips();
         UpdateRecap(st);
         bool encoding = st.Live || st.Recording || st.ReplayBuffer;
-        PreviewPlaceholder.Visibility = st.Running ? Visibility.Collapsed : Visibility.Visible;
+        UpdatePreviewRate();
+        // live with the preview off: the picture isn't made at all (the stream doesn't need it)
+        bool previewShown = st.Running && (_engine.PreviewOn || !encoding);
+        PreviewPlaceholder.Visibility = previewShown ? Visibility.Collapsed : Visibility.Visible;
+        PreviewHint.Text = st.Running
+            ? "Preview off: your stream and recording keep running, and your PC skips drawing it. Sources can still be arranged."
+            : "Start the preview to see the output. Sources can be arranged while it's off.";
+        PreviewButtonCenter.Content = st.Running ? "▶  Show preview" : "▶  Start preview";
         HPreviewImage.Visibility = st.Running ? Visibility.Visible : Visibility.Hidden;
+        HPreviewImage.Opacity = previewShown ? 1 : 0.25;
         SPreviewImage.Visibility = st.Running && _engine.PreviewFrame.StagedWidth > 0 ? Visibility.Visible : Visibility.Hidden;
         VPreviewImage.Visibility = st.Running && _engine.PreviewFrame.VerticalWidth > 0 ? Visibility.Visible : Visibility.Hidden;
 
@@ -1944,6 +1974,26 @@ public partial class MainWindow : Window
 
     // ------------------------------------------------------------------ preview / record / replay
 
+    /// <summary>
+    /// The preview costs work for every picture (scaled, converted, copied here, drawn): it runs fully only while
+    /// you can see Leapcast, at a third while another app is in front (you're in the game), and not at all while
+    /// Leapcast is minimized or the preview is off. Changes are live; the stream never depends on it.
+    /// </summary>
+    private void UpdatePreviewRate()
+    {
+        bool encoding = _engine.Live || _engine.Recording || _engine.ReplayBuffer;
+        bool wanted = _engine.PreviewOn || !encoding;
+        bool visible = IsVisible && WindowState != WindowState.Minimized;
+        bool front = Application.Current?.Windows.OfType<Window>().Any(w => w.IsActive) == true;
+        bool deathWatch = _state.Settings.DeathClips && _deathLayout is { Game: not null };
+        PreviewRate rate = !wanted || !visible
+            ? (deathWatch ? PreviewRate.Trickle : PreviewRate.Paused)
+            : front || _state.Settings.PreviewLiveInBackground ? PreviewRate.Full : PreviewRate.Slow;
+        // a run that only makes the preview keeps its pictures coming (they're its heartbeat for the health checks)
+        if (!encoding && rate is PreviewRate.Trickle or PreviewRate.Paused) rate = PreviewRate.Slow;
+        _engine.SetPreviewRate(rate);
+    }
+
     private async void Preview_Click(object sender, RoutedEventArgs e)
     {
         bool on = !_engine.PreviewOn;
@@ -2087,6 +2137,9 @@ public partial class MainWindow : Window
                 ? $"{now:yyyy-MM-dd HH:mm:ss} START {st.PlanSummary} | {s.Encoder} {s.EncoderPreset} {(s.LowLatencyMode ? "low-latency" : "")} | {Environment.ProcessorCount} CPU threads | skip_frame off: {EncoderCatalog.AmfSkipFrameOption}"
                 : $"{now:HH:mm:ss} fps {st.Fps:0.0} speed {st.Speed:0.00} repeated {dup} dropped {drop} | {st.Health} | {_engine.Performance.Name} | upload {st.RecentKbps:0} kbps"
                   + (_engine.WindowCaptureStats() is { Length: > 0 } w ? " | windows " + w : "")
+                  + $" | preview {_engine.PreviewRate.ToString().ToLowerInvariant()}"
+                  + (_audio.DesktopListener is { } dl ? $" | safety listener skipped {dl.SkippedSeconds:0} s of silence" : "")
+                  + (_engine.CamerasDenoising is var dn && dn >= 0 ? $" | webcams denoising {dn}" : "")
                   + (BackgroundWork.Live && VodEditWindow.Busy ? " | VOD editor running (slowed)" : "");
             File.AppendAllText(path, line + Environment.NewLine);
         }

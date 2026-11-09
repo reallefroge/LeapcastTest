@@ -264,6 +264,13 @@ static class SafetyTests
             double g1 = al3.Current.Gamma;
             check(g1 < g0 && g1 > 1.05, $"Camera auto light: the lights coming on is eased into over a few seconds (gamma {g0:0.00} → {g1:0.00} after 1 s)");
             check(LightSettings.Neutral.Filter("cl0").StartsWith("eq@cl0=gamma=1:contrast=1"), "Camera auto light: the filter it drives");
+            // browser pages go to FFmpeg as YUV with alpha, converted only when the page changed
+            var page = new byte[4 * 2 * 4];
+            for (int i = 0; i < 8; i++) { page[i * 4] = 255; page[i * 4 + 1] = 255; page[i * 4 + 2] = 255; page[i * 4 + 3] = (byte)(i < 4 ? 255 : 0); }
+            var yv = new Yuva(4, 2);
+            var c1 = yv.From(page); var c2 = yv.From(page);
+            check(c1 is not null && ReferenceEquals(c1, c2) && yv.Conversions == 1 && c1[0] == 235 && c1[8] == 128 && c1[10] == 128 && c1[12] == 255 && c1[19] == 0 && c1.Length == Yuva.Size(4, 2),
+                $"Browser pages: white is Y 235 / U,V 128, alpha kept, an unchanged page isn't converted again ({(c1 is null ? "null" : string.Join(",", c1))})");
             // the stand-in picture while a reader restarts at a new size
             var big = Frames.BlankI420(8, 4);
             for (int y = 0; y < 4; y++) for (int x = 0; x < 8; x++) big[y * 8 + x] = (byte)(x < 4 ? 50 : 200);

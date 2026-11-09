@@ -53,6 +53,20 @@ public sealed class WasapiAudioBridge : IAudioBridge
     public event Action<string>? DeviceError;
     /// <summary>What stream safety did (a word muted…), for the log.</summary>
     public event Action<string>? SafetyLog;
+    /// <summary>Finished sentences heard in desktop audio by the safety filter's recognizer (its transcript, shared).</summary>
+    public event Action<IReadOnlyList<CaptionWord>>? DesktopTranscribed;
+
+    /// <summary>
+    /// The safety filter listening to desktop audio right now, or null. While it is, it also provides the desktop
+    /// transcript, so no second recognizer is needed for it.
+    /// </summary>
+    public DesktopSafety? DesktopListener
+    {
+        get { lock (_lock) return _feeds.Values.FirstOrDefault(f => f.Desktop && f.Safety is { Hearing: true })?.Safety; }
+    }
+
+    /// <summary>A safety filter will listen to desktop audio (the stream runs with the delay and a filter on).</summary>
+    public bool DesktopSafetyListens => _safety.DelaySeconds > 0 && (_safety.MuteSlurs || _safety.MuteCodes);
 
     // ------------------------------------------------------------------ stream safety (desktop audio)
 
@@ -321,6 +335,7 @@ public sealed class WasapiAudioBridge : IAudioBridge
                 {
                     var safety = new DesktopSafety(_safety, SafetyModel, mic: feed.Mic);
                     safety.Log += m => SafetyLog?.Invoke(m);
+                    if (feed.Desktop) safety.Transcribed += w => DesktopTranscribed?.Invoke(w);
                     feed.Safety = safety;
                 }
                 // Created synchronously so the pipe exists before ffmpeg tries to open it.

@@ -513,7 +513,32 @@ public sealed class StreamEngine : IDisposable
 
     private readonly Timer _lightTimer;
     private readonly Dictionary<string, CameraAutoLight> _light = new();
+    private readonly HashSet<string> _denoiseOff = new();
+
+    /// <summary>Webcams whose denoise is off right now (bright room): for the health log and tests.</summary>
+    public int CamerasDenoising
+    {
+        get { var spec = _runnerSpec; if (spec is null) return 0; lock (_light) return spec.CameraDenoiseFilters.Select(f => f.Key).Distinct().Count(k => !_denoiseOff.Contains(k)); }
+    }
+
+    private PreviewRate _previewRate = PreviewRate.Full;
+    private DateTime _runnerBuiltUtc;
+    public PreviewRate PreviewRate => _previewRate;
+
+    /// <summary>
+    /// How fast the preview runs: all frames while you look at it, a third while Leapcast is behind another window,
+    /// none while it's minimized or the preview is off. Live (no restart); the stream itself never depends on it.
+    /// </summary>
+    public void SetPreviewRate(PreviewRate rate)
+    {
+        if (rate == _previewRate) return;
+        _previewRate = rate;
+        var r = _runner; var spec = _runnerSpec;
+        if (r is not null && spec is not null) r.SendCommands(PipelineBuilder.PreviewGateCommands(spec, rate));
+    }
     private int _lightBusy;
+
+    private IReadOnlySet<string> CameraDenoiseOffNow() { lock (_light) return _denoiseOff.ToHashSet(); }
 
     private IReadOnlyDictionary<string, LightSettings> CameraLightNow()
     {
@@ -533,6 +558,10 @@ public sealed class StreamEngine : IDisposable
         try
         {
             var r = _runner; var spec = _runnerSpec;
+            // a preview rate sent in the first moments may arrive before ffmpeg's graph is ready: repeat it then
+            if (r is not null && spec is not null && _runnerRequest is { } rq && rq.PreviewRate != _previewRate
+                && DateTime.UtcNow - _runnerBuiltUtc < TimeSpan.FromSeconds(6))
+                r.SendCommands(PipelineBuilder.PreviewGateCommands(spec, _previewRate));
             if (r is null || spec is null || spec.CameraLightFilters.Count == 0) return;
             foreach (var key in spec.CameraLightFilters.Select(f => f.Key).Distinct())
             {
@@ -540,6 +569,19 @@ public sealed class StreamEngine : IDisposable
                 var (mean, p95) = CameraAutoLight.Measure(frame.Frame, frame.Width, frame.Height);
                 CameraAutoLight light;
                 lock (_light) { if (!_light.TryGetValue(key, out light!)) _light[key] = light = new CameraAutoLight(); }
+                // denoise only while it's dark (a bright picture has little noise; the filter is real work every frame)
+                var dn = spec.CameraDenoiseFilters.Where(f => f.Key == key).ToList();
+                if (dn.Count > 0)
+                {
+                    bool off;
+                    lock (_light) off = _denoiseOff.Contains(key);
+                    bool want = off ? mean > 0.30 : mean > 0.36;   // a little hysteresis
+                    if (want != off)
+                    {
+                        lock (_light) { if (want) _denoiseOff.Add(key); else _denoiseOff.Remove(key); }
+                        r.SendCommands(dn.Select(f => $"{f.Name} -1 enable {(want ? 0 : 1)}"));
+                    }
+                }
                 if (light.Update(mean, p95) is not { } next) continue;
                 r.SendCommands(spec.CameraLightFilters.Where(f => f.Key == key).SelectMany(f => next.Commands(f.Name)));
             }
@@ -1282,6 +1324,8 @@ public sealed class StreamEngine : IDisposable
             // lighter rungs: smaller, slower preview (every preview frame is scaled, converted and copied to the app)
             PreviewWidth = Performance.SmallPreview ? 640 : PreviewWidthPx, PreviewHeight = Performance.SmallPreview ? 360 : PreviewHeightPx,
             PreviewFps = Performance.PreviewFps,
+            PreviewRate = _previewRate,
+            CameraDenoiseOff = CameraDenoiseOffNow(),
             AudioInputs = pipes,
             RenderedImages = rendered,
             MonitorBounds = _platform.MonitorBounds,
@@ -1338,6 +1382,9 @@ public sealed class StreamEngine : IDisposable
         var parsing = new int[] { -1 }; // index of the "Input #n" block being printed
         runner.LogLine += line => OnLogLine(line, spec, parsing);
         _runner = runner;
+        _runnerBuiltUtc = DateTime.UtcNow;
+        // the preview's rate changed while this was being built: catch up
+        if (request.PreviewRate != _previewRate) runner.SendCommands(PipelineBuilder.PreviewGateCommands(spec, _previewRate));
         _runnerShape = shape;
         _buses = buses;
         _lastProgress = null;

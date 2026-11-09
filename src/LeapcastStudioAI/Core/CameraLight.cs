@@ -6,12 +6,17 @@ namespace LeapcastStudioAI;
 public readonly record struct LightSettings(double Gamma, double Contrast, double Saturation, double Brightness)
 {
     public static readonly LightSettings Neutral = new(1, 1, 1, 0);
-    public string Filter(string name) => FormattableString.Invariant($"eq@{name}=gamma={Gamma:0.###}:contrast={Contrast:0.###}:saturation={Saturation:0.###}:brightness={Brightness:0.###}");
-    public IEnumerable<string> Commands(string name) => new[]
-    {
-        FormattableString.Invariant($"eq@{name} -1 gamma {Gamma:0.###}"), FormattableString.Invariant($"eq@{name} -1 contrast {Contrast:0.###}"),
-        FormattableString.Invariant($"eq@{name} -1 saturation {Saturation:0.###}"), FormattableString.Invariant($"eq@{name} -1 brightness {Brightness:0.###}"),
-    };
+    public bool IsNeutral => Gamma == 1 && Contrast == 1 && Saturation == 1 && Brightness == 0;
+    // a neutral correction is switched off (the filter then passes frames straight through: no work)
+    public string Filter(string name) => FormattableString.Invariant($"eq@{name}=gamma={Gamma:0.###}:contrast={Contrast:0.###}:saturation={Saturation:0.###}:brightness={Brightness:0.###}:enable={(IsNeutral ? 0 : 1)}");
+    public IEnumerable<string> Commands(string name) => IsNeutral
+        ? new[] { $"eq@{name} -1 enable 0" }
+        : new[]
+        {
+            FormattableString.Invariant($"eq@{name} -1 gamma {Gamma:0.###}"), FormattableString.Invariant($"eq@{name} -1 contrast {Contrast:0.###}"),
+            FormattableString.Invariant($"eq@{name} -1 saturation {Saturation:0.###}"), FormattableString.Invariant($"eq@{name} -1 brightness {Brightness:0.###}"),
+            $"eq@{name} -1 enable 1",
+        };
 }
 
 /// <summary>
@@ -89,6 +94,7 @@ public sealed class CameraAutoLight
         double k = _first ? 1 : 1 - Math.Exp(-seconds / 3.0);
         _first = false;
         _smoothGamma += (want - _smoothGamma) * k;
+        if (Math.Abs(_smoothGamma - 1) < 0.02) _smoothGamma = 1; // back to exactly as the camera made it (the filter switches off)
         double g = _smoothGamma;
         // a lifted dark picture looks grey and washed: a little contrast and colour back; a calmed bright one, a touch more colour
         double lift = Math.Max(0, g - 1);
