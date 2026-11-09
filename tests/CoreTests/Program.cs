@@ -1499,6 +1499,20 @@ await Task.Delay(3000);
 lock (samples) after = samples.Where(x => x.t >= switchAt).ToList();
 mids = after.Count(x => x.red is > 40 and < 215);
 Check(engine.PipelineStarts == starts && after.Last().red < 30 && mids <= 1, $"cut transition back is instant ({mids} in-between frames) and still no restart");
+// light mode (hidden sources unloaded) still switches scenes seamlessly: every scene's shown sources keep running
+var lightSw = tset.Clone(); lightSw.InstantSwitching = false; lightSw.Transition = "Fade";
+await engine.UpdateAsync(both, sceneA, lightSw, false);
+await Task.Delay(2500);
+int lsStarts = engine.PipelineStarts;
+switchAt = tclock.Elapsed.TotalSeconds;
+await engine.UpdateAsync(both, sceneB, lightSw, false);
+await Task.Delay(3000);
+lock (samples) after = samples.Where(x => x.t >= switchAt - 0.5).ToList();
+double lsGap = after.Zip(after.Skip(1), (a, b) => b.t - a.t).DefaultIfEmpty(0).Max();
+Check(engine.PipelineStarts == lsStarts && after.Last().red > 220 && lsGap < 1.0,
+    $"light mode: switching scenes is still seamless (starts {lsStarts} → {engine.PipelineStarts}, largest gap {lsGap * 1000:0} ms, red {after.Last().red})");
+await engine.UpdateAsync(both, sceneA, tset, false);
+await Task.Delay(2000);
 var rep2 = await engine.SaveReplayAsync();
 var rp2 = await ProbeAsync(rep2);
 Check(rp2.ok && rp2.duration > 5, $"replay spanning both transitions is continuous: {rp2.duration:0.0}s");

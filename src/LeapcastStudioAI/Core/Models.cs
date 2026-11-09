@@ -467,9 +467,9 @@ public sealed class StudioSettings
     public int VoiceClipSeconds { get; set; } = 50;
     public string VoiceClipFolder { get; set; } = VoiceClips.DefaultFolder;
     /// <summary>
-    /// Keep every scene and hidden source running so switching and showing are instant (more CPU/RAM). Off = light
-    /// mode: only what's on screen is captured; showing a source or switching scenes rebuilds (about a second's pause,
-    /// destinations stay connected).
+    /// Keep hidden sources running so showing one is instant (more CPU/RAM). Off = light mode: a hidden source isn't
+    /// captured; showing it rebuilds (about a second's pause, destinations stay connected). Scene switching is a
+    /// seamless fade either way: every scene's shown sources keep running.
     /// </summary>
     public bool InstantSwitching { get; set; }
     /// <summary>YouTube: pick the broadcast (scheduled or new) when going live, instead of only using the stream key.</summary>

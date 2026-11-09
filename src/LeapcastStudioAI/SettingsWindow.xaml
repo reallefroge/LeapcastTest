@@ -365,9 +365,9 @@
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">
             <StackPanel>
             <TextBlock Text="PERFORMANCE" Style="{StaticResource SectionHeader}"/>
-            <CheckBox x:Name="InstantSwitchBox" Content="Instant scene switching"/>
+            <CheckBox x:Name="InstantSwitchBox" Content="Keep hidden sources running (instant show / hide)"/>
             <TextBlock Style="{StaticResource Hint}"
-                       Text="Keeps every scene and hidden source running, so switching and showing are instant. Uses more CPU and RAM. Off (light mode): only what's on screen is captured; a switch takes about a second, and destinations stay connected."/>
+                       Text="Switching scenes is always a seamless fade. This keeps hidden sources running too, so showing one is instant. Uses more CPU and RAM. Off (light mode): a hidden source isn't captured; showing it takes about a second (destinations stay connected)."/>
             <TextBlock Text="PRIVACY" Style="{StaticResource SectionHeader}" Margin="3,14,3,8"/>
             <CheckBox x:Name="HideFromCaptureBox" Content="Hide Leapcast from display capture"/>
             <TextBlock Style="{StaticResource Hint}"

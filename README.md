@@ -53,7 +53,7 @@ low-motion games like **Wizard101** plus a webcam.
 | **Hotkeys everywhere** | Settings → Hotkeys: go live/end, record, save replay, preview, studio mode, transition, switch to each scene, and show/hide each source. They work while the game has focus, and a key combination used twice is caught when you save. |
 | **Fullscreen preview** | Right-click the preview → Fullscreen (choose the monitor). Works for the program, the studio-mode preview or the vertical canvas. Esc or double-click exits. |
 | **Reliability** | Each destination reconnects on its own with back-off; a slow destination can't stall the encoder, the recording or the other destinations, and if its upload keeps falling behind the bitrate drops 25% automatically. All inputs are wall-clock synced so game, cam, mic and desktop audio stay aligned. |
-| **Scene transitions** | Every scene stays live inside one encoder, so switching (e.g. Wizard101 → "BRB") is a smooth crossfade or a clean cut: no restart, no black frame, and the recording/replay keeps running. Audio levels crossfade too. A camera used in several scenes is opened only once. |
+| **Scene transitions** | Every scene stays live inside one encoder, so switching (e.g. Wizard101 → "BRB") is a smooth crossfade or a clean cut: no restart, no black frame, and the recording/replay keeps running. Audio levels crossfade too. A camera used in several scenes is opened only once. This holds in light mode too: only *hidden* sources are unloaded there. |
 | **Live stats** | Real upload (measured from the encoded output), average, % data saved vs constant bitrate, frame rate, connection health, and *why* each setting was chosen. |
 
 ### Recommended setup for Wizard101 + camera

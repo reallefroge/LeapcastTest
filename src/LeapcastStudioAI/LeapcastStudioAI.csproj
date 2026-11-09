@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>LeapcastStudioAI</RootNamespace>
     <AssemblyName>Leapcast Studio AI</AssemblyName>
-    <Version>0.16.0</Version>
+    <Version>0.16.1</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- exe / taskbar / Start menu icon (source art: Assets/leapcast.svg, leapcast-small.svg for 16–32 px) -->
     <ApplicationIcon>Assets\leapcast.ico</ApplicationIcon>

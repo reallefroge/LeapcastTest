@@ -407,13 +407,52 @@ public sealed class StreamEngine : IDisposable
         _scenes.Count > 1 && _scenes.Where((sc, i) => i != _activeIndex)
             .Any(sc => PipelineBuilder.CompositedLayers(sc.Sources).Any(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))));
 
-    /// <summary>The performance governor has put the pipeline in "active scene only" mode.</summary>
-    /// <remarks>Also in light mode (Settings → Advanced), except in studio mode, whose Preview needs the next scene running.</remarks>
-    private bool ActiveSceneOnly => (Performance.ActiveSceneOnly || !Settings.InstantSwitching && !StudioMode) && _scenes.Count > 1;
+    /// <summary>
+    /// The performance governor has put the pipeline in "active scene only" mode (the PC can't keep up). Otherwise
+    /// every scene is composited, so switching is always a seamless fade; light mode (Settings → Advanced) only
+    /// leaves hidden sources unloaded. Never in studio mode, whose Preview needs the next scene running.
+    /// </summary>
+    private bool ActiveSceneOnly => Performance.ActiveSceneOnly && !StudioMode && _scenes.Count > 1;
 
-    /// <summary>The scenes the pipeline composites: all of them (instant switching), or only the one on air.</summary>
-    private List<StudioScene> Composited() =>
-        ActiveSceneOnly ? new List<StudioScene> { _scenes[Math.Clamp(_activeIndex, 0, _scenes.Count - 1)] } : _scenes;
+    /// <summary>The scenes the running pipeline composites (by id), fixed while it runs.</summary>
+    private List<Guid>? _runSceneIds;
+
+    /// <summary>
+    /// The scenes the pipeline composites: all of them, or (governor) the one on air plus the scenes that only show
+    /// what it already captures (they cost almost nothing, and switching between them stays seamless).
+    /// </summary>
+    private List<StudioScene> Composited()
+    {
+        if (!ActiveSceneOnly) return _scenes;
+        if (_runner is not null && _runSceneIds is { Count: > 0 } ids)
+        {
+            var kept = ids.Select(id => _scenes.FirstOrDefault(s => s.Id == id)).ToList();
+            if (kept.All(s => s is not null) && kept.Any(s => ReferenceEquals(s, ActiveScene))) return kept!;
+        }
+        return FreshComposited();
+    }
+
+    private StudioScene ActiveScene => _scenes[Math.Clamp(_activeIndex, 0, _scenes.Count - 1)];
+
+    private List<StudioScene> FreshComposited()
+    {
+        if (!ActiveSceneOnly) return _scenes;
+        var active = ActiveScene;
+        static IEnumerable<string> VideoKeys(StudioScene sc) => PipelineBuilder.CompositedLayers(sc.Sources)
+            .Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).Select(PipelineBuilder.InputKey);
+        var have = VideoKeys(active).ToHashSet();
+        return _scenes.Where(sc => ReferenceEquals(sc, active) || VideoKeys(sc).All(have.Contains)).ToList();
+    }
+
+    /// <summary>Where a scene sits among the composited ones (the graph's scene number).</summary>
+    private int CompositedIndex(int sceneIndex)
+    {
+        if (!ActiveSceneOnly) return sceneIndex;
+        var c = Composited();
+        var sc = _scenes[Math.Clamp(sceneIndex, 0, _scenes.Count - 1)];
+        int i = c.FindIndex(x => ReferenceEquals(x, sc) || x.Id == sc.Id);
+        return i < 0 ? 0 : i;
+    }
 
     // ------------------------------------------------------------------ public operations
 
@@ -439,9 +478,10 @@ public sealed class StreamEngine : IDisposable
         // new settings from the user: give them a fair try from this PC's starting rung
         if (restartIfRunning && !_governorPaused) _governor.Reset(HardwareProfile.StartLevel(Tier));
         if (_runner is null) { _activeIndex = index; return; }
-        if (ActiveSceneOnly && index != _activeIndex)
+        if (ActiveSceneOnly && index != _activeIndex && !Composited().Any(sc => ReferenceEquals(sc, list[index]) || sc.Id == list[index].Id))
         {
-            // only the scene on air is composited (performance governor): switching rebuilds with the new one
+            // the performance governor composites only the scene on air (and those sharing its captures): a switch
+            // to a scene that needs something else rebuilds with it
             _activeIndex = index;
             _audio.Configure(AudioSources());
             await RestartAsync();
@@ -460,7 +500,7 @@ public sealed class StreamEngine : IDisposable
         }
         if (index != _activeIndex)
         {
-            Transition(_activeIndex, index);
+            Transition(CompositedIndex(_activeIndex), CompositedIndex(index));
             _activeIndex = index;
         }
         ApplyLiveState(); // sources shown/hidden, volume changes: switched live, no rebuild
@@ -626,7 +666,7 @@ public sealed class StreamEngine : IDisposable
     /// <summary>Each scene's level for an audio device as the scenes are now (hidden = 0).</summary>
     private IReadOnlyList<double> CurrentGains(AudioGainStage g) => PipelineBuilder.SceneGains(Composited(), g.Key);
 
-    private int ActiveCompositedIndex => ActiveSceneOnly ? 0 : _activeIndex;
+    private int ActiveCompositedIndex => CompositedIndex(_activeIndex);
 
     /// <summary>What a visibility switch should be now.</summary>
     private bool WantEnabled(VisibilityStage st, int active)
@@ -1150,7 +1190,8 @@ public sealed class StreamEngine : IDisposable
 
         // Pre-render text overlays.
         var rendered = new Dictionary<Guid, string>();
-        var scenes = Composited();
+        var scenes = FreshComposited();
+        _runSceneIds = scenes.Select(sc => sc.Id).ToList();
         foreach (var s in scenes.SelectMany(sc => sc.Sources).Where(s => SourceTypes.KindOf(s.Type) == SourceKind.Text))
         {
             try { if (_platform.RenderText(s, plan.Height) is { } png) rendered[s.Id] = png; } catch { }
@@ -1220,7 +1261,7 @@ public sealed class StreamEngine : IDisposable
         var request = new PipelineRequest
         {
             Scenes = scenes,
-            ActiveSceneIndex = ActiveSceneOnly ? 0 : _activeIndex,
+            ActiveSceneIndex = Math.Max(0, scenes.FindIndex(sc => ReferenceEquals(sc, ActiveScene))),
             StagedSceneIndex = StagedComposited,
             Plan = plan,
             MainBusPath = buses.TryGetValue("main", out var mb) ? mb.Path : null,
