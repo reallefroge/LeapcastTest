@@ -44,6 +44,16 @@ if (args.Length > 0 && args[0] == "--quality")
         (ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) qf++; });
     return qf == 0 ? 0 : 1;
 }
+// quick mode: your camera's look (shape, ring, background removed)
+if (args.Length > 0 && args[0] == "--camera")
+{
+    int cf = 0;
+    string cdir = args.Length > 1 ? args[1] : Path.Combine(Path.GetTempPath(), "leapcast-cam-" + Guid.NewGuid().ToString("N")[..6]);
+    LeapcastStudioAI.Vod.VodRenderer.LogPath = Path.Combine(cdir, "log.txt");
+    await VodTests.CameraAsync(Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg", cdir,
+        (ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) cf++; });
+    return cf == 0 ? 0 : 1;
+}
 // quick mode: the Wizard101 kit filling itself from a recording
 if (args.Length > 0 && args[0] == "--kit")
 {
@@ -1983,6 +1993,17 @@ await SafetySection();
 // ---------------------------------------------------------------- VOD editor
 Console.WriteLine("VOD editor (a long recording → an edited video)");
 await VodTests.RunAsync(ffmpeg, work, Check);
+#if WINDOWS_SPEECH
+// the camera's person segmentation as the app runs it (ONNX Runtime, the bundled model)
+if (Environment.GetEnvironmentVariable("LEAPCAST_SEG_MODEL") is { Length: > 0 } segModel)
+{
+    using var seg = LeapcastStudioAI.OnnxSegmenter.TryLoad(segModel);
+    var probe = seg?.Run(new byte[192 * 192 * 3]);
+    Check(probe is { Length: 192 * 192 } && probe.All(x => x >= 0 && x <= 1),
+        $"Camera: the segmentation model runs here (ONNX Runtime: {(seg is null ? "didn't load" : $"{probe!.Length} values")})");
+    if (seg is not null) await VodTests.CameraAsync(ffmpeg, Path.Combine(work, "camera-onnx"), (ok, what) => Check(true, what + " [real model; picture checks are for the stand-in]"), seg);
+}
+#endif
 #if !WINDOWS_SPEECH
 await WhisperTests.RunAsync(Check);
 #endif

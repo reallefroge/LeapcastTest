@@ -36,6 +36,9 @@ public static class VodPlanner
     public static EditPlan Plan(VodSignals s, VodEditOptions o, EditTweaks? tw = null)
     {
         tw ??= new EditTweaks();
+        // no flashes, ever (an older edit or a learned taste that had one gets a fade through black)
+        tw.TransitionStyle = TransitionKinds.Safe(tw.TransitionStyle);
+        foreach (var pick in tw.Cuts) if (pick.Style is { } ps) pick.Style = TransitionKinds.Safe(ps);
         bool Removed(double a, double b) => tw.Remove.Any(r => a < r[1] && b > r[0]);
         int n = Math.Max(1, (int)Math.Ceiling(s.Duration / Bin));
         var t0 = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -366,7 +369,8 @@ public static class VodPlanner
             }
             else k++;
         }
-        var plan = new EditPlan { Width = s.Width, Height = s.Height, Fps = s.Fps, Title = o.Title, Layout = s.Layout };
+        var plan = new EditPlan { Width = s.Width, Height = s.Height, Fps = s.Fps, Title = o.Title, Layout = s.Layout, SourceW = s.Width, SourceH = s.Height };
+        if (s.Layout?.Camera is not null) plan.Camera = new CameraLook(tw.CameraShape, tw.CameraBackground, tw.CameraRing);
         if (chosen.Count == 0) { chosen.Add((0, Math.Min(s.Duration, Math.Max(10, target - overhead)), Math.Min(s.Duration, 5), 0)); segEpisode.Add(0); }
         var best = chosen.OrderByDescending(c => c.Value).First();
         plan.BestMoment = best.Peak;
@@ -379,7 +383,7 @@ public static class VodPlanner
         var brand = o.Brand ?? new VodBrand();
         plan.Brand = brand;
         bool hook = tw.ColdOpen && tw.Hook && brand.Hook;
-        var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = tw.Letterbox, Push = tw.Zooms > 0 ? 0.07 : 0, TransIn = hook ? TransitionKinds.Flash : null };
+        var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = tw.Letterbox, Push = tw.Zooms > 0 ? 0.07 : 0, TransIn = null };
         var hookShots = new List<Piece>();
         if (hook)
         {
@@ -388,12 +392,11 @@ public static class VodPlanner
             {
                 double a = Math.Max(c.From, c.Peak - 1.0), b = Math.Min(c.To, a + 1.5);
                 if (b - a < 1) continue;
-                hookShots.Add(new Piece { Role = "cold", In = a, Out = b, Letterbox = tw.Letterbox, TransIn = hookShots.Count > 0 ? TransitionKinds.Flash : null, Push = tw.Zooms > 0 ? 0.05 : 0 });
+                hookShots.Add(new Piece { Role = "cold", In = a, Out = b, Letterbox = tw.Letterbox, Push = tw.Zooms > 0 ? 0.05 : 0 });
             }
             plan.Pieces.AddRange(hookShots);
         }
         if (tw.ColdOpen) plan.Pieces.Add(cold);
-        if (hookShots.Count == 0) cold.TransIn = null;
         // the intro: your intro clip (the same every video) or the stream itself, darkened, with your logo and name
         double titleSrc = amongUs ? Math.Max(0, coldTo - 4.0) : Math.Min(Math.Max(0, s.Duration - 4.2), coldTo);
         string? introClip = brand.IntroClip is { Length: > 0 } ic && File.Exists(ic) ? ic : null;
@@ -530,7 +533,7 @@ public static class VodPlanner
                 var options = new List<string>();
                 string why;
                 if (amongUs && lapseOk && !intoMeeting && !outOfMeeting) { options.Add(TransitionKinds.Timelapse); why = $"{gap:0} s of the same round in between: fast-forward through it"; }
-                else if (intoMeeting) { options.Add(TransitionKinds.Flash); why = "a meeting is called"; }
+                else if (intoMeeting) { options.Add(TransitionKinds.Zoom); why = "a meeting is called"; }
                 else if (outOfMeeting) { options.Add(TransitionKinds.Fade); why = "back to the game after the vote"; }
                 else if (inMeeting) { options.Add(TransitionKinds.None); options.Add(TransitionKinds.Blur); why = "within the meeting: a plain cut keeps the conversation flowing"; }
                 else if (intoDeath) { options.Add(TransitionKinds.Zoom); why = "straight into a kill"; }
@@ -538,7 +541,7 @@ public static class VodPlanner
                 else if (gap >= 45 && !newChapter) { options.Add(TransitionKinds.Whip); why = $"a jump of {gap:0} s"; }
                 else if (lapseOk && gap >= 20) { options.Add(TransitionKinds.Timelapse); why = $"{gap:0} s in between: fast-forward through it"; }
                 else { options.Add(TransitionKinds.None); options.Add(TransitionKinds.Zoom); why = "a short skip: a plain cut keeps it moving"; }
-                foreach (var st in new[] { TransitionKinds.Whip, TransitionKinds.Fade, TransitionKinds.Zoom, TransitionKinds.Flash, TransitionKinds.Glitch, TransitionKinds.Blur, TransitionKinds.Timelapse, TransitionKinds.None })
+                foreach (var st in new[] { TransitionKinds.Whip, TransitionKinds.Fade, TransitionKinds.Zoom, TransitionKinds.Glitch, TransitionKinds.Blur, TransitionKinds.Timelapse, TransitionKinds.None })
                     if (!options.Contains(st) && (st != TransitionKinds.Timelapse || lapseOk)) options.Add(st);
                 string suggested = options[0];
                 // "varied": the suggestion, but never the same look twice in a row

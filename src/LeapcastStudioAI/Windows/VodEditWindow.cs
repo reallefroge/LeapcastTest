@@ -46,6 +46,8 @@ public sealed class VodEditWindow : Window
     public VodEditWindow(StreamEngine engine, StudioSettings settings, Action save)
     {
         _engine = engine; _settings = settings; _save = save;
+        // the camera's person segmentation (for blurring or removing the background behind you), if it's installed
+        CameraLook.Segmenter ??= OnnxSegmenter.TryLoad();
         Title = "Edit a recording into a video";
         Width = 600; SizeToContent = SizeToContent.Height; ResizeMode = ResizeMode.CanMinimize;
         Background = Res("BgBrush"); Foreground = Res("TextBrush");
@@ -224,6 +226,11 @@ public sealed class VodEditWindow : Window
     private readonly ComboBox _tStyle = new() { MinWidth = 260, ItemsSource = StyleChoices.Select(TransitionKinds.Name).ToArray() };
     private readonly ComboBox _tSound = new() { MinWidth = 260, ItemsSource = SoundChoices.Select(TransitionKinds.SoundName).ToArray() };
     private readonly StackPanel _cutRows = new();
+    private readonly ComboBox _camShape = new() { Width = 170, ItemsSource = CameraLook.Shapes.Select(CameraLook.ShapeName).ToArray() };
+    private readonly ComboBox _camBg = new() { Width = 130, ItemsSource = CameraLook.Backgrounds.Select(b => "Background: " + CameraLook.BackgroundName(b).ToLowerInvariant()).ToArray(), Margin = new Thickness(6, 0, 0, 0) };
+    private readonly CheckBox _camRing = new() { Content = "Gold ring", Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _camNote = new() { TextWrapping = TextWrapping.Wrap, FontSize = 11, Margin = new Thickness(0, 3, 0, 0) };
+    private readonly StackPanel _camRow = new() { Orientation = Orientation.Horizontal };
     private readonly TextBlock _reviseHeader = new() { Text = "Revise this video", FontSize = 15, FontWeight = FontWeights.SemiBold };
     private bool _loadingVersions;
     private readonly Button _rerender = new() { Content = "Re-render with changes", MinWidth = 190 };
@@ -453,6 +460,11 @@ public sealed class VodEditWindow : Window
         r.Children.Add(sfx);
         r.Children.Add(Row("Transitions", _tStyle));
         r.Children.Add(Row("Their sound", _tSound));
+        // your camera (where the recording's layout has it): shape, ring, the background behind you
+        _camRow.Children.Add(_camShape); _camRow.Children.Add(_camBg); _camRow.Children.Add(_camRing);
+        r.Children.Add(Row("Your camera", _camRow));
+        _camNote.Foreground = Res("MutedBrush");
+        r.Children.Add(_camNote);
         r.Children.Add(Label("Cuts between clips (the editor's suggestion for each is marked ★; set one to change just that cut)"));
         r.Children.Add(new Border { Child = new ScrollViewer { Content = _cutRows, MaxHeight = 220, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
             BorderBrush = Res("LineBrush"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(6) });
@@ -619,6 +631,15 @@ public sealed class VodEditWindow : Window
         }
         if (pr.Cuts.Count == 0) _cutRows.Children.Add(new TextBlock { Text = "One clip: no cuts between clips.", Foreground = Res("MutedBrush"), FontSize = 12 });
         _rShake.IsChecked = t.Shake; _rLetterbox.IsChecked = t.Letterbox;
+        _camShape.SelectedIndex = Math.Max(0, Array.IndexOf(CameraLook.Shapes, t.CameraShape));
+        _camBg.SelectedIndex = Math.Max(0, Array.IndexOf(CameraLook.Backgrounds, t.CameraBackground));
+        _camRing.IsChecked = t.CameraRing;
+        _camRow.IsEnabled = pr.HasCamera;
+        _camNote.Text = !pr.HasCamera
+            ? "This recording has no camera layout saved with it, so its camera can't be changed (recordings made in Leapcast have one)."
+            : CameraLook.Segmenter is null
+                ? "A shape (with a gold ring) covers the camera's old square completely. Blurring or removing the background needs the segmentation model, which isn't installed here."
+                : "A shape (with a gold ring) covers the camera's old square completely. With the background removed, you're cut out frame by frame and the camera's old square is filled from the game around it.";
         _sfxVol.Value = t.SfxVolume; _sfxVolText.Text = $"{t.SfxVolume:P0}";
         _moments.Children.Clear();
         foreach (var m in pr.Moments)
@@ -674,6 +695,12 @@ public sealed class VodEditWindow : Window
                 }
         t.Cuts.RemoveAll(c => c.Style is null && c.Sound is null);
         t.Shake = _rShake.IsChecked == true; t.Letterbox = _rLetterbox.IsChecked == true;
+        if (pr.HasCamera)
+        {
+            t.CameraShape = CameraLook.Shapes[Math.Max(0, _camShape.SelectedIndex)];
+            t.CameraBackground = CameraLook.Backgrounds[Math.Max(0, _camBg.SelectedIndex)];
+            t.CameraRing = _camRing.IsChecked == true;
+        }
         t.SfxVolume = _sfxVol.Value;
         if (t.Chapters && !pr.ChapterCards) pr.ChapterCards = true; // made without, wanted now
         foreach (var cb in _moments.Children.OfType<StackPanel>().SelectMany(l => l.Children.OfType<CheckBox>()))

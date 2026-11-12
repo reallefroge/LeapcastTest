@@ -54,6 +54,8 @@ jobs:
           # captions: the bundled whisper-cli and the base.en model (the app downloads it on first use)
           gh release download speech-whisper -R $env:GITHUB_REPOSITORY -p ggml-base.en.bin -D $env:RUNNER_TEMP --clobber
           $env:LEAPCAST_WHISPER_CLI = (Resolve-Path "publish/win-x64/speech/whisper/whisper-cli.exe").Path
+          # the camera's person segmentation model (bundled under models\)
+          $env:LEAPCAST_SEG_MODEL = (Resolve-Path "publish/win-x64/models/human_segmentation_pphumanseg_2023mar.onnx").Path
           $env:LEAPCAST_WHISPER_MODEL = Join-Path $env:RUNNER_TEMP "ggml-base.en.bin"
           $env:LEAPCAST_REQUIRE_WHISPER = "1"
           New-Item -ItemType Directory -Force smoke | Out-Null

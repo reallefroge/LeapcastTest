@@ -104,6 +104,29 @@ foreach ($f in 'whisper-cli.exe','whisper.dll','ggml.dll','ggml-base.dll','ggml-
 & (Join-Path $WhisperDir "whisper-cli.exe") --help 2>&1 | Select-Object -First 3 | Out-Host
 Write-Host "Bundled Whisper ($WhisperTag): $((Get-ChildItem $WhisperDir).Count) files" -ForegroundColor Green
 
+# ---------------------------------------------------------------- the camera's person segmentation (VOD editor: blur / remove your background)
+# OpenCV Zoo's PP-HumanSeg (Apache 2.0), kept as a release asset of this repository by .github/workflows/fetch-segmentation.yml.
+$SegModel = "human_segmentation_pphumanseg_2023mar.onnx"
+$SegSha = "552d8a984054e59b5d773d24b9b12022b22046ceb2bbc4c9aaeaceb36a9ddf24"
+$segDest = Join-Path $CacheDir $SegModel
+New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+if ((Test-Path $segDest) -and ((Get-FileHash $segDest -Algorithm SHA256).Hash.ToLowerInvariant() -ne $SegSha)) { Remove-Item $segDest }
+if (-not (Test-Path $segDest) -and $env:GITHUB_REPOSITORY) {
+    if (-not $env:GH_TOKEN -and $env:GITHUB_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
+    try { gh release download camera-segmentation -R $env:GITHUB_REPOSITORY -p $SegModel -p LICENSE.txt -D $CacheDir --clobber 2>&1 | Out-Host } catch { }
+}
+if (-not (Test-Path $segDest)) {
+    Write-Host "Downloading $SegModel from its official source..." -ForegroundColor Cyan
+    Invoke-WebRequest "https://huggingface.co/opencv/human_segmentation_pphumanseg/resolve/main/$SegModel" -OutFile $segDest
+}
+$h = (Get-FileHash $segDest -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($h -ne $SegSha) { Remove-Item $segDest -ErrorAction SilentlyContinue; throw "$SegModel checksum mismatch ($h)." }
+$ModelsDir = Join-Path $PublishDir "models"
+New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
+Copy-Item $segDest $ModelsDir
+if (Test-Path (Join-Path $CacheDir "LICENSE.txt")) { Copy-Item (Join-Path $CacheDir "LICENSE.txt") (Join-Path $ModelsDir "PP-HumanSeg-LICENSE.txt") }
+Write-Host "Bundled the camera segmentation model ($SegModel)" -ForegroundColor Green
+
 # ---------------------------------------------------------------- FFmpeg (the media engine)
 if (-not $SkipFfmpeg) {
     New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null

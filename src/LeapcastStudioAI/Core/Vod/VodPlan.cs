@@ -58,11 +58,15 @@ public sealed record CutInfo(double At, double From, string Style, string Sound,
 public static class TransitionKinds
 {
     public const string None = "none", Whip = "whip", Fade = "fade", Flash = "flash", Blur = "blur", Zoom = "zoom", Glitch = "glitch", Timelapse = "timelapse", Mixed = "mixed";
-    public static readonly string[] Styles = { None, Whip, Fade, Flash, Blur, Zoom, Glitch, Timelapse };
+    /// <summary>The looks on offer. Never a flash: flashing light can be a real problem for viewers (light sensitivity), so a
+    /// flash isn't a choice anywhere; an old edit or a request that names one gets a fade through black instead.</summary>
+    public static readonly string[] Styles = { None, Whip, Fade, Blur, Zoom, Glitch, Timelapse };
+    /// <summary>A style that's allowed (a flash becomes a fade through black).</summary>
+    public static string Safe(string style) => style == Flash ? Fade : style;
     public static readonly string[] Sounds = { "none", "whoosh", "soft", "pop", "impact", "riser" };
     public static string Name(string style) => style switch
     {
-        None => "Cut", Whip => "Whip pan", Fade => "Fade through black", Flash => "Flash to white", Blur => "Blur", Zoom => "Zoom punch",
+        None => "Cut", Whip => "Whip pan", Fade => "Fade through black", Flash => "Fade through black", Blur => "Blur", Zoom => "Zoom punch",
         Glitch => "Glitch", Timelapse => "Timelapse (fast-forward the time between)", Mixed => "Varied (the editor picks per cut)", _ => style,
     };
     public static string SoundName(string sound) => sound switch
@@ -114,6 +118,11 @@ public sealed class EditPlan
     /// <summary>The best moment (source seconds): the thumbnail's frame.</summary>
     public double BestMoment { get; set; }
     public ClipLayout? Layout { get; init; }
+    /// <summary>The recording's own size (the plan's may be smaller: the quick preview).</summary>
+    public int SourceW { get; init; }
+    public int SourceH { get; init; }
+    /// <summary>Your camera's look (shape, background) where it sits on the picture.</summary>
+    public CameraLook Camera { get; set; } = new();
     public double Duration => Pieces.Count == 0 ? 0 : Pieces[^1].At + FramesOf(Pieces[^1]) / Fps;
     /// <summary>A piece's length in whole frames (every piece is rendered to exactly this many).</summary>
     public int FramesOf(Piece p) => Math.Max(1, (int)Math.Round(p.Length * Fps));
@@ -121,7 +130,7 @@ public sealed class EditPlan
     /// <summary>The same edit at another size (the quick preview: everything placed the same, text scaled with it).</summary>
     public EditPlan Resized(int width, int height, double fps)
     {
-        var p = new EditPlan { Width = width, Height = height, Fps = fps, Title = Title, Layout = Layout };
+        var p = new EditPlan { Width = width, Height = height, Fps = fps, Title = Title, Layout = Layout, SourceW = SourceW, SourceH = SourceH, Camera = Camera };
         p.Pieces.AddRange(Pieces); p.Sfx.AddRange(Sfx); p.Music.AddRange(Music); p.Texts.AddRange(Texts); p.Captions.AddRange(Captions);
         p.Chapters.AddRange(Chapters); p.Moments.AddRange(Moments); p.Cuts.AddRange(Cuts);
         p.MusicVolume = MusicVolume; p.SfxVolume = SfxVolume; p.Brand = Brand; p.EvenLoudness = EvenLoudness; p.BestMoment = BestMoment;

@@ -13,6 +13,9 @@
   </PropertyGroup>
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
     <PackageReference Include="System.Speech" Version="8.0.0" />
+    <!-- the camera's person segmentation (the app's own runner for the model) -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+    <Compile Include="../../src/LeapcastStudioAI/Platform/OnnxSegmenter.cs" />
     <!-- libvosk.dll (the managed wrapper isn't used: Core/VoskApi.cs calls libvosk directly) -->
     <PackageReference Include="Vosk" Version="0.3.38" ExcludeAssets="compile" />
     <!-- the GPU canvas, tested with Windows' software renderer (WARP: no graphics card on the test machine) -->

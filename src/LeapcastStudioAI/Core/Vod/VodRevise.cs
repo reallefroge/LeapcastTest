@@ -40,6 +40,11 @@ public sealed class EditTweaks
     public bool EndScreen { get; set; } = true;
     /// <summary>Among Us: when you describe where you were in a meeting (on your mic), a fast replay of your round over it.</summary>
     public bool VarChecks { get; set; } = true;
+    /// <summary>Your camera's shape ("" as recorded, rounded, oval, circle) and background ("" as recorded, blurred, removed).</summary>
+    public string CameraShape { get; set; } = "";
+    public string CameraBackground { get; set; } = "";
+    /// <summary>A thin gold ring around a shaped camera.</summary>
+    public bool CameraRing { get; set; } = true;
     /// <summary>VAR checks you asked for one by one (where you said it, recording seconds): shown even with VAR checks off.</summary>
     public List<double> VarOn { get; set; } = new();
     /// <summary>VAR checks you turned off one by one (recording seconds).</summary>
@@ -167,6 +172,9 @@ public sealed class EditStyle
         t.Captions = Pick(x => x.Captions, "no captions");
         t.Chapters = Pick(x => x.Chapters, "no chapters");
         t.VarChecks = Pick(x => x.VarChecks, "no VAR checks");
+        t.CameraShape = Pick(x => x.CameraShape, "camera:", v => v.Length == 0 ? "square" : CameraLook.ShapeName(v).ToLowerInvariant())!;
+        t.CameraBackground = Pick(x => x.CameraBackground, "camera background:", v => CameraLook.BackgroundName(v).ToLowerInvariant())!;
+        t.CameraRing = Pick(x => x.CameraRing, "no ring around the camera");
         t.Pace = Pick(x => x.Pace, "pace:", v => v < 0 ? "tighter" : "relaxed");
         t.Zooms = Pick(x => x.Zooms, "zooms:", v => v switch { 0 => "none", 1 => "fewer", 3 => "more", _ => "normal" });
         t.Emphasis = Pick(x => x.Emphasis, "focus:", v => v < 0 ? "more action" : "more funny moments");
@@ -223,6 +231,8 @@ public sealed class VodProject
     public List<EditMoment> Moments { get; set; } = new();
     /// <summary>Where you explained where you were in a meeting (Among Us), shown as a VAR check or not.</summary>
     public List<VarClaim> VarClaims { get; set; } = new();
+    /// <summary>The recording's layout has your camera in it (so its look can be changed).</summary>
+    public bool HasCamera { get; set; }
     public double Duration { get; set; }
 
     public sealed record PieceInfo(string Role, double In, double Out, double At, double Length, double Speed);
@@ -253,6 +263,7 @@ public sealed class VodProject
         Moments = plan.Moments.ToList();
         Cuts = plan.Cuts.ToList();
         VarClaims = plan.VarClaims.ToList();
+        HasCamera = plan.Layout?.Camera is not null;
         Duration = plan.Duration;
     }
 
@@ -412,6 +423,9 @@ public static class EditFeedback
             // a part at a time that isn't worth keeping ("at 4:12: this part is boring"): that part goes, the pace stays
             bool partNotWanted = times.Count > 0 && Regex.IsMatch(s, @"\b(boring|dull|pointless|unnecessary|not needed|do not need|nothing happens|dead air|filler|drags?|too long|not funny|not interesting|cringe|hate|awful|aweful|terrible|horrible|garbage|trash|bad|worst|lame|sucks?)\b")
                                  && !Regex.IsMatch(s, @"\b(transitions?|music|captions?|subtitles?|sound effects|zooms?)\b");
+
+            // ---- your camera: its shape, the background behind you, the ring ("make my camera oval", "remove my background")
+            if (Camera(s, t, project, ok, not, raw)) continue;
 
             // ---- a VAR check at a time ("show what I did at 5:10", "no replay at 7:02")
             if (times.Count > 0 && Regex.IsMatch(s, @"\b(var|replay|what i did|my round|my pathing|where i was|recall)\b"))
@@ -578,11 +592,13 @@ public static class EditFeedback
             : Has(s, @"\bglitch\w*") ? TransitionKinds.Glitch
             : Has(s, @"\bwhip\w*|\bswipes?\b|\bpans?\b") ? TransitionKinds.Whip
             : Has(s, @"\b(cross ?fades?|dissolves?|fades?|fading|dip to black)\b") && !Has(s, @"\bmusic\b") ? TransitionKinds.Fade
-            : Has(s, @"\b(flash\w*|white)\b") && !Has(s, @"\bred flash") ? TransitionKinds.Flash
+            : Has(s, @"\b(flash\w*|white)\b") ? TransitionKinds.Fade   // (never a flash: a fade through black)
             : Has(s, @"\bblur\w*") ? TransitionKinds.Blur
             : Has(s, @"\bzoom\w*\b.*\btransitions?\b|\btransitions?\b.*\bzoom\w*|\bpunch\w*") ? TransitionKinds.Zoom
             : Has(s, @"\b(plain|hard|straight|simple|regular) cuts?\b|\bjust cut\b") ? TransitionKinds.None
             : null;
+        if (Has(s, @"\bflash\w*|\bstrob\w*") && !Off(s))
+            ok.Add("No flashes: flashing light can be a problem for viewers, so the editor never uses it (a fade through black instead)");
         bool variety = Has(s, @"\b(mix\w*|vary|varied|variety|variation\w*|different (ones|kinds|types|transitions|sounds)|random\w*|switch (it |them )?up|change (it |them )?up)\b");
         bool transitions = styleReq is not null && (styleReq != TransitionKinds.Zoom || Has(s, @"\btransition")) || Has(s, @"\btransitions?\b|\bwhoosh\b");
         if (styleReq == TransitionKinds.Blur && !Has(s, @"\btransition|\bbetween|\bcuts?\b")) transitions = Has(s, @"\btransitions?\b");
@@ -749,6 +765,51 @@ public static class EditFeedback
         if (Has(s, @"\b(funnier|more funny|more laughs|more jokes|funny moments|more banter|more talking)\b")) { t.Emphasis = 1; ok.Add("More of the funny moments"); }
         else if (Has(s, @"\b(more action|more fights?|more combat|more gameplay|more boss|more kills|more of the game|more playing)\b")) { t.Emphasis = -1; ok.Add("More of the action"); }
         if (Has(s, @"\bmore (meetings|discussion|arguing|accusations)\b")) { t.Emphasis = 1; ok.Add("More of the meetings"); }
+    }
+
+    /// <summary>Your camera's shape, background and ring, from what you said (true when it was about the camera).</summary>
+    private static bool Camera(string s, EditTweaks t, VodProject project, List<string> ok, List<string> not, string raw)
+    {
+        bool aboutCam = Has(s, @"\b(camera|cam|webcam|web cam|face ?cam|my face|video capture|capture device|capture|my video|of me|behind me)\b");
+        bool aboutBg = Has(s, @"\bbackground\b") && !Has(s, @"\bbackground (music|noise|sound|audio|track)\b|\bmusic\b");
+        string? shape = Has(s, @"\b(oval|ovals|ellipse|elliptical|egg)\b") ? CameraLook.Oval
+            : Has(s, @"\b(circle|circular)\b|\bround (camera|cam|webcam|frame|shape)\b") ? CameraLook.Circle
+            : Has(s, @"\brounded\b|\bround(ed)? corners?\b") ? CameraLook.Rounded
+            : Has(s, @"\b(square|rectangle|rectangular|normal shape|original shape|as it was)\b") ? "" : null;
+        bool removeBg = aboutBg && Has(s, @"\b(remove\w*|get rid of|cut (me )?out|delete|erase|hide|take (it )?out|lose|no|without|green ?screen|transparent|digitally)\b") && !Has(s, @"\bblur");
+        bool blurBg = aboutBg && Has(s, @"\bblur\w*");
+        bool keepBg = aboutBg && Has(s, @"\b(keep|bring back|restore|put back|normal|original|as it was)\b");
+        bool ring = Has(s, @"\b(ring|border|outline|rim)\b");
+        if (shape is null && !aboutBg && !(ring && (aboutCam || t.CameraShape.Length > 0))) return false;
+        if (shape is null && !removeBg && !blurBg && !keepBg && !ring) return false;
+        if (!project.HasCamera && project.Pieces.Count > 0)
+        {
+            not.Add($"{raw} (this recording has no camera the editor knows of: its layout wasn't saved with it. Recordings made in Leapcast have it)");
+            return true;
+        }
+        if (shape is not null && (aboutCam || aboutBg || shape.Length > 0))
+        {
+            t.CameraShape = Off(s) && shape.Length > 0 ? "" : shape;
+            ok.Add(t.CameraShape.Length == 0 ? "Camera: square, as recorded"
+                : $"Camera: {CameraLook.ShapeName(t.CameraShape).ToLowerInvariant()}{(t.CameraRing ? " with a thin gold ring" : "")}, big enough to cover its old square");
+        }
+        if (removeBg || blurBg || keepBg)
+        {
+            t.CameraBackground = keepBg ? "" : blurBg ? CameraLook.Blurred : CameraLook.Removed;
+            ok.Add(t.CameraBackground switch
+            {
+                CameraLook.Removed => "Camera: the background behind you removed (you're cut out frame by frame; the camera's old square is filled from the game around it)",
+                CameraLook.Blurred => "Camera: the background behind you blurred",
+                _ => "Camera: background as recorded",
+            });
+        }
+        if (ring && shape is null || ring && Has(s, @"\b(no|without|remove|hide|lose|get rid of)\b.*\b(ring|border|outline|rim)\b"))
+        {
+            t.CameraRing = !Has(s, @"\b(no|without|remove|hide|lose|get rid of)\b.*\b(ring|border|outline|rim)\b");
+            ok.Add(t.CameraRing ? "Camera: a thin gold ring around it" : "Camera: no ring around it");
+            if (t.CameraRing && t.CameraShape.Length == 0) { t.CameraShape = CameraLook.Rounded; ok.Add("(a ring goes around a shape: rounded corners)"); }
+        }
+        return ok.Count > 0;
     }
 
     public static string Clock(double s) => s >= 3600 ? TimeSpan.FromSeconds(s).ToString(@"h\:mm\:ss") : TimeSpan.FromSeconds(Math.Max(0, s)).ToString(@"m\:ss");

@@ -131,6 +131,17 @@ static class VodTests
         }, new VodEditOptions("Among Us", 120));
         check(noMic.Pieces.All(p => p.Overlay is null), "…only from your microphone: without a mic track (words from the speakers) there's no VAR check");
 
+        // never a flash: not offered, not suggested, and an old edit or a request for one gets a fade through black
+        var flashy = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120), new EditTweaks { TransitionStyle = TransitionKinds.Flash, Cuts = { new CutPick { From = with.Cuts[0].From, Style = TransitionKinds.Flash } } });
+        var mixedAll = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120), new EditTweaks { TransitionStyle = TransitionKinds.Mixed });
+        var fp = new VodProject { TargetSeconds = 120, Duration = 120 };
+        var fr = EditFeedback.Apply("use flash transitions", fp);
+        bool NoFlash(EditPlan pl) => pl.Pieces.All(p => p.TransIn != TransitionKinds.Flash && p.TransOut != TransitionKinds.Flash)
+                                     && pl.Cuts.All(c => c.Style != TransitionKinds.Flash && c.Suggested != TransitionKinds.Flash && !c.Options.Contains(TransitionKinds.Flash));
+        check(!TransitionKinds.Styles.Contains(TransitionKinds.Flash) && NoFlash(flashy) && NoFlash(mixedAll) && NoFlash(with) && flashy.Cuts.Any(c => c.Style == TransitionKinds.Fade)
+              && fp.Tweaks.TransitionStyle == TransitionKinds.Fade && fr.Understood.Any(u => u.StartsWith("No flashes")),
+            $"No flashes anywhere: not a choice, never suggested, an old flash becomes a fade (“use flash transitions” → {string.Join("; ", fr.Understood)})");
+
         // the editor's suggestions: with VAR checks off, it suggests the one where you explained where you were;
         // applying the suggestion shows that replay (and only that one)
         var twOff = new EditTweaks { VarChecks = false };
@@ -213,6 +224,14 @@ static class VodTests
             ("it drags", t => t.Pace == -1),
             ("get rid of the black bars", t => !t.Letterbox),
             ("Audio is quiet one clip, loud another", t => t.EvenLoudness),
+            ("make the background oval shaped", t => t.CameraShape == CameraLook.Oval && t.CameraBackground == ""),
+            ("digitally remove my background", t => t.CameraBackground == CameraLook.Removed),
+            ("remove the background behind me", t => t.CameraBackground == CameraLook.Removed),
+            ("blur my background", t => t.CameraBackground == CameraLook.Blurred),
+            ("make my webcam a circle", t => t.CameraShape == CameraLook.Circle),
+            ("rounded corners on my cam", t => t.CameraShape == CameraLook.Rounded),
+            ("no gold ring around the camera", t => !t.CameraRing),
+            ("the background music is too loud", t => t.MusicVolume < 1 && t.CameraBackground == ""),
             ("no hook at the start", t => !t.Hook),
             ("remove the teaser", t => !t.Hook),
             ("get rid of the outro", t => !t.EndScreen),
@@ -271,9 +290,9 @@ static class VodTests
         var roles = string.Join(",", plan.Pieces.Select(p => p.Role).Distinct());
         bool skipsLoading = !plan.Pieces.Any(p => p.Role is "moment" or "slow" or "face" && p.In < 88 && p.Out > 62);
         int firstTitle = plan.Pieces.FindIndex(p => p.Role == "title");
-        check(firstTitle >= 2 && plan.Pieces.Take(firstTitle).All(p => p is { Role: "cold", Letterbox: true }) && plan.Pieces[0].TransIn is null && plan.Pieces[1].TransIn == TransitionKinds.Flash
+        check(firstTitle >= 2 && plan.Pieces.Take(firstTitle).All(p => p is { Role: "cold", Letterbox: true }) && plan.Pieces.All(p => p.TransIn != TransitionKinds.Flash && p.TransOut != TransitionKinds.Flash)
               && plan.Pieces[firstTitle] is { Mute: true, Darken: true } && plan.Pieces[^1] is { Role: "end", Hold: >= 19 } && plan.Texts.Any(t => t.Kind == "endscreen") && plan.Texts.Any(t => t.Kind == "hook") && skipsLoading,
-            $"…story: a hook (big moments in flashes, then the run-up to the best one, letterboxed), your intro, the moments in order, a 20 s end screen; the loading screen is left out ({roles})");
+            $"…story: a hook (big moments in quick cuts, never a flash, then the run-up to the best one, letterboxed), your intro, the moments in order, a 20 s end screen; the loading screen is left out ({roles})");
         var reacts = plan.Pieces.Where(p => p.Role == "moment").SelectMany(p => p.Zooms).Count();
         check(plan.Pieces.Any(p => p.Role == "slow" && p.In < 216 && p.Out > 216) && plan.Pieces.Any(p => p.Role == "face") && reacts > 0,
             $"…the death is in slow motion, a reaction cuts to your face, and reactions get punch-ins ({reacts})");
@@ -372,7 +391,73 @@ static class VodTests
         check(proj.QualityNote.StartsWith("Checked before saving"), $"…every video is checked before it's saved: {proj.QualityNote}");
 
         await QualityAsync(ffmpeg, Path.Combine(work, "quality"), check);
+        await CameraAsync(ffmpeg, Path.Combine(work, "camera"), check);
         await KitAsync(ffmpeg, Path.Combine(work, "kit"), check);
+    }
+
+    /// <summary>A stand-in for the segmentation model: "you" are a disc in the middle of the camera.</summary>
+    private sealed class DiscSegmenter : CameraLook.ISegmenter
+    {
+        public int Size => 192;
+        public float[] Run(byte[] rgb)
+        {
+            var p = new float[Size * Size];
+            for (int y = 0; y < Size; y++) for (int x = 0; x < Size; x++)
+                p[y * Size + x] = Math.Pow((x - 96) / 50.0, 2) + Math.Pow((y - 96) / 60.0, 2) <= 1 ? 1f : 0f;
+            return p;
+        }
+    }
+
+    /// <summary>
+    /// Your camera's look: an oval with a gold ring that covers the camera's old square, and the background behind
+    /// you removed (the old square filled from the game around it); "you" stay exactly as recorded.
+    /// </summary>
+    public static async Task CameraAsync(string ffmpeg, string dir, Action<bool, string> check, CameraLook.ISegmenter? segmenter = null)
+    {
+        Directory.CreateDirectory(dir);
+        string src = Path.Combine(dir, "cam.mp4");
+        // the game (a moving test picture) with the camera (solid blue) on top, bottom right
+        await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=12",
+            "-f", "lavfi", "-i", "color=c=0x2050e0:s=320x240:r=30:d=12", "-f", "lavfi", "-i", "sine=f=300:d=12",
+            "-filter_complex", "[0:v][1:v]overlay=900:420[v]", "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
+            "-c:a", "aac", "-shortest", src }, TimeSpan.FromMinutes(2), CancellationToken.None);
+        var signals = await VodAnalyzer.AnalyzeAsync(ffmpeg, src, null, CancellationToken.None, useWhisper: false);
+        var lay = new ClipLayout(1280, 720, new LayoutRect(0, 0, 1280, 720), new LayoutRect(900, 420, 320, 240));
+        EditPlan Make(CameraLook look)
+        {
+            var pl = new EditPlan { Width = 1280, Height = 720, Fps = 30, Title = "camera", Layout = lay, SourceW = 1280, SourceH = 720, Camera = look };
+            pl.Pieces.Add(new Piece { Role = "moment", In = 2, Out = 6, At = 0 });
+            return pl;
+        }
+        var old = CameraLook.Segmenter;
+        CameraLook.Segmenter = segmenter ?? new DiscSegmenter();
+        try
+        {
+            var plan = Make(new CameraLook(CameraLook.Oval, CameraLook.Removed, true));
+            var args = new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "16" };
+            var res = await VodRenderer.RenderAsync(ffmpeg, src, plan, Path.Combine(dir, "out"), "camera", args, signals, null, CancellationToken.None, Path.Combine(dir, "cache"));
+            string png = Path.Combine(dir, "frame.png");
+            await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-y", "-v", "error", "-ss", "2", "-i", res.Video, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", png + ".rgb" }, TimeSpan.FromMinutes(1), CancellationToken.None);
+            await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-y", "-v", "error", "-ss", "2", "-i", res.Video, "-frames:v", "1", png }, TimeSpan.FromMinutes(1), CancellationToken.None);
+            var rgb = File.ReadAllBytes(png + ".rgb");
+            (int R, int G, int B) Px(int x, int y) { int i = (y * 1280 + x) * 3; return (rgb[i], rgb[i + 1], rgb[i + 2]); }
+            bool Blue((int R, int G, int B) c) => c.B > c.R + 80 && c.B > c.G + 60;   // (after the colour grade)
+            // the camera square: 900..1220 × 420..660, middle (1060, 540); the oval's box is √2 bigger
+            var you = Px(1060, 540);                 // inside "you"
+            var behind = Px(1205, 435);              // the camera's old corner: not you, inside the oval
+            var box = CameraLook.Box(lay.Camera!.Value, CameraLook.Oval);
+            int ringX = (int)(box.X + box.W / 2), ringY = (int)box.Y + 2; // the oval's top edge
+            var ring = Px(ringX, Math.Clamp(ringY, 0, 719));
+            var game = Px(200, 200);
+            check(Blue(you) && !Blue(behind) && ring.R > 150 && ring.R > ring.B + 60 && !Blue(game),
+                $"Camera: oval with a gold ring over the old square, background removed, you as recorded (you {you}, behind you {behind}, ring {ring})");
+            var masks = Directory.GetFiles(Path.Combine(dir, "cache"), "m-*.mkv");
+            check(masks.Length == 1, $"…the mask of you is made once and kept with the clips ({masks.Length})");
+            // as recorded: nothing changes (no mask made, the camera untouched)
+            var plain = Make(new CameraLook());
+            check(!VodRenderer.PieceArgs(src, plain.Pieces[0], plain, "OUT").Any(a => a.Contains("alphamerge")), "…as recorded: the camera is left alone");
+        }
+        finally { CameraLook.Segmenter = old; }
     }
 
     /// <summary>

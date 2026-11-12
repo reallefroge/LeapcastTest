@@ -123,6 +123,23 @@ public static class VodRenderer
     {
         // pieces are kept between revisions (named after exactly how they're made): an unchanged one isn't made again
         if (pieceCache is not null) Directory.CreateDirectory(pieceCache);
+        CameraCacheDir = pieceCache ?? work;
+        // the mask of you for every piece whose camera background changes (made once: kept with the pieces)
+        var masks = plan.Pieces.Select(p => (Piece: p, Mask: MaskFor(source, p, plan))).Where(x => x.Mask is not null && !File.Exists(x.Mask)).ToList();
+        if (masks.Count > 0)
+        {
+            int md = 0;
+            var rect = SourceCamRect(plan);
+            await System.Threading.Tasks.Parallel.ForEachAsync(masks, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, BackgroundWork.Parallel / 2), CancellationToken = ct },
+                async (x, token) =>
+                {
+                    try { await CameraLook.MaskAsync(ffmpeg, source, x.Piece.In, x.Piece.Out - x.Piece.In + 0.1, plan.Fps, rect, x.Mask!, token); }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex) { Note("camera mask: " + ex.Message); }
+                    int d = Interlocked.Increment(ref md);
+                    progress?.Report((0.02 + 0.03 * d / masks.Count, $"Finding you in the camera ({d} of {masks.Count} clips)"));
+                });
+        }
         // pieces are encoded on the graphics card when the stream's encoder is one and you're not live (the encode
         // is over half of a piece's time on the processor); every piece with the same encoder, so they join cleanly
         string enc = !BackgroundWork.Live && HardwareEncoderOf(videoArgs) is { } hw ? hw : "libx264";
@@ -391,6 +408,9 @@ public static class VodRenderer
             v.Add($"scale={W}:{H}:flags=bicubic,crop={(int)cw}:{(int)ch}:{(int)x0}:{(int)y0}");
         }
         v.Add($"scale={W}:{H}:flags=lanczos,setsar=1");
+        // your camera's look (its shape, the background behind you): its own small graph, spliced in here
+        string? camLook = level < 2 ? CameraGraph(p, plan, args, len) : null;
+        if (camLook is not null) v.Add(CamToken);
 
         // the zoom over time: punch-ins (eased), a slow push, room for whips and shake
         var z = new List<string> { "1" };
@@ -433,7 +453,7 @@ public static class VodRenderer
                 string bar = $"ih*0.105*min(1,t/0.45)";
                 v.Add($"drawbox=x=0:y=0:w=iw:h='{bar}':color=black:t=fill,drawbox=x=0:y='ih-{bar}':w=iw:h='{bar}':color=black:t=fill");
             }
-            if (p.Role == "slow") v.Add("drawbox=x=0:y=0:w=iw:h=ih:color=red@0.28:t=fill:enable='lt(t,0.1)',eq=saturation=0.7:contrast=1.08");
+            if (p.Role == "slow") v.Add("eq=saturation=0.7:contrast=1.08"); // (no flash of colour: never any flashing)
             // the transitions' looks at this clip's edges
             string inWin = $"lt(t,{I(edge)})", outWin = $"gte(t,{I(len - edge)})";
             foreach (var (style, isIn) in new[] { (p.TransIn, true), (p.TransOut, false) })
@@ -441,8 +461,8 @@ public static class VodRenderer
                 string win = isIn ? inWin : outWin;
                 switch (style)
                 {
-                    case TransitionKinds.Fade: v.Add(isIn ? $"fade=t=in:st=0:d={I(edge)}" : $"fade=t=out:st={I(len - edge)}:d={I(edge)}"); break;
-                    case TransitionKinds.Flash: v.Add(isIn ? "fade=t=in:st=0:d=0.18:color=white" : $"fade=t=out:st={I(len - 0.12)}:d=0.12:color=white"); break;
+                    // (a flash is never drawn: an old plan that had one dips to black instead)
+                    case TransitionKinds.Fade or TransitionKinds.Flash: v.Add(isIn ? $"fade=t=in:st=0:d={I(edge)}" : $"fade=t=out:st={I(len - edge)}:d={I(edge)}"); break;
                     case TransitionKinds.Blur: v.Add($"gblur=sigma=18:enable='{win}'"); break;
                     case TransitionKinds.Glitch:
                         string g = isIn ? "lt(t,0.15)" : $"gte(t,{I(len - 0.15)})";
@@ -494,12 +514,114 @@ public static class VodRenderer
                     $"[1:v]setpts=(PTS-STARTPTS)/{I(sp)}+{I(ov.Start)}/TB,fps={I(F)},scale={ow}:{oh}:flags=bicubic,pad={ow + 8}:{oh + 8}:4:4:color=white[o];" +
                     $"[m][o]overlay=x='{slide}':y={y0}:eof_action=pass:enable='between(t,{I(ov.Start)},{I(ov.Start + ov.Length)})',format=yuv420p[v];" + audio + "[a]";
         }
+        if (camLook is not null) graph = graph.Replace("," + CamToken + ",", "[k0];" + camLook + ";[k9]");
         args.AddRange(new[] { "-filter_complex", graph, "-map", "[v]", "-map", "[a]", "-frames:v", frames.ToString(CultureInfo.InvariantCulture),
             "-threads", BackgroundWork.Threads.ToString(CultureInfo.InvariantCulture),
         });
         args.AddRange(PieceVideo(encoder));
         args.AddRange(new[] { "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-t", I(len), output });
         return args;
+    }
+
+    private const string CamToken = "{CAMERA}";
+
+    /// <summary>Where the camera's shapes, rings and masks of you are kept (the pieces' cache, or the render's work folder).</summary>
+    public static string CameraCacheDir { get; set; } = Path.GetTempPath();
+
+    /// <summary>The pieces your camera's look applies to: the recording's own footage, at normal or slow speed.</summary>
+    public static bool CameraApplies(Piece p, EditPlan plan) =>
+        plan.Camera.Any && plan.Layout is { CanvasW: > 0, Camera: not null } && p.Crop is null && p.Source is null && p.Hold <= 0
+        && p.Speed <= 1.01 && p.Role is "cold" or "moment" or "slow";
+
+    /// <summary>The camera's square in the picture of a plan (its pixels), inside the frame.</summary>
+    private static LayoutRect CamRect(EditPlan plan, int W, int H)
+    {
+        var lay = plan.Layout!; var c = lay.Camera!.Value;
+        double sx = (double)W / lay.CanvasW, sy = (double)H / lay.CanvasH;
+        double x = Math.Clamp(Math.Round(c.X * sx), 0, W - 4), y = Math.Clamp(Math.Round(c.Y * sy), 0, H - 4);
+        double w = Math.Min(W - x, Math.Round(c.W * sx)), h = Math.Min(H - y, Math.Round(c.H * sy));
+        return new LayoutRect(x, y, Math.Max(4, (int)w & ~1), Math.Max(4, (int)h & ~1));
+    }
+
+    /// <summary>The camera's square in the recording's own pixels (what the mask of you is made from).</summary>
+    public static LayoutRect SourceCamRect(EditPlan plan) => CamRect(plan, plan.SourceW > 0 ? plan.SourceW : plan.Width, plan.SourceH > 0 ? plan.SourceH : plan.Height);
+
+    /// <summary>The mask of you for a piece (made beforehand; null when the background isn't changed or no model is there).</summary>
+    public static string? MaskFor(string source, Piece p, EditPlan plan) =>
+        CameraApplies(p, plan) && plan.Camera.NeedsMask && CameraLook.Segmenter is not null
+            ? CameraLook.MaskPath(CameraCacheDir, source, p.In, p.Out - p.In + 0.1, plan.Fps, SourceCamRect(plan)) : null;
+
+    /// <summary>
+    /// The camera's look as a filter graph from [k0] (the picture) to [k9]: the shape cut from a copy of the camera
+    /// big enough to cover its old square, the background behind you blurred or removed (where it's removed, the
+    /// camera's old square is filled from the game around it), and a thin gold ring. Adds its inputs to the command.
+    /// </summary>
+    private static string? CameraGraph(Piece p, EditPlan plan, List<string> args, double len)
+    {
+        if (!CameraApplies(p, plan)) return null;
+        var look = plan.Camera;
+        int W = plan.Width, H = plan.Height;
+        double F = plan.Fps;
+        var r = CamRect(plan, W, H);
+        int rx = (int)r.X, ry = (int)r.Y, rw = (int)r.W, rh = (int)r.H;
+        var box = CameraLook.Box(r, look.Shape);
+        int bx = (int)box.X, by = (int)box.Y, bw = (int)box.W, bh = (int)box.H;
+        // the camera's picture scaled to cover the shape's box (the middle of it kept)
+        double q = Math.Max((double)bw / rw, (double)bh / rh);
+        int sw = Math.Max(bw, (int)Math.Ceiling(rw * q / 2) * 2), sh = Math.Max(bh, (int)Math.Ceiling(rh * q / 2) * 2);
+        string fit = $"scale={sw}:{sh}:flags=bicubic,crop={bw}:{bh}:{(sw - bw) / 2}:{(sh - bh) / 2}";
+        int Next() => args.Count(a => a == "-i");
+        string? mask = MaskFor(args[args.IndexOf("-i") + 1], p, plan);
+        if (mask is not null && !File.Exists(mask)) mask = null;
+        bool removed = mask is not null && look.Background == CameraLook.Removed, blurred = mask is not null && look.Background == CameraLook.Blurred;
+        bool shaped = look.Shape.Length > 0;
+        if (!shaped && !removed && !blurred) return null;
+        var g = new StringBuilder();
+        g.Append("[k0]split=2[kb][ks];");
+        g.Append($"[ks]crop={rw}:{rh}:{rx}:{ry},{fit}[kc];");
+        if (mask is not null)
+        {
+            int mi = Next();
+            args.AddRange(new[] { "-i", mask });
+            string speed = Math.Abs(p.Speed - 1) > 1e-6 ? $"setpts=(PTS-STARTPTS)/{I(p.Speed)}" : "setpts=PTS-STARTPTS";
+            g.Append($"[{mi}:v]{speed},fps={I(F)},scale={rw}:{rh}:flags=bicubic,{fit},gblur=sigma=1.2,format=gray[km];");
+        }
+        string camOut = "kc";
+        if (blurred)
+        {
+            g.Append($"[kc]split=2[kc1][kc2];[kc2]gblur=sigma={I(Math.Max(6, bw / 36.0))}[kcb];[kc1][km]alphamerge[kcp];[kcb][kcp]overlay=format=auto[kcm];");
+            camOut = "kcm";
+        }
+        string? alpha = removed ? "km" : null;
+        if (shaped)
+        {
+            var (shapeImg, ringImg) = CameraLook.Pictures(CameraCacheDir, bw, bh, look.Shape);
+            int si = Next();
+            args.AddRange(new[] { "-framerate", I(F), "-loop", "1", "-t", I(len + 1), "-i", shapeImg });
+            g.Append($"[{si}:v]format=gray[ksh];");
+            if (alpha is not null) { g.Append("[km][ksh]blend=all_mode=multiply[kal];"); alpha = "kal"; }
+            else alpha = "ksh";
+            if (look.Ring)
+            {
+                int ri = Next();
+                args.AddRange(new[] { "-framerate", I(F), "-loop", "1", "-t", I(len + 1), "-i", ringImg });
+                g.Append($"[{ri}:v]format=rgba[kring];");
+            }
+        }
+        if (alpha is not null) { g.Append($"[{camOut}][{alpha}]alphamerge[kca];"); camOut = "kca"; }
+        // where you're cut out, the camera's old square is filled from the game around it (and softened)
+        string baseOut = "kb";
+        if (removed)
+        {
+            // (from just outside the square: the game's own pixels around it, never the camera's edge)
+            int dx = Math.Max(1, rx - 3), dy = Math.Max(1, ry - 3), dx1 = Math.Min(W - 2, rx + rw + 3), dy1 = Math.Min(H - 2, ry + rh + 3);
+            g.Append($"[kb]delogo=x={dx}:y={dy}:w={Math.Max(2, dx1 - dx)}:h={Math.Max(2, dy1 - dy)},split=2[kf1][kf2];" +
+                     $"[kf2]crop={rw}:{rh}:{rx}:{ry},gblur=sigma={I(Math.Max(8, rw / 14.0))}[kfz];[kf1][kfz]overlay={rx}:{ry}[kfill];");
+            baseOut = "kfill";
+        }
+        g.Append($"[{baseOut}][{camOut}]overlay=x={bx}:y={by}:format=auto" + (shaped && look.Ring ? "[kpre];" : ",format=yuv420p[k9]"));
+        if (shaped && look.Ring) g.Append($"[kpre][kring]overlay=x={bx}:y={by}:format=auto,format=yuv420p[k9]");
+        return g.ToString();
     }
 
     /// <summary>The intermediates' video encode: high quality (they're re-encoded once at the end), as fast as possible.</summary>

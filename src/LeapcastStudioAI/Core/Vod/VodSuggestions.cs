@@ -121,6 +121,15 @@ public static class VodSuggestions
             }
         }
 
+        // ---- your camera's look
+        if (plan.Layout?.Camera is not null)
+        {
+            if (tw.CameraShape.Length == 0)
+                list.Add(new("cam-shape", "camera", -1, -1, "Give your camera a shape: an oval with a thin gold ring (drawn big enough to cover its old square).", "make my camera oval"));
+            if (tw.CameraBackground.Length == 0 && CameraLook.Segmenter is not null)
+                list.Add(new("cam-bg", "camera", -1, -1, "Remove the background behind you in your camera (you're cut out frame by frame).", "remove my background"));
+        }
+
         // ---- the big pieces, if they're off
         if (!tw.Hook || !tw.ColdOpen)
             list.Add(new("hook", "hook", -1, -1, "Start with a hook: your biggest moments in quick flashes, then the run-up to the best one, before the intro.", "add a hook"));
