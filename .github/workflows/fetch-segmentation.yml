@@ -1,0 +1,55 @@
+name: Fetch camera segmentation model
+
+# Keeps OpenCV Zoo's PP-HumanSeg person segmentation model (Apache 2.0, ported from PaddleHub by OpenCV) as a
+# release asset of this repository, checked against the SHA-256 recorded in opencv/opencv_zoo, so the installer and
+# the tests use exactly this file. The VOD editor uses it to remove the background behind you in your camera.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/fetch-segmentation.yml
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: camera-segmentation
+  MODEL: human_segmentation_pphumanseg_2023mar.onnx
+  SHA: 552d8a984054e59b5d773d24b9b12022b22046ceb2bbc4c9aaeaceb36a9ddf24
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the model from its official sources
+        run: |
+          set -euo pipefail
+          mkdir out && cd out
+          ok=""
+          for url in \
+            "https://huggingface.co/opencv/human_segmentation_pphumanseg/resolve/main/$MODEL" \
+            "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/human_segmentation_pphumanseg/$MODEL"; do
+            if curl -fL --retry 3 -o "$MODEL" "$url" && echo "$SHA  $MODEL" | sha256sum -c -; then ok="$url"; break; fi
+            rm -f "$MODEL"
+          done
+          if [ -z "$ok" ]; then
+            # last resort: the repository itself, through Git LFS
+            git clone --depth 1 --filter=blob:none --sparse https://github.com/opencv/opencv_zoo zoo
+            (cd zoo && git sparse-checkout set models/human_segmentation_pphumanseg && git lfs pull --include "models/human_segmentation_pphumanseg/$MODEL")
+            cp "zoo/models/human_segmentation_pphumanseg/$MODEL" .
+            echo "$SHA  $MODEL" | sha256sum -c -
+            ok="github.com/opencv/opencv_zoo (Git LFS)"
+          fi
+          echo "source: $ok" | tee SOURCE.txt
+          curl -fL -o LICENSE.txt https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/human_segmentation_pphumanseg/LICENSE
+          sha256sum "$MODEL" | tee SHA256SUMS.txt
+          ls -la
+      - name: Publish as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd out
+          gh release delete "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -y --cleanup-tag || true
+          gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Camera segmentation (PP-HumanSeg)" \
+            --notes "OpenCV Zoo human_segmentation_pphumanseg (Apache 2.0). $(cat SOURCE.txt). See SHA256SUMS.txt." \
+            "$MODEL" LICENSE.txt SHA256SUMS.txt SOURCE.txt
