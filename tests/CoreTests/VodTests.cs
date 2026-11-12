@@ -302,6 +302,10 @@ static class VodTests
         check(notes.Contains("watching") && notes.Contains("rendering") && notes.Contains("Done in"),
             $"…and writes how long each step took to the edit log ({string.Join(" | ", notes.Split('\n').Where(l => l.Contains(':')).Select(l => l.Length > 20 ? l[20..].Trim() : l).Take(6))})");
 
+        var again = new VodProject { Recording = src, OutputFolder = Path.Combine(dir, "out") };
+        check(again.ReuseSignals() is { } rs && Math.Abs(rs.Duration - 240) < 1 && File.Exists(Path.Combine(again.WorkDir, "signals.json.gz")),
+            "…a second edit of the same recording doesn't watch it again (it uses what the first one learned)");
+
         // ---- feedback in your own words → changes
         var fake = new VodProject { TargetSeconds = 900, Duration = 600 };
         fake.Pieces.Add(new VodProject.PieceInfo("title", 50, 53, 0, 3, 1));

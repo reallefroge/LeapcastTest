@@ -304,9 +304,34 @@ public sealed class VodProject
         var fi = new FileInfo(Recording);
         var f = new SignalsFile(s.Duration, s.Width, s.Height, s.Fps, s.Loud, s.Motion, s.Brightness, s.Words, s.Markers, s.Layout, s.WordsFromMic, s.HasAudio,
             fi.Exists ? fi.Length : 0, fi.Exists ? fi.LastWriteTimeUtc : default, SignalsFormat, s.Novelty, s.MeetingUi, s.Lobby, s.Others);
-        using var fs = File.Create(SignalsPath);
-        using var gz = new GZipStream(fs, CompressionLevel.Fastest);
-        JsonSerializer.Serialize(gz, f);
+        using (var fs = File.Create(SignalsPath))
+        using (var gz = new GZipStream(fs, CompressionLevel.Fastest))
+            JsonSerializer.Serialize(gz, f);
+        try { File.WriteAllText(Path.Combine(WorkDir, "recording.txt"), Recording); } catch { }
+    }
+
+    /// <summary>
+    /// What an earlier edit of the same recording learned about it (the newest that's still valid), saved as this
+    /// edit's own: a second edit of a recording doesn't watch it all again.
+    /// </summary>
+    public VodSignals? ReuseSignals()
+    {
+        try
+        {
+            var root = new DirectoryInfo(Path.Combine(OutputFolder, ".leapcast-work"));
+            if (!root.Exists) return null;
+            foreach (var d in root.GetDirectories().Where(d => d.Name != Id).OrderByDescending(d => d.LastWriteTimeUtc))
+            {
+                string rec = Path.Combine(d.FullName, "recording.txt");
+                if (!File.Exists(rec) || !string.Equals(File.ReadAllText(rec).Trim(), Recording, StringComparison.OrdinalIgnoreCase)) continue;
+                var other = new VodProject { Id = d.Name, Recording = Recording, OutputFolder = OutputFolder };
+                if (other.LoadSignals() is not { } s) continue;
+                try { SaveSignals(s); } catch { }
+                return s;
+            }
+        }
+        catch { }
+        return null;
     }
 
     /// <summary>The cached analysis, if the recording hasn't changed since.</summary>

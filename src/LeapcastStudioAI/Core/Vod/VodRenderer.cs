@@ -79,19 +79,19 @@ public static class VodRenderer
             // rest is brought in line (only the sound is made again: the picture is copied as it is)
             int evened = 0;
             LoudnessCheck = "";
-            for (int pass = 0; pass < 3; pass++)
+            for (int pass = 0; pass < 4; pass++)
             {
                 progress?.Report((0.93, pass == 0 ? "Checking the finished video: the loudness of every part" : "Listening again after evening it out"));
                 var off = await PartDeviationsAsync(ffmpeg, output, plan, ct);
                 var bad = off.Where(kv => Math.Abs(kv.Value) > 2.5).ToList();
-                if (bad.Count == 0 || pass == 2)
+                if (bad.Count == 0 || pass == 3)
                 {
                     double worst = off.Count == 0 ? 0 : off.Values.Max(Math.Abs);
                     LoudnessCheck = $"listened back: every part within {Math.Max(1, Math.Ceiling(worst)):0} dB of the rest" + (evened > 0 ? $" ({evened} part(s) evened out after listening)" : "");
                     Note("loudness check: " + LoudnessCheck + (off.Count > 0 ? $"; parts measured: {off.Count}" : ""));
                     break;
                 }
-                foreach (var (i, dev) in bad) gains[i] = Math.Clamp(gains[i] - dev, -20, 20);
+                foreach (var (i, dev) in bad) gains[i] = Math.Clamp(gains[i] - dev, -26, 26);
                 evened += bad.Count;
                 string fixedOut = Path.Combine(work, "relevel.mp4");
                 string n2 = await NormAsync(ffmpeg, new[] { "-i", body, "-i", bed }, Mix(gains, 0, 1), ct);
@@ -234,7 +234,7 @@ public static class VodRenderer
         if (known.Count < 2) return gains;
         double target = known[known.Count / 2];
         for (int i = 0; i < gains.Length; i++)
-            if (lufs[i] is { } l) gains[i] = Math.Clamp(target - l, -18, 18);
+            if (lufs[i] is { } l) gains[i] = Math.Clamp(target - l, -24, 24);
         Note($"loudness between parts: {known.Count} parts measured, {known[0]:0.0} to {known[^1]:0.0} LUFS, evened to {target:0.0}");
         return gains;
     }
@@ -323,7 +323,8 @@ public static class VodRenderer
                 {
                     var c = await CheckPieceAsync(ffmpeg, files[i], token);
                     string? why = c.Frozen >= 0.6 * len ? "the picture is frozen" : c.Black >= 0.5 * len ? "the screen is black"
-                        : c.Lufs < -62 && !p.Mute ? "there's no sound" : null;
+                        : c.Lufs < -62 && !p.Mute ? "there's no sound"
+                        : c.Lufs < -48 && !p.Mute ? "it's almost silent" : null;
                     if (why is not null) bad.Add((i, why));
                 }
                 catch (OperationCanceledException) { throw; }

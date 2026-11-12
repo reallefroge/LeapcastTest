@@ -57,7 +57,9 @@ public static class VodEditor
         VodRenderer.Note($"{(revise ? "Revising" : "Editing")} {Path.GetFileName(recording)} ({Environment.ProcessorCount} CPU threads)");
 
         // 1. watch and listen (once: a revision uses what was learned the first time)
-        var signals = revise ? project.LoadSignals() : null;
+        // (a new edit of a recording already watched for an earlier edit uses that: it isn't watched again)
+        var signals = revise ? project.LoadSignals() : project.ReuseSignals();
+        if (signals is not null && !revise) VodRenderer.Note("watching: already done for an earlier edit of this recording");
         if (signals is null)
         {
             progress?.Report(new Progress(0, "Watching the recording"));

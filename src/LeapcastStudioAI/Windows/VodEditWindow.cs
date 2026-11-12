@@ -141,7 +141,9 @@ public sealed class VodEditWindow : Window
         p.Children.Add(BuildRevisePanel());
         Content = new ScrollViewer { Content = p, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MaxHeight = SystemParameters.WorkArea.Height * 0.92 };
 
-        _start.Click += async (_, _) => await RunAsync();
+        // review first: planned, then the quick preview of the whole edit plays; the same button then renders it
+        _start.Click += async (_, _) => { if (await RunAsync()) await PreviewAsync(); };
+        _list.SelectionChanged += (_, _) => _start.Content = _list.SelectedItem is ListBoxItem { Tag: string rec } && ReviewedPlanFor(rec) ? "Render the video" : "Make the video";
         _cancel.Click += (_, _) => _cts?.Cancel();
         _open.Click += (_, _) =>
         {
@@ -482,11 +484,16 @@ public sealed class VodEditWindow : Window
         return row;
     }
 
+    /// <summary>The review panel holds a plan of this recording that hasn't been rendered yet.</summary>
+    private bool ReviewedPlanFor(string recording) =>
+        _project is { Video.Length: 0 } pr && _revise.Visibility == Visibility.Visible && string.Equals(pr.Recording, recording, StringComparison.OrdinalIgnoreCase);
+
     private void ShowRevise(VodProject project, bool review = false)
     {
         _project = project;
         _reviseHeader.Text = review ? "Review the edit before it's rendered" : "Revise this video";
-        _rerender.Content = review ? "Render" : "Re-render with changes";
+        _rerender.Content = review ? "Render the video" : "Re-render with changes";
+        _start.Content = review ? "Render the video" : "Make the video";
         _revise.Visibility = Visibility.Visible;
         _suggestions.Clear(); _suggestionRows.Children.Clear();
         AddSuggestion();
@@ -868,11 +875,14 @@ public sealed class VodEditWindow : Window
         if (dlg.ShowDialog(this) == true) { _settings.VodEditFolder = dlg.FolderName; _folder.Text = dlg.FolderName; _save(); }
     }
 
-    private async Task RunAsync()
+    /// <returns>True when the edit was planned for review (the quick preview comes next).</returns>
+    private async Task<bool> RunAsync()
     {
-        if (_list.SelectedItem is not ListBoxItem { Tag: string recording }) { _step.Text = "Pick a recording first."; return; }
-        if (_engine.FfmpegPath is not { } ffmpeg) { _step.Text = "FFmpeg isn't available."; return; }
-        if (!int.TryParse(_minutes.Text.Trim(), out int minutes) || minutes < 1 || minutes > 120) { _step.Text = "Length: 1 to 120 minutes."; return; }
+        if (_list.SelectedItem is not ListBoxItem { Tag: string recording }) { _step.Text = "Pick a recording first."; return false; }
+        // a reviewed plan of this recording, not rendered yet: this renders it (it isn't planned all over again)
+        if (ReviewedPlanFor(recording)) { await ReviseAsync(); return false; }
+        if (_engine.FfmpegPath is not { } ffmpeg) { _step.Text = "FFmpeg isn't available."; return false; }
+        if (!int.TryParse(_minutes.Text.Trim(), out int minutes) || minutes < 1 || minutes > 120) { _step.Text = "Length: 1 to 120 minutes."; return false; }
         _settings.VodEditMinutes = minutes;
         _settings.VodEditChapters = _chapters.IsChecked == true;
         _settings.VodEditReviewFirst = _mode.SelectedIndex == 1;
@@ -900,9 +910,9 @@ public sealed class VodEditWindow : Window
                 // review first: the plan, every cut with the editor's suggestions; render when it's right
                 if (VodEditor.LastProject is { } planned) ShowRevise(planned, review: true);
                 _bar.Value = 0.3;
-                _step.Text = $"Planned in {(DateTime.Now - started):m\\:ss}: {planned_summary()}. Press “Quick preview of the edit” to watch it (or ▶ any moment or cut), change anything below, then press “Render”."
+                _step.Text = $"Planned in {(DateTime.Now - started):m\\:ss}: {planned_summary()}. Making a quick preview of the whole edit to watch now; change anything below, then press “Render the video”."
                              + (VodEditor.LastProject?.LearnedNote is { Length: > 0 } ln ? " " + ln : "");
-                return;
+                return true;
                 string planned_summary() => VodEditor.LastProject is { } pp ? $"{pp.Moments.Count} moments, {pp.Cuts.Count} cuts, {TimeSpan.FromSeconds(pp.Duration):m\\:ss} long" : "";
             }
             _lastVideo = result.Video;
@@ -933,5 +943,6 @@ public sealed class VodEditWindow : Window
             _cts = null;
             _start.IsEnabled = true; _cancel.IsEnabled = false;
         }
+        return false;
     }
 }
