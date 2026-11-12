@@ -14,7 +14,7 @@ public static class VodRenderer
     /// <param name="videoArgs">The final encode's video settings (the stream's encoder); intermediates use x264.</param>
     public static async Task<Result> RenderAsync(string ffmpeg, string source, EditPlan plan, string outputFolder, string baseName,
         IReadOnlyList<string> videoArgs, VodSignals signals, IProgress<(double, string)>? progress, CancellationToken ct, string? pieceCache = null,
-        Task? captionsReady = null)
+        Task? captionsReady = null, bool draft = false)
     {
         Directory.CreateDirectory(outputFolder);
         _fallbacks = 0;
@@ -96,7 +96,7 @@ public static class VodRenderer
             if (captionsReady is not null) { progress?.Report((0.81, "Finishing the captions")); await captionsReady; }
             progress?.Report((0.82, "Scoring the music"));
             string bed = Path.Combine(work, "bed.wav");
-            await Task.Run(() => Dsp.WriteWav(bed, Bed(plan, signals)), ct);
+            await Task.Run(() => Dsp.WriteWav(bed, Bed(plan, signals, ffmpeg)), ct);
 
             // ---- text, grade, mix, final encode
             progress?.Report((0.86, "Final render"));
@@ -109,6 +109,7 @@ public static class VodRenderer
                          "[1:a]equalizer=f=2600:t=q:w=1.3:g=-3[b];[p][b]amix=inputs=2:normalize=0:duration=first";
             // loudness in two passes (measure, then apply exactly): YouTube plays everything at -14 LUFS
             string norm = "loudnorm=I=-14:TP=-1.5:LRA=11";
+            if (!draft)
             try
             {
                 var (_, report) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-i", body, "-i", bed, "-filter_complex",
@@ -124,9 +125,9 @@ public static class VodRenderer
             var x264 = new[] { "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p" };
             var tries = new (string Video, IReadOnlyList<string> Enc)[]
             {
-                ($"eq=contrast=1.05:saturation=1.12:gamma=0.98,vignette=angle=PI/5,ass='{VerticalClip.EscapeFilter(ass)}',format=yuv420p", videoArgs),
-                ($"eq=contrast=1.05:saturation=1.12:gamma=0.98,vignette=angle=PI/5,ass='{VerticalClip.EscapeFilter(ass)}',format=yuv420p", x264),
-                ($"ass='{VerticalClip.EscapeFilter(ass)}',format=yuv420p", x264),
+                ($"eq=contrast=1.05:saturation=1.12:gamma=0.98,vignette=angle=PI/5,{AssFilter(ass)},format=yuv420p", videoArgs),
+                ($"eq=contrast=1.05:saturation=1.12:gamma=0.98,vignette=angle=PI/5,{AssFilter(ass)},format=yuv420p", x264),
+                ($"{AssFilter(ass)},format=yuv420p", x264),
             };
             for (int t = 0; ; t++)
             {
@@ -139,6 +140,7 @@ public static class VodRenderer
                 catch (Exception) when (t + 1 < tries.Length) { Interlocked.Increment(ref _fallbacks); }
             }
 
+            if (draft) { progress?.Report((1, "Done")); return new Result(output, "", "", TimeSpan.FromSeconds(plan.Duration)); }
             // ---- thumbnail and description
             progress?.Report((0.97, "Thumbnail and chapters"));
             string thumb = Path.ChangeExtension(output, ".jpg");
@@ -163,6 +165,15 @@ public static class VodRenderer
         }
     }
 
+    /// <summary>The text overlay, with the app's own fonts (Cinzel) available to it.</summary>
+    private static string AssFilter(string ass) =>
+        FontsDir is { } fd && Directory.Exists(fd) ? $"ass='{VerticalClip.EscapeFilter(ass)}':fontsdir='{VerticalClip.EscapeFilter(fd)}'" : $"ass='{VerticalClip.EscapeFilter(ass)}'";
+
+    /// <summary>The app's fonts (Cinzel, Cinzel Decorative: SIL Open Font License), next to the program.</summary>
+    public static string? FontsDir { get; set; } = Path.Combine(AppContext.BaseDirectory, "Assets", "Fonts");
+
+    private static int StableHash(string s) { unchecked { int h = 17; foreach (char c in s) h = h * 31 + c; return h; } }
+
     // ------------------------------------------------------------------ pieces
 
     /// <summary>The ffmpeg command for one piece: trim, slow motion, face crop, punch-ins, whips, shake, letterbox, blur.</summary>
@@ -182,7 +193,7 @@ public static class VodRenderer
         if (p.Speed >= 40) args.AddRange(new[] { "-skip_frame", "nokey" });
         if (p.Hold > 0) args.AddRange(new[] { "-ss", I(Math.Max(0, p.In)), "-t", "0.2" });
         else args.AddRange(new[] { "-ss", I(p.In), "-t", I(p.Out - p.In + 0.1) });
-        args.AddRange(new[] { "-i", source });
+        args.AddRange(new[] { "-i", p.Source ?? source });
         var ov = level < 2 ? p.Overlay : null;
         if (ov is not null) args.AddRange(new[] { "-hwaccel", "auto", "-ss", I(ov.In), "-t", I(ov.Out - ov.In + 0.2), "-i", source });
         var v = new List<string>();
@@ -265,6 +276,7 @@ public static class VodRenderer
             if (ov is not null) v.Add($"eq=brightness=-0.12:saturation=0.55:enable='between(t,{I(ov.Start)},{I(ov.Start + ov.Length)})'");
         }
         if (p.Blur) v.Add("gblur=sigma=22,eq=brightness=-0.1:saturation=0.75");
+        if (p.Darken) v.Add("eq=brightness=-0.14:saturation=0.85,vignette=angle=PI/4");
         v.Add("format=yuv420p");
 
         string audio;
@@ -283,7 +295,17 @@ public static class VodRenderer
             audio = "[0:a]" + string.Join(",", af);
         }
         string graph = "[0:v]" + string.Join(",", v) + "[v];" + audio + "[a]";
-        if (ov is not null)
+        if (ov is null && p.Image is { } img && File.Exists(img) && level < 2)
+        {
+            // your logo: rises and fades in over the intro, fades out with it
+            args.InsertRange(args.IndexOf("-i") + 2, new[] { "-loop", "1", "-t", I(len + 0.5), "-i", img });
+            int lh = (int)(H * 0.30) & ~1;
+            var main = v.Take(v.Count - 1);
+            graph = "[0:v]" + string.Join(",", main) + "[m];" +
+                    $"[1:v]scale=-2:{lh}:flags=lanczos,format=rgba,fade=t=in:st=0.3:d=0.4:alpha=1,fade=t=out:st={I(Math.Max(0.8, len - 0.35))}:d=0.3:alpha=1[lg];" +
+                    $"[m][lg]overlay=x=(W-w)/2:y='{(int)(H * 0.11)}+24*max(0,1-(t-0.3)/0.5)':eof_action=pass,format=yuv420p[v];" + audio + "[a]";
+        }
+        else if (ov is not null)
         {
             // the replay: your round, sped up to fit, in a white frame that slides in from the right
             double sp = Math.Clamp((ov.Out - ov.In) / ov.Length, 1, 60);
@@ -328,15 +350,23 @@ public static class VodRenderer
     /// The score: each chapter's track, starting on the cut, stopping like a tape for a death, dipping under your
     /// voice (and under loud game moments), plus every sound effect at its cue.
     /// </summary>
-    public static Dsp.Stereo Bed(EditPlan plan, VodSignals s)
+    public static Dsp.Stereo Bed(EditPlan plan, VodSignals s, string? ffmpeg = null)
     {
         double dur = plan.Duration + 0.5;
         var bed = new Dsp.Stereo(Dsp.Frames(dur));
         var music = new Dsp.Stereo(bed.Length);
+        // your music (a folder of tracks: a different one per chapter, never twice in a video) or music made for the video
+        var library = plan.Brand.MusicSource == "folder" && ffmpeg is not null ? MusicLibrary.Tracks(plan.Brand.MusicFolder) : new List<string>();
+        int rotate = library.Count == 0 ? 0 : (int)((uint)StableHash(plan.Title + plan.Duration.ToString("0")) % (uint)library.Count);
+        int spanNo = 0;
         foreach (var span in plan.Music)
         {
             double len = span.To - span.From;
-            var track = MusicSynth.Track(span.Style, len + 1.5, span.Seed);
+            Dsp.Stereo? track = library.Count > 0 ? MusicLibrary.Decode(ffmpeg!, library[(rotate + spanNo++) % library.Count], 0, len + 1.5) : null;
+            if (plan.Brand.MusicSource == "none") continue;
+            // your music only: no folder yet (or a track that won't play) means silence there, never made-up music instead
+            if (plan.Brand.MusicSource == "folder" && track is null) continue;
+            track ??= MusicSynth.Track(span.Style, len + 1.5, span.Seed);
             int at = Dsp.Frames(span.From), n = Math.Min(track.Length, Dsp.Frames(len));
             // a quick fade in (it lands on the cut) and a short fade out into the next section's silence beat
             int fin = Dsp.Frames(0.03), fout = Dsp.Frames(span.TapeStopAtEnd ? 0.02 : 0.35);
@@ -349,6 +379,24 @@ public static class VodRenderer
                 music.R[at + i] += track.R[i] * g;
             }
             if (span.TapeStopAtEnd) Sfx.TapeStop(music, Dsp.Frames(span.To - 0.6), 0.6);
+        }
+
+        // the intro's own music: the same track every video (your intro track, else your first track's opening)
+        if (plan.Pieces.FirstOrDefault(p => p.Role == "title") is { } intro && plan.Brand.MusicSource != "none" && ffmpeg is not null)
+        {
+            string? theme = plan.Brand.IntroMusic is { Length: > 0 } im && File.Exists(im) ? im : library.FirstOrDefault();
+            if (theme is not null && MusicLibrary.Decode(ffmpeg, theme, 0, intro.Length + 1.2) is { } t)
+            {
+                int a = Dsp.Frames(Math.Max(0, intro.At - 0.15)), n = Math.Min(t.Length, music.Length - a), fo = Dsp.Frames(0.6), fi = Dsp.Frames(0.05);
+                // (the chapter music steps aside for it)
+                for (int i = 0; i < n; i++)
+                {
+                    float duck = i < fi ? 1 - i / (float)fi : i > n - fo ? (i - (n - fo)) / (float)fo : 0;
+                    float g = i > n - fo ? Math.Max(0, (n - i) / (float)fo) : 1;
+                    music.L[a + i] = music.L[a + i] * duck + t.L[i] * g * 1.6f;
+                    music.R[a + i] = music.R[a + i] * duck + t.R[i] * g * 1.6f;
+                }
+            }
         }
 
         // (MusicLevel: everything below, halved again on request: the music is a backdrop, not the show)
@@ -387,7 +435,7 @@ public static class VodRenderer
         int seed = 1;
         foreach (var cue in plan.Sfx)
         {
-            var fx = Sfx.Make(cue.Kind, seed++);
+            var fx = Sfx.Make(cue.Kind, cue.Seed != 0 ? cue.Seed : seed++);
             if (plan.SfxVolume <= 0.01) continue;
             bed.Mix(fx, Dsp.Frames(cue.At), cue.Gain * 0.75f * (float)plan.SfxVolume); // accents, not punches
         }
@@ -438,7 +486,23 @@ public static class VodRenderer
             last = at;
         }
         sb.AppendLine();
-        sb.AppendLine("Edited with Leapcast Studio AI. Music: original, generated for this video (no copyright).");
+        sb.AppendLine(plan.Brand.MusicSource switch
+        {
+            "folder" when MusicLibrary.Tracks(plan.Brand.MusicFolder).Count > 0 => "Edited with Leapcast Studio AI.",
+            "none" => "Edited with Leapcast Studio AI.",
+            _ => "Edited with Leapcast Studio AI. Music: original, generated for this video (no copyright).",
+        });
+        if (plan.Texts.Any(t => t.Kind == "endscreen"))
+        {
+            var end = plan.Texts.First(t => t.Kind == "endscreen");
+            sb.AppendLine();
+            sb.AppendLine("---- (not for the description) End screen, in YouTube Studio → Editor → End screen:");
+            sb.AppendLine($"It starts at {TimeSpan.FromSeconds(end.At - 0.3):m\\:ss} and lasts 20 s. Add three elements and drag each onto its box:");
+            sb.AppendLine("  • Video → \"Most recent upload\" (or pick your previous video) → the left box (PREVIOUS VIDEO)");
+            sb.AppendLine("  • Video → \"Best for viewer\" (or pick one) → the right box (WATCH NEXT)");
+            sb.AppendLine("  • Subscribe → the circle (SUBSCRIBE)");
+            sb.AppendLine("Tip: after the first video, use \"Import from video\" to copy the same end screen in one click.");
+        }
         return sb.ToString();
     }
 
@@ -491,5 +555,51 @@ public static class VodRenderer
                 : $"FFmpeg stopped without a message (exit code {p.ExitCode}{(p.ExitCode < 0 || p.ExitCode > 255 ? ", it crashed" : "")})";
             throw new InvalidOperationException("FFmpeg: " + why);
         }
+    }
+}
+
+/// <summary>Your music: the audio files in a folder (e.g. a game's soundtrack you have), read with FFmpeg.</summary>
+public static class MusicLibrary
+{
+    private static readonly string[] Extensions = { ".mp3", ".ogg", ".wav", ".flac", ".m4a", ".opus", ".wma", ".aac" };
+
+    /// <summary>The folder's tracks, in name order.</summary>
+    public static List<string> Tracks(string? folder)
+    {
+        try
+        {
+            return folder is { Length: > 0 } && Directory.Exists(folder)
+                ? Directory.EnumerateFiles(folder).Where(f => Extensions.Contains(Path.GetExtension(f).ToLowerInvariant())).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList()
+                : new List<string>();
+        }
+        catch { return new List<string>(); }
+    }
+
+    /// <summary>Seconds <paramref name="start"/>…+<paramref name="length"/> of a track (looped if it's shorter), 48 kHz stereo; null if it won't play.</summary>
+    public static Dsp.Stereo? Decode(string ffmpeg, string file, double start, double length)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(ffmpeg) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+            foreach (var a in new[] { "-v", "error", "-stream_loop", "-1", "-ss", start.ToString("0.###", CultureInfo.InvariantCulture), "-i", file, "-vn",
+                         "-t", length.ToString("0.###", CultureInfo.InvariantCulture), "-f", "f32le", "-ac", "2", "-ar", "48000", "pipe:1" })
+                psi.ArgumentList.Add(a);
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            _ = p.StandardError.ReadToEndAsync();
+            using var ms = new MemoryStream();
+            p.StandardOutput.BaseStream.CopyTo(ms);
+            p.WaitForExit(30000);
+            var bytes = ms.GetBuffer();
+            int frames = (int)(ms.Length / 8);
+            if (frames < 4800) return null;
+            var st = new Dsp.Stereo(frames);
+            for (int i = 0; i < frames; i++)
+            {
+                st.L[i] = BitConverter.ToSingle(bytes, i * 8);
+                st.R[i] = BitConverter.ToSingle(bytes, i * 8 + 4);
+            }
+            return st;
+        }
+        catch { return null; }
     }
 }

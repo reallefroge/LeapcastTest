@@ -490,6 +490,12 @@ public sealed class StudioSettings
     public bool VodEditChapters { get; set; } = true;
     /// <summary>VOD editor: plan the edit and show it for review (every cut with the editor's suggestions) before rendering.</summary>
     public bool VodEditReviewFirst { get; set; }
+    /// <summary>VOD editor: your channel's name (the intro, the same on every video).</summary>
+    public string VodChannel { get; set; } = "";
+    /// <summary>VOD editor music: "kit" (your Wizard101 kit: fills itself from your streams), "generated", "none".</summary>
+    public string VodMusicSource { get; set; } = "kit";
+    public bool VodHook { get; set; } = true;
+    public bool VodEndScreen { get; set; } = true;
     public int VodEditMinutes { get; set; } = 15;
     /// <summary>Leave Leapcast's own windows out of display captures (they show what's behind them).</summary>
     public bool HideFromCapture { get; set; }

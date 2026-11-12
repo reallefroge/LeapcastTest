@@ -376,11 +376,31 @@ public static class VodPlanner
         double coldTo = Math.Min(best.To, best.Peak + 0.5);
         double coldFrom = Math.Max(best.From, coldTo - 7.5);
         if (coldTo - coldFrom < 4) { coldFrom = Math.Clamp(best.Peak - 5.5, best.From, Math.Max(best.From, best.To - 8)); coldTo = Math.Min(best.To, coldFrom + 8); }
-        var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = tw.Letterbox, Push = tw.Zooms > 0 ? 0.07 : 0 };
+        var brand = o.Brand ?? new VodBrand();
+        plan.Brand = brand;
+        bool hook = tw.ColdOpen && tw.Hook && brand.Hook;
+        var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = tw.Letterbox, Push = tw.Zooms > 0 ? 0.07 : 0, TransIn = hook ? TransitionKinds.Flash : null };
+        var hookShots = new List<Piece>();
+        if (hook)
+        {
+            // the hook: two flashes of other big moments (a second and a half each), then the run-up to the best one
+            foreach (var c in chosen.Where(c => Math.Abs(c.Peak - best.Peak) > 20).OrderByDescending(c => c.Value).Take(2).OrderBy(c => c.Value))
+            {
+                double a = Math.Max(c.From, c.Peak - 1.0), b = Math.Min(c.To, a + 1.5);
+                if (b - a < 1) continue;
+                hookShots.Add(new Piece { Role = "cold", In = a, Out = b, Letterbox = tw.Letterbox, TransIn = hookShots.Count > 0 ? TransitionKinds.Flash : null, Push = tw.Zooms > 0 ? 0.05 : 0 });
+            }
+            plan.Pieces.AddRange(hookShots);
+        }
         if (tw.ColdOpen) plan.Pieces.Add(cold);
-        // (blurred behind the title: from just before the cold open's end, so it's never from somewhere left out, like a lobby)
-        double titleSrc = amongUs ? Math.Max(0, coldTo - 3.0) : Math.Min(Math.Max(0, s.Duration - 3.2), coldTo);
-        plan.Pieces.Add(new Piece { Role = "title", In = titleSrc, Out = titleSrc + 3.0, Blur = true, Mute = true, Push = tw.Zooms > 0 ? 0.05 : 0 });
+        if (hookShots.Count == 0) cold.TransIn = null;
+        // the intro: your intro clip (the same every video) or the stream itself, darkened, with your logo and name
+        double titleSrc = amongUs ? Math.Max(0, coldTo - 4.0) : Math.Min(Math.Max(0, s.Duration - 4.2), coldTo);
+        string? introClip = brand.IntroClip is { Length: > 0 } ic && File.Exists(ic) ? ic : null;
+        string? logo = brand.Logo is { Length: > 0 } lg && File.Exists(lg) ? lg : null;
+        plan.Pieces.Add(introClip is not null
+            ? new Piece { Role = "title", Source = introClip, In = 0, Out = 4.0, Mute = true, Darken = true, Image = logo }
+            : new Piece { Role = "title", In = titleSrc, Out = titleSrc + 4.0, Blur = logo is null && brand.Channel.Length == 0, Darken = true, Mute = true, Image = logo, Push = tw.Zooms > 0 ? 0.05 : 0 });
 
         // ---------------------------------------------------------------- chapters: one per stretch of play (at most 7)
         var chapterOf = new int[chosen.Count];
@@ -606,7 +626,9 @@ public static class VodPlanner
         var lastMoment = plan.Pieces.Last(p => p.Role is "moment" or "slow" or "face");
         // (a frame safely inside the file: the very last instant may have no picture)
         double endFrame = Math.Max(0, Math.Min(lastMoment.Out, s.Duration - 0.6) - 0.15);
-        plan.Pieces.Add(new Piece { Role = "end", In = endFrame, Out = endFrame + 0.1, Hold = 10, Blur = true, Mute = true });
+        bool endScreen = brand.EndScreen && tw.EndScreen;
+        // the end screen: 20 s (YouTube's most), laid out for its elements: previous video, next video, subscribe
+        plan.Pieces.Add(new Piece { Role = "end", In = endFrame, Out = endFrame + 0.1, Hold = endScreen ? 20 : 10, Blur = true, Darken = endScreen, Mute = true });
         if (!s.HasAudio) foreach (var p in plan.Pieces) p.Mute = true;
 
         // ---------------------------------------------------------------- the timeline
@@ -671,7 +693,15 @@ public static class VodPlanner
             if (!fp.WhipIn) plan.Sfx.Add(new SfxCue(fp.At, SfxKind.SoftWhoosh, 0.6f));
         }
         if (!o.Chapters) plan.Chapters.Clear();
-        plan.Texts.Add(new TextCue("end", plan.Pieces[^1].At + 0.3, plan.Pieces[^1].Length - 0.3, "THANKS FOR WATCHING", o.Socials));
+        plan.Texts.Add(new TextCue(endScreen ? "endscreen" : "end", plan.Pieces[^1].At + 0.3, plan.Pieces[^1].Length - 0.3, "THANKS FOR WATCHING", o.Socials));
+        // the hook's line: your best words of the stream, over the run-up to the best moment
+        if (hook && plan.Pieces.FirstOrDefault(p => p.Role == "cold" && ReferenceEquals(p, cold)) is { } cp)
+        {
+            string line = BestQuote(words, new() { (best.From, best.To) });
+            if (line.Length > 0) plan.Texts.Add(new TextCue("hook", cp.At + 0.35, Math.Max(1, cp.Length - 0.45), $"“{line}”"));
+            foreach (var hs in hookShots) plan.Sfx.Add(new SfxCue(hs.At, SfxKind.Impact, 0.7f, Seed: 7101));
+            plan.Sfx.Add(new SfxCue(cp.At, SfxKind.Impact, 0.75f, Seed: 7101));
+        }
         plan.MusicVolume = tw.MusicVolume;
         plan.SfxVolume = tw.SfxVolume;
         for (int i = 0; i < chosen.Count; i++)
@@ -683,9 +713,10 @@ public static class VodPlanner
         }
 
         // ---------------------------------------------------------------- sound design
-        plan.Sfx.Add(new SfxCue(titlePiece.At - 1.35, SfxKind.Riser, 0.75f));
-        plan.Sfx.Add(new SfxCue(titlePiece.At, SfxKind.Impact, 0.9f));
-        plan.Sfx.Add(new SfxCue(titlePiece.At + 0.35, SfxKind.Shimmer, 0.6f));
+        // the intro's sting: the same sounds every video (fixed seeds), so the intro is recognisable
+        plan.Sfx.Add(new SfxCue(titlePiece.At - 1.35, SfxKind.Riser, 0.75f, Seed: 7001));
+        plan.Sfx.Add(new SfxCue(titlePiece.At, SfxKind.Impact, 0.9f, Seed: 7002));
+        plan.Sfx.Add(new SfxCue(titlePiece.At + 0.35, SfxKind.Shimmer, 0.6f, Seed: 7003));
         foreach (var p in plan.Pieces)
         {
             if (p.WhipIn) plan.Sfx.Add(new SfxCue(p.At - 0.22, SfxKind.Whoosh, 0.8f));

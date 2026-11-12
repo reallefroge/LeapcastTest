@@ -35,6 +35,14 @@ if (args.Length > 0 && args[0] == "--au")
     VodTests.Learning((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
     return af == 0 ? 0 : 1;
 }
+// quick mode: the Wizard101 kit filling itself from a recording
+if (args.Length > 0 && args[0] == "--kit")
+{
+    int kf = 0;
+    await VodTests.KitAsync(Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg", Path.Combine(Path.GetTempPath(), "leapcast-kit-" + Guid.NewGuid().ToString("N")[..6]),
+        (ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) kf++; });
+    return kf == 0 ? 0 : 1;
+}
 // quick mode: only the VOD editor tests
 if (args.Length > 0 && args[0] == "--vodtest")
 {
@@ -73,7 +81,9 @@ if (args.Length > 1 && args[0] == "--plan")
         Console.WriteLine($"  {b * 0.5,6:0.0}–{e * 0.5,6:0.0}  {ph[b]}");
         b = e;
     }
-    var popts = new LeapcastStudioAI.Vod.VodEditOptions("Among Us", 3600, Captions: false, Chapters: true);
+    var pbrand = Environment.GetEnvironmentVariable("LEAPCAST_BRAND") is { Length: > 0 } bj ? System.Text.Json.JsonSerializer.Deserialize<LeapcastStudioAI.Vod.VodBrand>(bj) : null;
+    if (Environment.GetEnvironmentVariable("LEAPCAST_FONTS") is { Length: > 0 } fdir) LeapcastStudioAI.Vod.VodRenderer.FontsDir = fdir;
+    var popts = new LeapcastStudioAI.Vod.VodEditOptions(Environment.GetEnvironmentVariable("LEAPCAST_TITLE") ?? "Among Us", 3600, Captions: false, Chapters: true, Brand: pbrand);
     // LEAPCAST_TWEAKS: the edit's settings as JSON (e.g. {"TransitionStyle":"mixed"})
     var ptw = Environment.GetEnvironmentVariable("LEAPCAST_TWEAKS") is { Length: > 0 } tj
         ? System.Text.Json.JsonSerializer.Deserialize<LeapcastStudioAI.Vod.EditTweaks>(tj)! : new LeapcastStudioAI.Vod.EditTweaks();
@@ -88,6 +98,7 @@ if (args.Length > 1 && args[0] == "--plan")
         await LeapcastStudioAI.Vod.VodEditor.MakeAsync(pff, args[1], args[3], popts with { Captions = false }, vargs, null, CancellationToken.None, reviewFirst: true);
         var proj = LeapcastStudioAI.Vod.VodEditor.LastProject!;
         proj.Tweaks = ptw;
+        if (pbrand is not null) proj.Brand = pbrand;
         var res = await LeapcastStudioAI.Vod.VodEditor.ReviseAsync(pff, proj, vargs, null, CancellationToken.None);
         Console.WriteLine(res.Video);
     }

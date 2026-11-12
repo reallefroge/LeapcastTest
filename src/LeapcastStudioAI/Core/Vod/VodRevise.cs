@@ -34,6 +34,10 @@ public sealed class EditTweaks
     public string TransitionSound { get; set; } = "auto";
     /// <summary>Your picks for single cuts (they win over the style above).</summary>
     public List<CutPick> Cuts { get; set; } = new();
+    /// <summary>The teaser up front (your best moments, fast) before the intro.</summary>
+    public bool Hook { get; set; } = true;
+    /// <summary>The last 20 s laid out for YouTube's end-screen elements (previous video, next video, subscribe).</summary>
+    public bool EndScreen { get; set; } = true;
     /// <summary>Among Us: when you describe where you were in a meeting (on your mic), a fast replay of your round over it.</summary>
     public bool VarChecks { get; set; } = true;
 
@@ -152,6 +156,8 @@ public sealed class EditStyle
         t.SlowMotion = Pick(x => x.SlowMotion, "no slow motion");
         t.FaceCam = Pick(x => x.FaceCam, "no cuts to your face");
         t.ColdOpen = Pick(x => x.ColdOpen, "no cold open");
+        t.Hook = Pick(x => x.Hook, "no hook");
+        t.EndScreen = Pick(x => x.EndScreen, "no end screen");
         t.Captions = Pick(x => x.Captions, "no captions");
         t.Chapters = Pick(x => x.Chapters, "no chapters");
         t.VarChecks = Pick(x => x.VarChecks, "no VAR checks");
@@ -215,7 +221,10 @@ public sealed class VodProject
     private string SignalsPath => Path.Combine(WorkDir, "signals.json.gz");
 
     public VodEditOptions Options() => new(Tweaks.Title ?? Title, (Tweaks.Minutes ?? TargetSeconds / 60) * 60, Captions && Tweaks.Captions, Music && Tweaks.Music, Socials,
-        ChapterCards && Tweaks.Chapters);
+        ChapterCards && Tweaks.Chapters, Brand);
+
+    /// <summary>Your channel's look when this edit was made (refreshed from your settings on a revision).</summary>
+    public VodBrand Brand { get; set; } = new();
 
     /// <summary>Where a moment of the finished video comes from in the recording (null: a title or end card).</summary>
     public double? SourceAt(double editSeconds)
@@ -633,10 +642,21 @@ public static class EditFeedback
             bool off = Off(s);
             t.FaceCam = !off; ok.Add(off ? "No cuts to your face" : "Cuts to your face on");
         }
-        if (Has(s, @"cold open|teaser|intro clip|the hook|preview at the start"))
+        if (Has(s, @"\bhooks?\b|teaser|attention grab"))
+        {
+            bool off = Off(s);
+            t.Hook = !off; if (!off) t.ColdOpen = true;
+            ok.Add(off ? "No hook at the start" : "Hook at the start (your best moments, fast)");
+        }
+        else if (Has(s, @"cold open|preview at the start"))
         {
             bool off = Off(s);
             t.ColdOpen = !off; ok.Add(off ? "No cold open" : "Cold open on");
+        }
+        if (Has(s, @"end ?screen|outro|end card|subscribe (screen|section|button)|(previous|recommended|next) video"))
+        {
+            bool off = Off(s);
+            t.EndScreen = !off; ok.Add(off ? "Short ending (no end screen)" : "End screen on (20 s for YouTube's previous video, watch next and subscribe)");
         }
         if (Has(s, @"\b(chaotic|overwhelming|too much going on|too busy|over the top|overedited|over edited|too flashy|calmer|cleaner|simpler|subtle)\b"))
         {

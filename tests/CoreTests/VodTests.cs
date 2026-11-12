@@ -104,7 +104,7 @@ static class VodTests
 
         // transitions: never by default (plain cuts), but every cut comes with the editor's suggestion
         string Cuts(EditPlan pl) => string.Join(" | ", pl.Cuts.Select(c => $"{c.At:0}: {c.Style}/{c.Sound} (suggests {c.Suggested}: {c.Why})"));
-        check(with.Pieces.All(p => p.TransIn is null && p.TransOut is null && !p.WhipIn && p.Role != "lapse") && with.Cuts.Count > 0
+        check(with.Pieces.Where(p => p.Role != "cold").All(p => p.TransIn is null && p.TransOut is null && !p.WhipIn && p.Role != "lapse") && with.Cuts.Count > 0
               && with.Cuts.All(c => c.Style == TransitionKinds.None && c.Sound == "none") && !with.Sfx.Any(x => x.Kind is SfxKind.Whoosh),
             $"…transitions: plain cuts unless asked for, each cut with a suggestion ({Cuts(with)})");
         var lapsed = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120), new EditTweaks { TransitionStyle = TransitionKinds.Timelapse });
@@ -195,6 +195,10 @@ static class VodTests
             ("the sound effects are too loud", t => t.SfxVolume < 1 && t.SfxVolume > 0),
             ("it drags", t => t.Pace == -1),
             ("get rid of the black bars", t => !t.Letterbox),
+            ("no hook at the start", t => !t.Hook),
+            ("remove the teaser", t => !t.Hook),
+            ("get rid of the outro", t => !t.EndScreen),
+            ("I don't want the end screen", t => !t.EndScreen),
         };
         var failed = new List<string>();
         foreach (var (text, ok) in cases)
@@ -227,15 +231,17 @@ static class VodTests
         var plan = VodPlanner.Plan(signals, opts);
         var roles = string.Join(",", plan.Pieces.Select(p => p.Role).Distinct());
         bool skipsLoading = !plan.Pieces.Any(p => p.Role is "moment" or "slow" or "face" && p.In < 88 && p.Out > 62);
-        check(plan.Pieces[0] is { Role: "cold", Letterbox: true } && plan.Pieces[1] is { Role: "title", Mute: true } && plan.Pieces[^1] is { Role: "end", Hold: > 0 } && skipsLoading,
-            $"…story: cold open (letterboxed), title, the moments in order, end card; the loading screen is left out ({roles})");
+        int firstTitle = plan.Pieces.FindIndex(p => p.Role == "title");
+        check(firstTitle >= 2 && plan.Pieces.Take(firstTitle).All(p => p is { Role: "cold", Letterbox: true }) && plan.Pieces[0].TransIn is null && plan.Pieces[1].TransIn == TransitionKinds.Flash
+              && plan.Pieces[firstTitle] is { Mute: true, Darken: true } && plan.Pieces[^1] is { Role: "end", Hold: >= 19 } && plan.Texts.Any(t => t.Kind == "endscreen") && plan.Texts.Any(t => t.Kind == "hook") && skipsLoading,
+            $"…story: a hook (big moments in flashes, then the run-up to the best one, letterboxed), your intro, the moments in order, a 20 s end screen; the loading screen is left out ({roles})");
         var reacts = plan.Pieces.Where(p => p.Role == "moment").SelectMany(p => p.Zooms).Count();
         check(plan.Pieces.Any(p => p.Role == "slow" && p.In < 216 && p.Out > 216) && plan.Pieces.Any(p => p.Role == "face") && reacts > 0,
             $"…the death is in slow motion, a reaction cuts to your face, and reactions get punch-ins ({reacts})");
         check(plan.Music.Count >= 1 && plan.Music.Any(m => m.TapeStopAtEnd) && plan.Captions.Count > 20 && plan.Sfx.Any(x => x.Kind == SfxKind.Impact),
             $"…original music ({string.Join(", ", plan.Music.Select(m => m.Mood).Distinct())}) that tape-stops at the death, {plan.Captions.Count} caption words, {plan.Sfx.Count} sound effects");
         check(plan.Duration is > 50 and < 100, $"…close to the asked length (70 s asked: {plan.Duration:0} s)");
-        var coldP = plan.Pieces[0];
+        var coldP = plan.Pieces[firstTitle - 1];
         var bodies = plan.Pieces.Where(p => p.Role is "moment" or "slow" or "face").ToList();
         check(coldP.Out <= plan.BestMoment + 0.6 && bodies.Any(p => p.In - 0.5 <= plan.BestMoment && p.Out >= plan.BestMoment),
             $"…story: the cold open stops right as the best moment happens (cliffhanger, {coldP.Out - plan.BestMoment:+0.0;-0.0} s), and it plays out in full later");
@@ -304,5 +310,63 @@ static class VodTests
         var zp = await Captions.ProbeAsync(ffmpeg, zres.Video);
         check(VodRenderer.Fallbacks == 0 && zp is { W: 1280, H: 720 } zz && Math.Abs(zz.Duration - 8) < 0.5,
             $"…slow zoom-outs render cleanly (the crash in your edit log): {zp?.Duration:0.0} s, {VodRenderer.Fallbacks} fallback(s)");
+
+        // ---- the quick preview: the edit as it stands, small and fast, to watch before the real render
+        var psw = System.Diagnostics.Stopwatch.StartNew();
+        string pv = await VodEditor.PreviewAsync(ffmpeg, proj, null, CancellationToken.None);
+        var pvp = await Captions.ProbeAsync(ffmpeg, pv);
+        check(pvp is { W: 640, H: 360 } pq && Math.Abs(pq.Duration - proj.Duration) < 1.5 && psw.Elapsed < sw.Elapsed,
+            $"Review: a quick preview of the edit to watch ({pvp?.W}×{pvp?.H}, {pvp?.Duration:0.0} s of {proj.Duration:0.0} s, made in {psw.Elapsed.TotalSeconds:0} s vs {sw.Elapsed.TotalSeconds:0} s for the video)");
+        var psw2 = System.Diagnostics.Stopwatch.StartNew();
+        string pv2 = await VodEditor.PreviewAsync(ffmpeg, proj, null, CancellationToken.None);
+        check(File.Exists(pv2) && VodRenderer.Reused == proj.Pieces.Count, $"…previewing again after no change remakes no piece ({VodRenderer.Reused} of {proj.Pieces.Count} reused, {psw2.Elapsed.TotalSeconds:0} s)");
+
+        await KitAsync(ffmpeg, Path.Combine(work, "kit"), check);
+    }
+
+    /// <summary>
+    /// The Wizard101 kit fills itself from a recording: a 7-minute stream with steady music and no one talking gives
+    /// it stretches of music, the intro clip and the intro's music, once; the brand then uses them, and with the kit
+    /// empty there's no music at all (never generated).
+    /// </summary>
+    public static async Task KitAsync(string ffmpeg, string dir, Action<bool, string> check)
+    {
+        Directory.CreateDirectory(dir);
+        string rec = Path.Combine(dir, "Leapcast 2026-11-11 22-37-52.mp4");
+        await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=s=320x180:r=15:d=420",
+            "-f", "lavfi", "-i", "sine=f=330:d=420", "-af", "volume=0.15", "-ac", "2", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", rec },
+            TimeSpan.FromMinutes(3), CancellationToken.None);
+        string old = VodKit.Folder;
+        VodKit.Folder = Path.Combine(dir, "Wizard101 kit");
+        try
+        {
+            var empty = VodKit.Brand("Reallefroge", "kit", true, true);
+            var signals = await VodAnalyzer.AnalyzeAsync(ffmpeg, rec, null, CancellationToken.None, useWhisper: false);
+            var added = await VodKit.HarvestAsync(ffmpeg, rec, signals, CancellationToken.None);
+            var tracks = MusicLibrary.Tracks(VodKit.MusicFolder);
+            check(tracks.Count >= 1 && VodKit.IntroClip() is not null && VodKit.IntroMusic() is not null,
+                $"Wizard101 kit: fills itself from a stream ({string.Join(", ", added)}; {VodKit.Summary()})");
+            var again = await VodKit.HarvestAsync(ffmpeg, rec, signals, CancellationToken.None);
+            check(again.Count == 0, $"…a recording is only taken from once ({again.Count} added the second time)");
+            var dec = MusicLibrary.Decode(ffmpeg, tracks[0], 10, 5);
+            double peak = dec is null ? 0 : dec.L.Max(Math.Abs);
+            check(dec is not null && dec.Length >= 48000 * 5 - 10 && peak > 0.01, $"…its music decodes for the bed ({dec?.Length} frames, peak {peak:0.00})");
+            var brand = VodKit.Brand("Reallefroge", "kit", true, true);
+            check(brand.MusicSource == "folder" && brand.MusicFolder == VodKit.MusicFolder && brand.IntroClip is not null && brand.IntroMusic is not null && empty.IntroClip is null,
+                "…and the channel's look uses it (music, intro clip, intro music)");
+            // no tracks: no music (the generated music is never used in its place)
+            var plan = VodPlanner.Plan(signals, new VodEditOptions("Kit test", 60, Brand: new VodBrand("Reallefroge", MusicFolder: Path.Combine(dir, "nothing"), MusicSource: "folder")));
+            plan.Sfx.Clear();   // (just the music)
+            var bed = VodRenderer.Bed(plan, signals, ffmpeg);
+            check(bed.L.All(x => Math.Abs(x) < 0.001), $"…with nothing in the kit there's no made-up music (bed peak {bed.L.Max(Math.Abs):0.00})");
+            var withKit = VodPlanner.Plan(signals, new VodEditOptions("Kit test", 60, Brand: brand));
+            check(withKit.Pieces.Any(p => p.Source == brand.IntroClip) && withKit.Texts.Any(t => t.Kind == "endscreen") && withKit.Pieces[^1].Hold >= 19,
+                $"…the intro plays your clip, and the end screen is held 20 s for YouTube's elements ({string.Join(",", withKit.Pieces.Select(p => p.Role).Distinct())})");
+            var small = withKit.Resized(640, 360, 30);
+            check(small.Pieces.Count == withKit.Pieces.Count && Math.Abs(small.Duration - withKit.Duration) < 1 && AssWriter.Build(small).Contains("PlayResY: 360"),
+                "…a preview-size copy of the plan keeps everything in place");
+        }
+        finally { VodKit.Folder = old; }
     }
 }

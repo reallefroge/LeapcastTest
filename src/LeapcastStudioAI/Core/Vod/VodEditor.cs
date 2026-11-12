@@ -24,10 +24,16 @@ public static class VodEditor
         {
             Recording = recording, OutputFolder = outputFolder, Title = options.Title, TargetSeconds = options.TargetSeconds,
             Captions = options.Captions, Music = options.Music, Socials = options.Socials, ChapterCards = options.Chapters,
+            Brand = options.Brand ?? new VodBrand(),
         };
         CleanOldWork(outputFolder);
         return RunAsync(ffmpeg, project, videoArgs, progress, ct, revise: false, planOnly: reviewFirst);
     }
+
+    /// <summary>Your channel's look as it is right now (the Wizard101 kit can grow during an edit); set by the app.</summary>
+    public static Func<VodBrand>? BrandProvider { get; set; }
+    /// <summary>Wizard101 recordings feed the kit (music stretches, the intro) as they're edited.</summary>
+    public static bool HarvestKit { get; set; }
 
     /// <summary>Where what the editor learns about your taste is kept (set by the app; null = nothing learned or used).</summary>
     public static string? StylePath { get; set; }
@@ -75,6 +81,19 @@ public static class VodEditor
         // the game, and (on a new edit) what you've liked in your edits of it before
         VodPlanner.GamePhases(signals, Math.Max(1, (int)Math.Ceiling(signals.Duration / VodPlanner.Bin)), out bool amongUs);
         project.Game = amongUs ? "Among Us" : "other";
+        // a Wizard101 stream feeds your kit (the game's music where nobody talks; the intro, the first time)
+        if (!amongUs && HarvestKit)
+        {
+            progress?.Report(new Progress(0.24, "Adding this stream's music to your Wizard101 kit"));
+            try
+            {
+                var added = await VodKit.HarvestAsync(ffmpeg, recording, signals, ct);
+                if (added.Count > 0) VodRenderer.Note("Wizard101 kit: added " + string.Join(", ", added));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { VodRenderer.Note("Wizard101 kit: " + ex.Message); }
+        }
+        if (BrandProvider is not null) project.Brand = BrandProvider();
         if (!revise && StylePath is { } sp)
         {
             var (learned, note) = EditStyle.Load(sp).Learned(project.Game);
@@ -121,6 +140,28 @@ public static class VodEditor
         if (StylePath is { } stylePath) try { var st = EditStyle.Load(stylePath); st.Record(project); st.Save(stylePath); } catch { }
         LastProject = project;
         return result;
+    }
+
+    /// <summary>
+    /// A quick, small draft of the edit as it stands (640×360, 30 fps, fast encode, captions as heard live): to watch
+    /// it through and say what to change before the real render. Its pieces are kept, so a second preview after a
+    /// change only makes what changed. Returns the preview file.
+    /// </summary>
+    public static async Task<string> PreviewAsync(string ffmpeg, VodProject project, IProgress<Progress>? progress, CancellationToken ct)
+    {
+        var signals = project.LoadSignals() ?? throw new InvalidOperationException("The recording's analysis isn't there any more: make the edit again.");
+        if (BrandProvider is not null) project.Brand = BrandProvider();
+        var plan = VodPlanner.Plan(signals, project.Options(), project.Tweaks);
+        project.Remember(plan);
+        var small = plan.Resized(640, 360, 30);
+        string folder = Path.Combine(project.WorkDir, "preview");
+        Directory.CreateDirectory(folder);
+        foreach (var old in Directory.EnumerateFiles(folder, "*.mp4")) try { File.Delete(old); } catch { } // (one playing can't go: it does next time)
+        var result = await VodRenderer.RenderAsync(ffmpeg, project.Recording, small, folder, $"preview {DateTime.Now:HHmmss}",
+            new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p" }, signals,
+            new Progress<(double, string)>(x => progress?.Report(new Progress(x.Item1, "Preview: " + x.Item2))), ct,
+            Path.Combine(project.WorkDir, "preview-pieces"), draft: true);
+        return result.Video;
     }
 
     /// <summary>"Title - date.mp4" → "Title - date (2)", then (3)…</summary>

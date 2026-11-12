@@ -26,6 +26,12 @@ public sealed class Piece
     /// <summary>The transition into / out of this piece (<see cref="TransitionKinds"/>; null = a plain cut).</summary>
     public string? TransIn { get; set; }
     public string? TransOut { get; set; }
+    /// <summary>Another file this piece comes from (your intro clip), instead of the recording.</summary>
+    public string? Source { get; init; }
+    /// <summary>A picture laid over the middle of the piece (your logo in the intro).</summary>
+    public string? Image { get; init; }
+    /// <summary>Darkened under text (the intro).</summary>
+    public bool Darken { get; init; }
     /// <summary>A replay laid over this piece (the VAR check: what you did, while you say it).</summary>
     public PieceOverlay? Overlay { get; set; }
     /// <summary>Face pieces: the camera's spot on the picture (crop to it).</summary>
@@ -35,7 +41,8 @@ public sealed class Piece
     public double Length => Hold > 0 ? Hold : (Out - In) / Speed;
 }
 
-public sealed record SfxCue(double At, SfxKind Kind, float Gain);
+/// <param name="Seed">A fixed seed: the same sound every video (the intro's sting); 0 = varied.</param>
+public sealed record SfxCue(double At, SfxKind Kind, float Gain, int Seed = 0);
 
 /// <summary>Footage played over a piece: source In–Out, sped up to fit Length seconds, starting Start seconds into the piece.</summary>
 public sealed record PieceOverlay(double In, double Out, double Start, double Length, string Quote);
@@ -93,6 +100,8 @@ public sealed class EditPlan
     /// <summary>Music and sound-effect levels (1 = as made).</summary>
     public double MusicVolume { get; set; } = 1;
     public double SfxVolume { get; set; } = 1;
+    /// <summary>Your channel's look (intro, music, end screen).</summary>
+    public VodBrand Brand { get; set; } = new();
     /// <summary>The cuts between clips (for the review panel), in order.</summary>
     public List<CutInfo> Cuts { get; } = new();
     /// <summary>Parts brought to one loudness (each piece's <see cref="Piece.GainDb"/>, plus smoothing in the mix).</summary>
@@ -103,6 +112,26 @@ public sealed class EditPlan
     public double Duration => Pieces.Count == 0 ? 0 : Pieces[^1].At + FramesOf(Pieces[^1]) / Fps;
     /// <summary>A piece's length in whole frames (every piece is rendered to exactly this many).</summary>
     public int FramesOf(Piece p) => Math.Max(1, (int)Math.Round(p.Length * Fps));
+
+    /// <summary>The same edit at another size (the quick preview: everything placed the same, text scaled with it).</summary>
+    public EditPlan Resized(int width, int height, double fps)
+    {
+        var p = new EditPlan { Width = width, Height = height, Fps = fps, Title = Title, Layout = Layout };
+        p.Pieces.AddRange(Pieces); p.Sfx.AddRange(Sfx); p.Music.AddRange(Music); p.Texts.AddRange(Texts); p.Captions.AddRange(Captions);
+        p.Chapters.AddRange(Chapters); p.Moments.AddRange(Moments); p.Cuts.AddRange(Cuts);
+        p.MusicVolume = MusicVolume; p.SfxVolume = SfxVolume; p.Brand = Brand; p.EvenLoudness = EvenLoudness; p.BestMoment = BestMoment;
+        return p;
+    }
 }
 
-public sealed record VodEditOptions(string Title, double TargetSeconds = 900, bool Captions = true, bool Music = true, string Socials = "", bool Chapters = true);
+public sealed record VodEditOptions(string Title, double TargetSeconds = 900, bool Captions = true, bool Music = true, string Socials = "", bool Chapters = true,
+    VodBrand? Brand = null);
+
+/// <summary>
+/// Your channel's look, the same on every video (so the intro becomes recognisable): the channel name, your logo,
+/// your music (a folder of tracks, e.g. a game's soundtrack you have; one intro track so the intro always sounds the
+/// same), an intro clip of your own footage, a hook up front and an end screen laid out for YouTube's end-screen
+/// elements. The look is Wizard101-styled (gold, deep blue, a fantasy serif) whatever game the video is.
+/// </summary>
+public sealed record VodBrand(string Channel = "", string? Logo = null, string? MusicFolder = null, string? IntroMusic = null, string? IntroClip = null,
+    string MusicSource = "generated", bool EndScreen = true, bool Hook = true);

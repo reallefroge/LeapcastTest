@@ -24,9 +24,15 @@ public sealed class VodEditWindow : Window
     private readonly ListBox _list = new() { Height = 190 };
     private readonly TextBox _title = new(), _minutes = new() { Width = 60 };
     private readonly CheckBox _captions = new() { Content = "Captions", IsChecked = true, Margin = new Thickness(0, 0, 16, 0) };
-    private readonly CheckBox _music = new() { Content = "Music (original, made for each video)", IsChecked = true, Margin = new Thickness(0, 0, 16, 0) };
+    private readonly CheckBox _music = new() { Content = "Music", IsChecked = true, Margin = new Thickness(0, 0, 16, 0) };
     private readonly CheckBox _chapters = new() { Content = "Chapters", IsChecked = true, ToolTip = "Chapter cards on screen (\"MEETING 1\", \"ROUND 2\"…) and chapter times in the description" };
     private readonly ComboBox _mode = new() { MinWidth = 300, ItemsSource = new[] { "Fully automatic: make the whole video", "Review before rendering: see every cut and the editor's suggestions, then render" } };
+    private readonly TextBox _channel = new() { Width = 260 };
+    private static readonly string[] MusicSources = { "kit", "none" };
+    private readonly ComboBox _musicSource = new() { Width = 260, ItemsSource = new[] { "Wizard101 kit (the game's own music)", "No music" } };
+    private readonly CheckBox _hook = new() { Content = "Hook (your best moments first)", Margin = new Thickness(0, 0, 16, 0) };
+    private readonly CheckBox _endScreen = new() { Content = "End screen (previous video, watch next, subscribe)" };
+    private readonly TextBlock _kitText = new() { TextWrapping = TextWrapping.Wrap, FontSize = 11, Margin = new Thickness(0, 4, 0, 0) };
     private readonly TextBlock _learned = new() { TextWrapping = TextWrapping.Wrap, FontSize = 11, Margin = new Thickness(0, 6, 0, 0) };
     private readonly TextBlock _folder = new() { TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private readonly ProgressBar _bar = new() { Height = 8, Maximum = 1, Margin = new Thickness(0, 12, 0, 6) };
@@ -73,6 +79,30 @@ public sealed class VodEditWindow : Window
         modeRow.Children.Add(_mode);
         _mode.SelectedIndex = _settings.VodEditReviewFirst ? 1 : 0;
         p.Children.Add(modeRow);
+        // your channel: the intro and end screen (Wizard101-styled on every video), and the music
+        p.Children.Add(Label("Your channel (the intro and end screen, the same on every video)"));
+        var chRow = new StackPanel { Orientation = Orientation.Horizontal };
+        chRow.Children.Add(new TextBlock { Text = "Channel name", Width = 110, VerticalAlignment = VerticalAlignment.Center });
+        chRow.Children.Add(_channel);
+        p.Children.Add(chRow);
+        var muRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        muRow.Children.Add(new TextBlock { Text = "Music", Width = 110, VerticalAlignment = VerticalAlignment.Center });
+        muRow.Children.Add(_musicSource);
+        var openKit = new Button { Content = "Open the kit folder", Margin = new Thickness(8, 0, 0, 0) };
+        openKit.Click += (_, _) => { VodKit.Ensure(); try { Process.Start(new ProcessStartInfo(VodKit.Folder) { UseShellExecute = true }); } catch { } ShowKit(); };
+        muRow.Children.Add(openKit);
+        p.Children.Add(muRow);
+        p.Children.Add(_kitText);
+        var hkRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        hkRow.Children.Add(_hook); hkRow.Children.Add(_endScreen);
+        p.Children.Add(hkRow);
+        _kitText.Foreground = Res("MutedBrush");
+        _channel.Text = _settings.VodChannel;
+        _musicSource.SelectedIndex = Math.Max(0, Array.IndexOf(MusicSources, _settings.VodMusicSource));
+        _hook.IsChecked = _settings.VodHook; _endScreen.IsChecked = _settings.VodEndScreen;
+        _musicSource.SelectionChanged += (_, _) => ShowKit();
+        VodEditor.BrandProvider = CurrentBrand;
+        ShowKit();
         // what the editor has learned from your earlier edits (each new edit starts from it)
         var learnRow = new DockPanel { Margin = new Thickness(0, 4, 0, 0) };
         var forget = new Button { Content = "Forget what it learned", FontSize = 11, Padding = new Thickness(8, 2, 8, 2), VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(8, 4, 0, 0) };
@@ -132,6 +162,19 @@ public sealed class VodEditWindow : Window
 
     private static string StylePath => Path.Combine(StateStore.Folder, "vod-style.json");
 
+    /// <summary>Your channel's look, from these settings and the kit as it is right now.</summary>
+    private VodBrand CurrentBrand() => Dispatcher.Invoke(() => VodKit.Brand(_channel.Text.Trim(), MusicSources[Math.Max(0, _musicSource.SelectedIndex)],
+        _hook.IsChecked == true, _endScreen.IsChecked == true));
+
+    private void ShowKit()
+    {
+        bool kit = _musicSource.SelectedIndex <= 0;
+        VodEditor.HarvestKit = kit;
+        _kitText.Text = kit
+            ? $"Your Wizard101 kit fills itself: each Wizard101 stream you edit adds stretches of the game's music (where nobody talks), and the first sets the intro clip and its music, which then stay the same on every video, Among Us included. Drop your own tracks, logo (PNG) or intro clip in any time. Now: {VodKit.Summary()}."
+            : "No music: just the stream's own sound.";
+    }
+
     private void ShowLearned()
     {
         var st = EditStyle.Load(StylePath);
@@ -174,6 +217,142 @@ public sealed class VodEditWindow : Window
     private bool _loadingVersions;
     private readonly Button _rerender = new() { Content = "Re-render with changes", MinWidth = 190 };
 
+    // ---- the player: watch what you're giving feedback on
+    private readonly MediaElement _player = new() { LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Close, Stretch = Stretch.Uniform, Volume = 1, ScrubbingEnabled = true };
+    private readonly Slider _seek = new() { Minimum = 0, Maximum = 1, VerticalAlignment = VerticalAlignment.Center, IsMoveToPointEnabled = true };
+    private readonly TextBlock _time = new() { Width = 110, VerticalAlignment = VerticalAlignment.Center, FontSize = 12, Margin = new Thickness(8, 0, 0, 0) };
+    private readonly TextBlock _watching = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 4, 0, 0) };
+    private readonly Button _playPause = new() { Content = "▶", Width = 38 };
+    private readonly Button _previewButton = new() { Content = "Quick preview of the edit", Margin = new Thickness(8, 0, 0, 0) };
+    private readonly System.Windows.Threading.DispatcherTimer _tick = new() { Interval = TimeSpan.FromMilliseconds(200) };
+    private string? _watchFile;
+    private bool _watchIsEdit, _playing, _seeking;
+    private double? _stopAt;
+
+    private FrameworkElement BuildPlayer()
+    {
+        var box = new StackPanel { Margin = new Thickness(0, 8, 0, 0) };
+        box.Children.Add(new Border { Background = Brushes.Black, CornerRadius = new CornerRadius(6), Height = 300, Child = _player, ClipToBounds = true });
+        var bar = new DockPanel { Margin = new Thickness(0, 6, 0, 0) };
+        bar.Children.Add(_playPause); DockPanel.SetDock(_playPause, Dock.Left);
+        bar.Children.Add(_previewButton); DockPanel.SetDock(_previewButton, Dock.Right);
+        var note = new Button { Content = "Note at this time", Margin = new Thickness(8, 0, 0, 0), ToolTip = "Adds the time you're at to “What should change?”, then write what to change there" };
+        bar.Children.Add(note); DockPanel.SetDock(note, Dock.Right);
+        bar.Children.Add(_time); DockPanel.SetDock(_time, Dock.Right);
+        _seek.Margin = new Thickness(8, 0, 0, 0);
+        bar.Children.Add(_seek);
+        box.Children.Add(bar);
+        box.Children.Add(_watching);
+        _watching.Foreground = Res("MutedBrush"); _time.Foreground = Res("MutedBrush");
+
+        _playPause.Click += (_, _) => { if (_playing) Pause(); else Play(); };
+        _player.MediaOpened += (_, _) =>
+        {
+            _seek.Maximum = _player.NaturalDuration.HasTimeSpan ? Math.Max(1, _player.NaturalDuration.TimeSpan.TotalSeconds) : 1;
+            if (!_playing) { _player.Play(); _player.Pause(); } // the first frame shows
+        };
+        _player.MediaEnded += (_, _) => Pause();
+        _player.MediaFailed += (_, e) =>
+        {
+            _playing = false; _playPause.Content = "▶";
+            _watching.Text = $"This file can't play here ({e.ErrorException?.Message}). Press “Quick preview of the edit”: it makes a small version that plays here.";
+        };
+        _seek.PreviewMouseDown += (_, _) => _seeking = true;
+        _seek.PreviewMouseUp += (_, _) => { _seeking = false; _stopAt = null; _player.Position = TimeSpan.FromSeconds(_seek.Value); };
+        _tick.Tick += (_, _) =>
+        {
+            if (_watchFile is null) return;
+            double at = _player.Position.TotalSeconds;
+            if (!_seeking) _seek.Value = Math.Min(_seek.Maximum, at);
+            _time.Text = $"{EditFeedback.Clock(at)} / {EditFeedback.Clock(_seek.Maximum)}";
+            if (_stopAt is { } stop && at >= stop) { _stopAt = null; Pause(); }
+        };
+        _tick.Start();
+        Closed += (_, _) => { _tick.Stop(); try { _player.Close(); } catch { } };
+        note.Click += (_, _) =>
+        {
+            string at = EditFeedback.Clock(_player.Position.TotalSeconds) + (_watchIsEdit ? "" : " of the stream");
+            string add = $"at {at}: ";
+            _feedback.Text = _feedback.Text.TrimEnd() is { Length: > 0 } cur ? cur + Environment.NewLine + add : add;
+            _feedback.Focus(); _feedback.CaretIndex = _feedback.Text.Length;
+            Pause();
+        };
+        _previewButton.Click += async (_, _) => await PreviewAsync();
+        return box;
+    }
+
+    private void Play() { if (_watchFile is null) return; _player.Play(); _playing = true; _playPause.Content = "❚❚"; }
+    private void Pause() { _player.Pause(); _playing = false; _playPause.Content = "▶"; }
+
+    /// <summary>What the player shows: your video (or its quick preview), or the recording before there's either.</summary>
+    private void Watch(string file, bool isEdit, string what)
+    {
+        _stopAt = null;
+        if (!string.Equals(_watchFile, file, StringComparison.OrdinalIgnoreCase))
+        {
+            _playing = false; _playPause.Content = "▶";
+            try { _player.Close(); } catch { }
+            _watchFile = file; _watchIsEdit = isEdit;
+            _player.Source = new Uri(file);
+        }
+        _watching.Text = what;
+    }
+
+    /// <summary>Plays a spot: in the edit when you're watching the edit, else in the recording (just that stretch).</summary>
+    private void PlayAt(double videoAt, double sourceAt, double sourceLen)
+    {
+        if (_watchFile is null) return;
+        if (_watchIsEdit) { _stopAt = null; _player.Position = TimeSpan.FromSeconds(Math.Max(0, videoAt)); }
+        else { _player.Position = TimeSpan.FromSeconds(Math.Max(0, sourceAt)); _stopAt = sourceAt + sourceLen; }
+        Play();
+    }
+
+    private Button PlayButton(Action play) => new()
+    {
+        Content = "▶", Width = 30, Height = 24, Padding = new Thickness(0), Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center,
+        ToolTip = "Watch this", Tag = play,
+    };
+
+    private Button Watchable(Action play) { var b = PlayButton(play); b.Click += (_, _) => play(); return b; }
+
+    /// <summary>The player's starting point for this project: the video, else the recording.</summary>
+    private void WatchProject(VodProject pr)
+    {
+        if (pr.Video.Length > 0 && File.Exists(pr.Video))
+            Watch(pr.Video, true, $"Watching your video ({Path.GetFileName(pr.Video)}). ▶ next to a cut or a moment jumps there; “Note at this time” puts the time in your feedback.");
+        else if (File.Exists(pr.Recording))
+            Watch(pr.Recording, false, "Watching the recording: ▶ next to a moment plays it, ▶ next to a cut plays the clip after it. To watch the edit itself (cuts, text, music), press “Quick preview of the edit”: a small, fast version made in a fraction of the render's time.");
+    }
+
+    private async Task PreviewAsync()
+    {
+        if (_project is not { } pr) return;
+        if (_engine.FfmpegPath is not { } ffmpeg) { _step.Text = "FFmpeg isn't available."; return; }
+        if (_feedback.Text.Trim().Length > 0 && _understood.Text.Length == 0) ApplyFeedback();
+        ReadControls();
+        Pause();
+        try { _player.Close(); } catch { }
+        _watchFile = null;
+        _cts = new CancellationTokenSource();
+        _start.IsEnabled = false; _rerender.IsEnabled = false; _previewButton.IsEnabled = false; _cancel.IsEnabled = true;
+        var started = DateTime.Now;
+        try
+        {
+            var progress = new Progress<VodEditor.Progress>(x => { _bar.Value = x.Fraction; _step.Text = x.Step; });
+            VodRenderer.LogPath = Path.Combine(StateStore.Folder, "logs", "vod-edit.log");
+            Busy = true;
+            string file = await Task.Run(() => VodEditor.PreviewAsync(ffmpeg, pr, progress, _cts.Token)).ContinueWith(t => { Busy = false; return t; }).Unwrap();
+            RefreshControls(); // the times now match the preview
+            Watch(file, true, $"Watching a quick preview of the edit as it stands (small and fast, captions not final; made in {(DateTime.Now - started):m\\:ss}). ▶ next to a cut or moment jumps there. Change anything, preview again (only what changed is remade), then render.");
+            _bar.Value = 0.3;
+            _step.Text = "Preview ready: watch it above.";
+            Play();
+        }
+        catch (OperationCanceledException) { _step.Text = "Stopped."; _bar.Value = 0; WatchProject(pr); }
+        catch (Exception ex) { _step.Text = "Couldn't make the preview: " + ex.Message + " (details in logs\\vod-edit.log)"; VodRenderer.Note("Preview failed: " + ex); WatchProject(pr); }
+        finally { _cts = null; _start.IsEnabled = true; _rerender.IsEnabled = true; _previewButton.IsEnabled = true; _cancel.IsEnabled = false; }
+    }
+
     private FrameworkElement BuildRevisePanel()
     {
         _revise.Background = Res("FieldBrush"); _revise.BorderBrush = Res("LineBrush");
@@ -194,6 +373,7 @@ public sealed class VodEditWindow : Window
             _step.Text = "Revising from " + Path.GetFileName(video) + " (with the changes it was made with)";
             ShowRevise(older);
         };
+        r.Children.Add(BuildPlayer());
         r.Children.Add(new TextBlock { Foreground = Res("MutedBrush"), TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 2, 0, 8),
             Text = "Say what to change, or change it below. The recording isn't watched again and unchanged parts are reused, so a revision is quick." });
         r.Children.Add(Label("What should change?"));
@@ -263,6 +443,7 @@ public sealed class VodEditWindow : Window
         _understood.Text = "";
         RefreshVersions();
         RefreshControls();
+        WatchProject(project);
     }
 
     /// <summary>Every version made from the same recording (the original and each revision), newest first.</summary>
@@ -327,11 +508,13 @@ public sealed class VodEditWindow : Window
                 SelectedIndex = pick?.Sound is { } pso ? 1 + Math.Max(0, Array.IndexOf(TransitionKinds.Sounds, pso)) : 0 };
             var row = new StackPanel { Margin = new Thickness(0, 2, 0, 4) };
             var line = new StackPanel { Orientation = Orientation.Horizontal };
+            var cut = c;
+            line.Children.Add(Watchable(() => PlayAt(cut.At - 2.5, cut.From, 5)));
             line.Children.Add(new TextBlock { Text = EditFeedback.Clock(c.At), Width = 46, VerticalAlignment = VerticalAlignment.Center, Foreground = Res("MutedBrush") });
             line.Children.Add(sc); line.Children.Add(so);
             row.Children.Add(line);
             row.Children.Add(new TextBlock { Text = $"now: {TransitionKinds.Name(c.Style)}, {TransitionKinds.SoundName(c.Sound).ToLowerInvariant()} · suggested: {TransitionKinds.Name(c.Suggested)} ({c.Why})",
-                FontSize = 11, Foreground = Res("MutedBrush"), Margin = new Thickness(46, 1, 0, 0), TextWrapping = TextWrapping.Wrap });
+                FontSize = 11, Foreground = Res("MutedBrush"), Margin = new Thickness(82, 1, 0, 0), TextWrapping = TextWrapping.Wrap });
             _cutRows.Children.Add(row);
         }
         if (pr.Cuts.Count == 0) _cutRows.Children.Add(new TextBlock { Text = "One clip: no cuts between clips.", Foreground = Res("MutedBrush"), FontSize = 12 });
@@ -341,8 +524,12 @@ public sealed class VodEditWindow : Window
         foreach (var m in pr.Moments)
         {
             bool removed = t.Remove.Any(r => r[0] <= m.From + 0.5 && r[1] >= m.To - 0.5);
-            _moments.Children.Add(new CheckBox { IsChecked = !removed, Tag = m, Margin = new Thickness(0, 2, 0, 2),
+            var mm = m;
+            var line = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 1, 0, 1) };
+            line.Children.Add(Watchable(() => PlayAt(mm.At, mm.From, mm.To - mm.From)));
+            line.Children.Add(new CheckBox { IsChecked = !removed, Tag = m, VerticalAlignment = VerticalAlignment.Center,
                 Content = $"{EditFeedback.Clock(m.At)}  ·  {(m.Quote.Length > 0 ? "“" + m.Quote + "”" : "(no words)")}  ·  from {EditFeedback.Clock(m.From)} of the recording" });
+            _moments.Children.Add(line);
         }
     }
 
@@ -389,7 +576,7 @@ public sealed class VodEditWindow : Window
         t.Shake = _rShake.IsChecked == true; t.Letterbox = _rLetterbox.IsChecked == true;
         t.SfxVolume = _sfxVol.Value;
         if (t.Chapters && !pr.ChapterCards) pr.ChapterCards = true; // made without, wanted now
-        foreach (var cb in _moments.Children.OfType<CheckBox>())
+        foreach (var cb in _moments.Children.OfType<StackPanel>().SelectMany(l => l.Children.OfType<CheckBox>()))
             if (cb.Tag is EditMoment m)
             {
                 t.Remove.RemoveAll(r => r[0] <= m.From + 0.5 && r[1] >= m.To - 0.5);
@@ -510,6 +697,9 @@ public sealed class VodEditWindow : Window
         _settings.VodEditMinutes = minutes;
         _settings.VodEditChapters = _chapters.IsChecked == true;
         _settings.VodEditReviewFirst = _mode.SelectedIndex == 1;
+        _settings.VodChannel = _channel.Text.Trim();
+        _settings.VodMusicSource = MusicSources[Math.Max(0, _musicSource.SelectedIndex)];
+        _settings.VodHook = _hook.IsChecked == true; _settings.VodEndScreen = _endScreen.IsChecked == true;
         _save();
         _cts = new CancellationTokenSource();
         _start.IsEnabled = false; _cancel.IsEnabled = true; _open.Visibility = Visibility.Collapsed;
@@ -517,7 +707,7 @@ public sealed class VodEditWindow : Window
         try
         {
             var opts = new VodEditOptions(_title.Text.Trim().Length == 0 ? "Stream highlights" : _title.Text.Trim(), minutes * 60, _captions.IsChecked == true,
-                _music.IsChecked == true, _settings.RecapSocials, _chapters.IsChecked == true);
+                _music.IsChecked == true, _settings.RecapSocials, _chapters.IsChecked == true, CurrentBrand());
             var progress = new Progress<VodEditor.Progress>(x => { _bar.Value = x.Fraction; _step.Text = x.Step; });
             VodRenderer.LogPath = Path.Combine(StateStore.Folder, "logs", "vod-edit.log");
             if (BackgroundWork.Live) _step.Text = "You're live: editing slowly in the background so the stream stays smooth (full speed once you stop).";
@@ -531,7 +721,7 @@ public sealed class VodEditWindow : Window
                 // review first: the plan, every cut with the editor's suggestions; render when it's right
                 if (VodEditor.LastProject is { } planned) ShowRevise(planned, review: true);
                 _bar.Value = 0.3;
-                _step.Text = $"Planned in {(DateTime.Now - started):m\\:ss}: {planned_summary()}. Go through the cuts and moments below (the editor's suggestion is marked), change anything, then press “Render”."
+                _step.Text = $"Planned in {(DateTime.Now - started):m\\:ss}: {planned_summary()}. Press “Quick preview of the edit” to watch it (or ▶ any moment or cut), change anything below, then press “Render”."
                              + (VodEditor.LastProject?.LearnedNote is { Length: > 0 } ln ? " " + ln : "");
                 return;
                 string planned_summary() => VodEditor.LastProject is { } pp ? $"{pp.Moments.Count} moments, {pp.Cuts.Count} cuts, {TimeSpan.FromSeconds(pp.Duration):m\\:ss} long" : "";
