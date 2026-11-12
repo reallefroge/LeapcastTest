@@ -21,6 +21,13 @@ public sealed class Piece
     public bool Letterbox { get; set; }
     public bool Blur { get; set; }
     public bool Mute { get; set; }
+    /// <summary>Level change for this piece's sound (dB): evens out loud and quiet parts.</summary>
+    public double GainDb { get; set; }
+    /// <summary>The transition into / out of this piece (<see cref="TransitionKinds"/>; null = a plain cut).</summary>
+    public string? TransIn { get; set; }
+    public string? TransOut { get; set; }
+    /// <summary>A replay laid over this piece (the VAR check: what you did, while you say it).</summary>
+    public PieceOverlay? Overlay { get; set; }
     /// <summary>Face pieces: the camera's spot on the picture (crop to it).</summary>
     public LayoutRect? Crop { get; init; }
     /// <summary>Where the piece starts in the finished video.</summary>
@@ -29,6 +36,40 @@ public sealed class Piece
 }
 
 public sealed record SfxCue(double At, SfxKind Kind, float Gain);
+
+/// <summary>Footage played over a piece: source In–Out, sped up to fit Length seconds, starting Start seconds into the piece.</summary>
+public sealed record PieceOverlay(double In, double Out, double Start, double Length, string Quote);
+
+/// <summary>A cut between two clips of the edit: what the editor suggests there, and what it uses.</summary>
+/// <param name="From">Where the incoming clip starts in the recording (stays put when the edit is re-planned).</param>
+public sealed record CutInfo(double At, double From, string Style, string Sound, string Suggested, string SuggestedSound, string Why, IReadOnlyList<string> Options);
+
+/// <summary>The transitions the editor can put between clips, and the sounds that can go with them.</summary>
+public static class TransitionKinds
+{
+    public const string None = "none", Whip = "whip", Fade = "fade", Flash = "flash", Blur = "blur", Zoom = "zoom", Glitch = "glitch", Timelapse = "timelapse", Mixed = "mixed";
+    public static readonly string[] Styles = { None, Whip, Fade, Flash, Blur, Zoom, Glitch, Timelapse };
+    public static readonly string[] Sounds = { "none", "whoosh", "soft", "pop", "impact", "riser" };
+    public static string Name(string style) => style switch
+    {
+        None => "Cut", Whip => "Whip pan", Fade => "Fade through black", Flash => "Flash to white", Blur => "Blur", Zoom => "Zoom punch",
+        Glitch => "Glitch", Timelapse => "Timelapse (fast-forward the time between)", Mixed => "Varied (the editor picks per cut)", _ => style,
+    };
+    public static string SoundName(string sound) => sound switch
+    {
+        "none" => "No sound", "whoosh" => "Whoosh", "soft" => "Soft whoosh", "pop" => "Pop", "impact" => "Impact", "riser" => "Riser",
+        "auto" => "Matches the transition", Mixed => "Varied", _ => sound,
+    };
+    /// <summary>The sound that suits a transition.</summary>
+    public static string SoundFor(string style) => style switch
+    {
+        Whip => "whoosh", Fade => "soft", Flash => "impact", Blur => "soft", Zoom => "riser", Glitch => "pop", Timelapse => "soft", _ => "none",
+    };
+    public static SfxKind? Kind(string sound) => sound switch
+    {
+        "whoosh" => SfxKind.Whoosh, "soft" => SfxKind.SoftWhoosh, "pop" => SfxKind.Pop, "impact" => SfxKind.Impact, "riser" => SfxKind.Riser, _ => null,
+    };
+}
 public sealed record MusicSpan(double From, double To, Mood Mood, int Seed, bool TapeStopAtEnd, MusicStyle Style = MusicStyle.Edm);
 /// <summary>On-screen text: title, chapter, later, end (timeline seconds).</summary>
 public sealed record TextCue(string Kind, double At, double Len, string Text, string? Sub = null);
@@ -52,6 +93,10 @@ public sealed class EditPlan
     /// <summary>Music and sound-effect levels (1 = as made).</summary>
     public double MusicVolume { get; set; } = 1;
     public double SfxVolume { get; set; } = 1;
+    /// <summary>The cuts between clips (for the review panel), in order.</summary>
+    public List<CutInfo> Cuts { get; } = new();
+    /// <summary>Parts brought to one loudness (each piece's <see cref="Piece.GainDb"/>, plus smoothing in the mix).</summary>
+    public bool EvenLoudness { get; set; }
     /// <summary>The best moment (source seconds): the thumbnail's frame.</summary>
     public double BestMoment { get; set; }
     public ClipLayout? Layout { get; init; }

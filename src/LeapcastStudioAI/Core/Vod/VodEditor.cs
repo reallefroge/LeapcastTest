@@ -15,8 +15,10 @@ public static class VodEditor
     /// <summary>The edit just made or revised (for the review panel).</summary>
     public static VodProject? LastProject { get; private set; }
 
-    public static Task<VodRenderer.Result> MakeAsync(string ffmpeg, string recording, string outputFolder, VodEditOptions options,
-        Func<int, int, double, IReadOnlyList<string>> videoArgs, IProgress<Progress>? progress, CancellationToken ct)
+    /// <param name="reviewFirst">Plan the edit and stop (returns null): the review panel shows it, with the editor's
+    /// suggestion for every cut, and you render it when it's how you want it.</param>
+    public static Task<VodRenderer.Result?> MakeAsync(string ffmpeg, string recording, string outputFolder, VodEditOptions options,
+        Func<int, int, double, IReadOnlyList<string>> videoArgs, IProgress<Progress>? progress, CancellationToken ct, bool reviewFirst = false)
     {
         var project = new VodProject
         {
@@ -24,19 +26,22 @@ public static class VodEditor
             Captions = options.Captions, Music = options.Music, Socials = options.Socials, ChapterCards = options.Chapters,
         };
         CleanOldWork(outputFolder);
-        return RunAsync(ffmpeg, project, videoArgs, progress, ct, revise: false);
+        return RunAsync(ffmpeg, project, videoArgs, progress, ct, revise: false, planOnly: reviewFirst);
     }
+
+    /// <summary>Where what the editor learns about your taste is kept (set by the app; null = nothing learned or used).</summary>
+    public static string? StylePath { get; set; }
 
     /// <summary>
     /// Makes the edit again with your changes (<see cref="VodProject.Tweaks"/>): nothing is watched again, captions
     /// already written are kept, and pieces that didn't change are reused, so a revision takes a fraction of the time.
     /// </summary>
-    public static Task<VodRenderer.Result> ReviseAsync(string ffmpeg, VodProject project,
+    public static async Task<VodRenderer.Result> ReviseAsync(string ffmpeg, VodProject project,
         Func<int, int, double, IReadOnlyList<string>> videoArgs, IProgress<Progress>? progress, CancellationToken ct) =>
-        RunAsync(ffmpeg, project, videoArgs, progress, ct, revise: true);
+        (await RunAsync(ffmpeg, project, videoArgs, progress, ct, revise: true))!;
 
-    private static async Task<VodRenderer.Result> RunAsync(string ffmpeg, VodProject project,
-        Func<int, int, double, IReadOnlyList<string>> videoArgs, IProgress<Progress>? progress, CancellationToken ct, bool revise)
+    private static async Task<VodRenderer.Result?> RunAsync(string ffmpeg, VodProject project,
+        Func<int, int, double, IReadOnlyList<string>> videoArgs, IProgress<Progress>? progress, CancellationToken ct, bool revise, bool planOnly = false)
     {
         var total = Stopwatch.StartNew();
         var step = Stopwatch.StartNew();
@@ -67,28 +72,53 @@ public static class VodEditor
             Took($"watching {TimeSpan.FromSeconds(signals.Duration):h\\:mm\\:ss} of recording");
         }
 
+        // the game, and (on a new edit) what you've liked in your edits of it before
+        VodPlanner.GamePhases(signals, Math.Max(1, (int)Math.Ceiling(signals.Duration / VodPlanner.Bin)), out bool amongUs);
+        project.Game = amongUs ? "Among Us" : "other";
+        if (!revise && StylePath is { } sp)
+        {
+            var (learned, note) = EditStyle.Load(sp).Learned(project.Game);
+            project.Tweaks = learned;
+            project.LearnedNote = note;
+            if (note.Length > 0) VodRenderer.Note("learned: " + note);
+        }
+
         // 2. the edit
         progress?.Report(new Progress(0.25, revise ? "Re-planning with your changes" : "Finding the best moments"));
         var plan = VodPlanner.Plan(signals, options, project.Tweaks);
         Took($"planning ({plan.Pieces.Count} pieces, {TimeSpan.FromSeconds(plan.Duration):mm\\:ss} long)");
 
-        // 3. precise captions, only for what made the cut (and only what isn't written already)
-        if (options.Captions && Whisper.Ready)
+        if (planOnly)
         {
-            await CaptionAsync(ffmpeg, project, plan, signals,
-                new Progress<double>(f => progress?.Report(new Progress(0.25 + 0.1 * f, $"Writing the captions ({f:P0})"))), ct);
-            Took("captions (Whisper)");
+            // review first: nothing rendered yet; the review panel shows the plan and its suggestions
+            project.Remember(plan);
+            LastProject = project;
+            VodRenderer.Note($"Planned for review in {total.Elapsed:h\\:mm\\:ss}");
+            return null;
         }
 
-        // 4. render (pieces that didn't change are reused)
+        // 3 + 4. precise captions (only for what made the cut, only what isn't written already) while the pieces render
+        // (pieces don't need them; the music and the text at the end do)
+        Task? captions = null;
+        if (options.Captions && Whisper.Ready)
+        {
+            var capWatch = Stopwatch.StartNew();
+            captions = Task.Run(async () =>
+            {
+                await CaptionAsync(ffmpeg, project, plan, signals, new Progress<double>(_ => { }), ct);
+                VodRenderer.Note($"captions (Whisper, alongside the pieces): {capWatch.Elapsed:mm\\:ss}");
+            }, ct);
+        }
         string baseName = revise && project.Video.Length > 0 ? NextVersion(project.Video) : $"{Safe(options.Title)} - {DateTime.Now:yyyy-MM-dd HH-mm}";
         var result = await VodRenderer.RenderAsync(ffmpeg, recording, plan, project.OutputFolder, baseName, videoArgs(plan.Width, plan.Height, plan.Fps), signals,
-            new Progress<(double, string)>(x => progress?.Report(new Progress(0.35 + 0.65 * x.Item1, x.Item2))), ct, Path.Combine(project.WorkDir, "pieces"));
+            new Progress<(double, string)>(x => progress?.Report(new Progress(0.3 + 0.7 * x.Item1, x.Item2))), ct, Path.Combine(project.WorkDir, "pieces"), captions);
         Took($"rendering ({VodRenderer.Fallbacks} fallback(s), {VodRenderer.Reused} of {plan.Pieces.Count} pieces reused, pieces encoded with {VodRenderer.PieceEncoder})");
         VodRenderer.Note($"Done in {total.Elapsed:h\\:mm\\:ss}");
         project.Video = result.Video;
         project.Remember(plan);
         try { project.Save(); } catch { }
+        // every video you make or revise teaches the editor your taste (the last version of each edit counts)
+        if (StylePath is { } stylePath) try { var st = EditStyle.Load(stylePath); st.Record(project); st.Save(stylePath); } catch { }
         LastProject = project;
         return result;
     }

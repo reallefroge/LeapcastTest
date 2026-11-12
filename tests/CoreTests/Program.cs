@@ -14,11 +14,25 @@ if (args.Length > 0 && args[0] == "--burn")
 }
 
 int failures = 0;
+// quick mode: revise feedback in many phrasings
+if (args.Length > 0 && args[0] == "--feedback")
+{
+    int fbFails = 0;
+    VodTests.FeedbackPhrasings((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) fbFails++; });
+    foreach (var text in args.Skip(1))
+    {
+        var p = new LeapcastStudioAI.Vod.VodProject { TargetSeconds = 900, Duration = 600 };
+        var r = LeapcastStudioAI.Vod.EditFeedback.Apply(text, p);
+        Console.WriteLine($"  “{text}” → {LeapcastStudioAI.Vod.EditFeedback.Normalize(text)} → {string.Join("; ", r.Understood)} | not: {string.Join("; ", r.NotUnderstood)}");
+    }
+    return fbFails == 0 ? 0 : 1;
+}
 // quick mode: the Among Us edit on made-up signals (no FFmpeg)
 if (args.Length > 0 && args[0] == "--au")
 {
     int af = 0;
     VodTests.AmongUsPlan((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
+    VodTests.Learning((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
     return af == 0 ? 0 : 1;
 }
 // quick mode: only the VOD editor tests
@@ -60,14 +74,21 @@ if (args.Length > 1 && args[0] == "--plan")
         b = e;
     }
     var popts = new LeapcastStudioAI.Vod.VodEditOptions("Among Us", 3600, Captions: false, Chapters: true);
-    var vplan = LeapcastStudioAI.Vod.VodPlanner.Plan(sig, popts);
+    // LEAPCAST_TWEAKS: the edit's settings as JSON (e.g. {"TransitionStyle":"mixed"})
+    var ptw = Environment.GetEnvironmentVariable("LEAPCAST_TWEAKS") is { Length: > 0 } tj
+        ? System.Text.Json.JsonSerializer.Deserialize<LeapcastStudioAI.Vod.EditTweaks>(tj)! : new LeapcastStudioAI.Vod.EditTweaks();
+    var vplan = LeapcastStudioAI.Vod.VodPlanner.Plan(sig, popts, ptw);
     Console.WriteLine($"plan: {vplan.Duration:0.0} s");
-    foreach (var pc in vplan.Pieces) Console.WriteLine($"  {pc.At,6:0.0}  {pc.Role,-7} {pc.In,6:0.0}–{pc.Out,6:0.0}  ({ph[Math.Clamp((int)(pc.In / 0.5), 0, nb - 1)]})");
+    foreach (var pc in vplan.Pieces) Console.WriteLine($"  {pc.At,6:0.0}  {pc.Role,-7} {pc.In,6:0.0}–{pc.Out,6:0.0}  ({ph[Math.Clamp((int)(pc.In / 0.5), 0, nb - 1)]}){(pc.Speed > 1 ? $" ×{pc.Speed:0.0}" : "")}{(pc.TransIn is { } ti ? " in:" + ti : "")}{(pc.TransOut is { } to ? " out:" + to : "")}{(pc.Overlay is { } ov ? $" VAR {ov.In:0}–{ov.Out:0} at +{ov.Start:0.0} for {ov.Length:0.0}s “{ov.Quote}”" : "")}");
     foreach (var (at, title) in vplan.Chapters) Console.WriteLine($"  chapter {at,6:0.0} {title}");
+    foreach (var c in vplan.Cuts) Console.WriteLine($"  cut {c.At,6:0.0}: {c.Style}/{c.Sound}  suggested {c.Suggested}/{c.SuggestedSound} ({c.Why})");
     if (args.Length > 3 && args[2] == "--render")
     {
-        var res = await LeapcastStudioAI.Vod.VodEditor.MakeAsync(pff, args[1], args[3], popts with { Captions = false },
-            (w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "22" }, null, CancellationToken.None);
+        var vargs = (Func<int, int, double, IReadOnlyList<string>>)((w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "22" });
+        await LeapcastStudioAI.Vod.VodEditor.MakeAsync(pff, args[1], args[3], popts with { Captions = false }, vargs, null, CancellationToken.None, reviewFirst: true);
+        var proj = LeapcastStudioAI.Vod.VodEditor.LastProject!;
+        proj.Tweaks = ptw;
+        var res = await LeapcastStudioAI.Vod.VodEditor.ReviseAsync(pff, proj, vargs, null, CancellationToken.None);
         Console.WriteLine(res.Video);
     }
     return 0;

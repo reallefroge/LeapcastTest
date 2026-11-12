@@ -488,6 +488,8 @@ public sealed class StudioSettings
     /// <summary>The VOD editor's target length (minutes).</summary>
     /// <summary>Chapter cards and description chapters in edited videos.</summary>
     public bool VodEditChapters { get; set; } = true;
+    /// <summary>VOD editor: plan the edit and show it for review (every cut with the editor's suggestions) before rendering.</summary>
+    public bool VodEditReviewFirst { get; set; }
     public int VodEditMinutes { get; set; } = 15;
     /// <summary>Leave Leapcast's own windows out of display captures (they show what's behind them).</summary>
     public bool HideFromCapture { get; set; }

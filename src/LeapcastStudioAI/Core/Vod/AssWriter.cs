@@ -124,6 +124,22 @@ public static class AssWriter
                     Ev(3, a, b, "Tag", $"{{\\move({x - 140},{y},{x},{y},0,220)\\fad(80,200)}}{Escape(t.Text)}");
                     break;
                 }
+                case "lapse":
+                {
+                    // fast-forward: the speed in the top right
+                    int x = (int)(W * 0.95), y = (int)(H * 0.07);
+                    Ev(3, a, b, "Tag", $"{{\\an9\\pos({x},{y})\\fad(80,120)}}{Escape(t.Text)}");
+                    break;
+                }
+                case "var":
+                {
+                    // VAR CHECK: a red banner above the replay, then what you said under it
+                    int ow = W * 44 / 100, x = W - ow / 2 - 4 - (int)(W * 0.03), y = (int)(H * 0.2) - (int)(H * 0.045);
+                    Ev(3, a, b, "Tag", $"{{\\an2\\pos({x},{y})\\fad(120,200)\\3c&H2020D0&\\4c&H2020D0&\\fscx70\\t(0,180,\\fscx100)}}{Escape(t.Text)}");
+                    if (!string.IsNullOrWhiteSpace(t.Sub))
+                        Ev(3, a + 0.2, b, "Quote", $"{{\\an8\\pos({x},{(int)(H * 0.2) + ow * H / W + 14})\\fad(160,200)\\fs{(int)(H * 0.034)}}}{Escape(t.Sub!)}");
+                    break;
+                }
                 case "end":
                 {
                     int x = (int)(W * 0.08), y = (int)(H * 0.42);

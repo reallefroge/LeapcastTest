@@ -13,7 +13,8 @@ public static class VodRenderer
 
     /// <param name="videoArgs">The final encode's video settings (the stream's encoder); intermediates use x264.</param>
     public static async Task<Result> RenderAsync(string ffmpeg, string source, EditPlan plan, string outputFolder, string baseName,
-        IReadOnlyList<string> videoArgs, VodSignals signals, IProgress<(double, string)>? progress, CancellationToken ct, string? pieceCache = null)
+        IReadOnlyList<string> videoArgs, VodSignals signals, IProgress<(double, string)>? progress, CancellationToken ct, string? pieceCache = null,
+        Task? captionsReady = null)
     {
         Directory.CreateDirectory(outputFolder);
         _fallbacks = 0;
@@ -91,6 +92,8 @@ public static class VodRenderer
             await RunAsync(ffmpeg, new[] { "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", listFile, "-c", "copy", body }, ct);
 
             // ---- music + sound effects, ducked under the stream's own sound
+            // the captions were written while the pieces rendered: the music ducks under them and the text needs them
+            if (captionsReady is not null) { progress?.Report((0.81, "Finishing the captions")); await captionsReady; }
             progress?.Report((0.82, "Scoring the music"));
             string bed = Path.Combine(work, "bed.wav");
             await Task.Run(() => Dsp.WriteWav(bed, Bed(plan, signals)), ct);
@@ -100,8 +103,10 @@ public static class VodRenderer
             string ass = Path.Combine(work, "text.ass");
             await File.WriteAllTextAsync(ass, AssWriter.Build(plan), new UTF8Encoding(false), ct);
             string output = Unique(Path.Combine(outputFolder, baseName + ".mp4"));
-            const string mix = "[0:a]highpass=f=70,acompressor=threshold=0.12:ratio=3:attack=8:release=180:makeup=1.6[p];" +
-                               "[1:a]equalizer=f=2600:t=q:w=1.3:g=-3[b];[p][b]amix=inputs=2:normalize=0:duration=first";
+            // even loudness: big swings inside a part are smoothed too (slowly: no pumping)
+            string mix = "[0:a]highpass=f=70," + (plan.EvenLoudness ? "dynaudnorm=f=250:g=21:p=0.9:m=6:s=8," : "") +
+                         "acompressor=threshold=0.12:ratio=3:attack=8:release=180:makeup=1.6[p];" +
+                         "[1:a]equalizer=f=2600:t=q:w=1.3:g=-3[b];[p][b]amix=inputs=2:normalize=0:duration=first";
             // loudness in two passes (measure, then apply exactly): YouTube plays everything at -14 LUFS
             string norm = "loudnorm=I=-14:TP=-1.5:LRA=11";
             try
@@ -172,11 +177,16 @@ public static class VodRenderer
         int W = plan.Width, H = plan.Height, frames = plan.FramesOf(p);
         double F = plan.Fps, len = frames / F;
         var args = new List<string> { "-y", "-v", "error" };
+        // a timelapse decodes a lot of footage for a few seconds: on the graphics card (and only keyframes when it's very fast)
+        if (p.Speed > 1) args.AddRange(new[] { "-hwaccel", "auto" });
+        if (p.Speed >= 40) args.AddRange(new[] { "-skip_frame", "nokey" });
         if (p.Hold > 0) args.AddRange(new[] { "-ss", I(Math.Max(0, p.In)), "-t", "0.2" });
         else args.AddRange(new[] { "-ss", I(p.In), "-t", I(p.Out - p.In + 0.1) });
         args.AddRange(new[] { "-i", source });
+        var ov = level < 2 ? p.Overlay : null;
+        if (ov is not null) args.AddRange(new[] { "-hwaccel", "auto", "-ss", I(ov.In), "-t", I(ov.Out - ov.In + 0.2), "-i", source });
         var v = new List<string>();
-        v.Add(p.Speed < 1 ? $"setpts=(PTS-STARTPTS)/{I(p.Speed)}" : "setpts=PTS-STARTPTS");
+        v.Add(Math.Abs(p.Speed - 1) > 1e-6 ? $"setpts=(PTS-STARTPTS)/{I(p.Speed)}" : "setpts=PTS-STARTPTS");
         if (p.Hold > 0) v.Add($"tpad=stop_mode=clone:stop_duration={I(p.Hold + 1)}");
         if (p.Speed < 1 && level == 0) v.Add($"minterpolate=fps={I(F)}:mi_mode=blend");
         v.Add($"fps={I(F)}");
@@ -208,6 +218,10 @@ public static class VodRenderer
         }
         bool whip = p.WhipIn || p.WhipOut;
         if (whip || p.Shake) z.Add("0.06");
+        // zoom punch transitions: rushing in at the end of a clip, settling from close at the start of the next
+        const double edge = 0.22;
+        if (p.TransIn == TransitionKinds.Zoom) z.Add($"0.3*pow(clip(1-t/{I(edge)},0,1),2)");
+        if (p.TransOut == TransitionKinds.Zoom) z.Add($"0.3*pow(clip((t-{I(len - edge)})/{I(edge)},0,1),2)");
         string zoom = string.Join("+", z);
         bool moves = z.Count > 1 && level == 0;
         if (moves)
@@ -231,6 +245,24 @@ public static class VodRenderer
                 v.Add($"drawbox=x=0:y=0:w=iw:h='{bar}':color=black:t=fill,drawbox=x=0:y='ih-{bar}':w=iw:h='{bar}':color=black:t=fill");
             }
             if (p.Role == "slow") v.Add("drawbox=x=0:y=0:w=iw:h=ih:color=red@0.28:t=fill:enable='lt(t,0.1)',eq=saturation=0.7:contrast=1.08");
+            // the transitions' looks at this clip's edges
+            string inWin = $"lt(t,{I(edge)})", outWin = $"gte(t,{I(len - edge)})";
+            foreach (var (style, isIn) in new[] { (p.TransIn, true), (p.TransOut, false) })
+            {
+                string win = isIn ? inWin : outWin;
+                switch (style)
+                {
+                    case TransitionKinds.Fade: v.Add(isIn ? $"fade=t=in:st=0:d={I(edge)}" : $"fade=t=out:st={I(len - edge)}:d={I(edge)}"); break;
+                    case TransitionKinds.Flash: v.Add(isIn ? "fade=t=in:st=0:d=0.18:color=white" : $"fade=t=out:st={I(len - 0.12)}:d=0.12:color=white"); break;
+                    case TransitionKinds.Blur: v.Add($"gblur=sigma=18:enable='{win}'"); break;
+                    case TransitionKinds.Glitch:
+                        string g = isIn ? "lt(t,0.15)" : $"gte(t,{I(len - 0.15)})";
+                        v.Add($"rgbashift=rh=-12:bh=12:gv=4:enable='{g}',noise=alls=40:allf=t:enable='{g}'");
+                        break;
+                }
+            }
+            // a VAR check: the clip dims while the replay is up
+            if (ov is not null) v.Add($"eq=brightness=-0.12:saturation=0.55:enable='between(t,{I(ov.Start)},{I(ov.Start + ov.Length)})'");
         }
         if (p.Blur) v.Add("gblur=sigma=22,eq=brightness=-0.1:saturation=0.75");
         v.Add("format=yuv420p");
@@ -240,14 +272,28 @@ public static class VodRenderer
         else
         {
             var af = new List<string> { "asetpts=PTS-STARTPTS", "aresample=48000", "aformat=channel_layouts=stereo" };
+            if (Math.Abs(p.GainDb) >= 0.5) af.Add($"volume={I(p.GainDb)}dB");
             if (p.Speed < 1) { af.Add($"atempo={I(Math.Max(0.5, p.Speed))}"); af.Add("lowpass=f=2400"); af.Add("volume=1.2"); }
             af.Add("apad");
             af.Add($"atrim=duration={I(len)}");
-            af.Add("afade=t=in:d=0.012");
-            af.Add($"afade=t=out:st={I(Math.Max(0, len - 0.015))}:d=0.015");
+            // a fade fades the sound too; otherwise just enough to never click
+            double ain = p.TransIn == TransitionKinds.Fade ? edge : 0.012, aout = p.TransOut == TransitionKinds.Fade ? edge : 0.015;
+            af.Add($"afade=t=in:d={I(ain)}");
+            af.Add($"afade=t=out:st={I(Math.Max(0, len - aout))}:d={I(aout)}");
             audio = "[0:a]" + string.Join(",", af);
         }
         string graph = "[0:v]" + string.Join(",", v) + "[v];" + audio + "[a]";
+        if (ov is not null)
+        {
+            // the replay: your round, sped up to fit, in a white frame that slides in from the right
+            double sp = Math.Clamp((ov.Out - ov.In) / ov.Length, 1, 60);
+            int ow = (W * 44 / 100) & ~1, oh = (ow * H / W) & ~1, x0 = W - ow - 8 - (int)(W * 0.03), y0 = (int)(H * 0.2);
+            string slide = $"if(lt(t-{I(ov.Start)},0.3),{W}-({W}-{x0})*(t-{I(ov.Start)})/0.3,{x0})";
+            var main = v.Take(v.Count - 1);   // (the final format comes after the overlay)
+            graph = "[0:v]" + string.Join(",", main) + "[m];" +
+                    $"[1:v]setpts=(PTS-STARTPTS)/{I(sp)}+{I(ov.Start)}/TB,fps={I(F)},scale={ow}:{oh}:flags=bicubic,pad={ow + 8}:{oh + 8}:4:4:color=white[o];" +
+                    $"[m][o]overlay=x='{slide}':y={y0}:eof_action=pass:enable='between(t,{I(ov.Start)},{I(ov.Start + ov.Length)})',format=yuv420p[v];" + audio + "[a]";
+        }
         args.AddRange(new[] { "-filter_complex", graph, "-map", "[v]", "-map", "[a]", "-frames:v", frames.ToString(CultureInfo.InvariantCulture),
             "-threads", BackgroundWork.Threads.ToString(CultureInfo.InvariantCulture),
         });

@@ -376,7 +376,7 @@ public static class VodPlanner
         double coldTo = Math.Min(best.To, best.Peak + 0.5);
         double coldFrom = Math.Max(best.From, coldTo - 7.5);
         if (coldTo - coldFrom < 4) { coldFrom = Math.Clamp(best.Peak - 5.5, best.From, Math.Max(best.From, best.To - 8)); coldTo = Math.Min(best.To, coldFrom + 8); }
-        var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = true, Push = tw.Zooms > 0 ? 0.07 : 0 };
+        var cold = new Piece { Role = "cold", In = coldFrom, Out = coldTo, Letterbox = tw.Letterbox, Push = tw.Zooms > 0 ? 0.07 : 0 };
         if (tw.ColdOpen) plan.Pieces.Add(cold);
         // (blurred behind the title: from just before the cold open's end, so it's never from somewhere left out, like a lobby)
         double titleSrc = amongUs ? Math.Max(0, coldTo - 3.0) : Math.Min(Math.Max(0, s.Duration - 3.2), coldTo);
@@ -465,18 +465,141 @@ public static class VodPlanner
             momentPieces.RemoveAll(p => p.Out - p.In < 0.5);
             if (momentPieces.Count == 0) continue;
 
-            // getting here from the moment before: whip across a time jump
-            double gap = i == 0 ? 0 : from - chosen[i - 1].To;
-            bool newChapter = i > 0 && chapterOf[i] != chapterOf[i - 1];
-            if (i > 0 && gap >= 45 && !newChapter && plan.Pieces.LastOrDefault() is { Role: "moment" or "slow" } prevLast)
-            {
-                prevLast.WhipOut = true;
-                momentPieces[0].WhipIn = true;
-            }
-            foreach (var p in momentPieces) p.Shake = p.Role == "slow";
+            foreach (var p in momentPieces) p.Shake = p.Role == "slow" && tw.Shake;
             // tag pieces with their moment index for chapter/music decisions
             foreach (var p in momentPieces) _momentIndex[p] = i;
             plan.Pieces.AddRange(momentPieces);
+        }
+
+        // ---------------------------------------------------------------- cuts between clips: plain, unless you asked for a transition
+        // (the editor still works out what would suit each cut: shown in the review, and used for "varied")
+        var cutPlans = new List<(int Moment, Piece Last, Piece First, string Style, string Sound, string Suggested, string SuggestedSound, string Why, List<string> Options, Piece? Lapse)>();
+        {
+            string prevStyle = "";
+            int variety = 0;
+            for (int i = 1; i < chosen.Count; i++)
+            {
+                int lastIdx = plan.Pieces.FindLastIndex(p => _momentIndex.TryGetValue(p, out var mi) && mi < i);
+                int firstIdx = plan.Pieces.FindIndex(p => _momentIndex.TryGetValue(p, out var mi) && mi == i);
+                if (lastIdx < 0 || firstIdx < 0 || firstIdx != lastIdx + 1) continue;
+                var last = plan.Pieces[lastIdx]; var first = plan.Pieces[firstIdx];
+                double gapFrom = last.Out, gapTo = first.In, gap = gapTo - gapFrom;
+                bool newChapter = chapterOf[i] != chapterOf[i - 1];
+                // a timelapse needs the time between to be one stretch of the same game (never through a lobby)
+                // (Among Us: gameplay, never a lobby, and not the talk of a meeting: that's cut, not fast-forwarded)
+                bool lapseOk = gap >= 6 && gap <= 600;
+                if (lapseOk && amongUs)
+                {
+                    int play = 0, all = 0;
+                    for (int b = Math.Max(0, (int)(gapFrom / Bin)); b < Math.Min(n, (int)(gapTo / Bin) + 1); b++)
+                    {
+                        all++;
+                        if (phase[b] == PhaseKind.Idle) { lapseOk = false; break; }
+                        if (phase[b] == PhaseKind.Play) play++;
+                    }
+                    if (play < all * 0.7) lapseOk = false;
+                }
+                PhaseKind PhaseAt(double t) => amongUs ? phase[Math.Clamp((int)(t / Bin), 0, n - 1)] : PhaseKind.Play;
+                // what the outgoing clip ends on, what the incoming one starts on
+                PhaseKind leaving = PhaseAt(chosen[i - 1].From + 1), arriving = PhaseAt(chosen[i].From + 1);
+                bool intoMeeting = amongUs && leaving == PhaseKind.Play && arriving == PhaseKind.Meeting;
+                bool outOfMeeting = amongUs && leaving == PhaseKind.Meeting && arriving == PhaseKind.Play;
+                bool inMeeting = amongUs && leaving == PhaseKind.Meeting && arriving == PhaseKind.Meeting;
+                bool intoDeath = first.Role == "slow" || s.Markers.Any(m => m.Kind == "death" && m.At >= gapTo && m.At < gapTo + 3);
+                // what suits this cut, best first, and why
+                var options = new List<string>();
+                string why;
+                if (amongUs && lapseOk && !intoMeeting && !outOfMeeting) { options.Add(TransitionKinds.Timelapse); why = $"{gap:0} s of the same round in between: fast-forward through it"; }
+                else if (intoMeeting) { options.Add(TransitionKinds.Flash); why = "a meeting is called"; }
+                else if (outOfMeeting) { options.Add(TransitionKinds.Fade); why = "back to the game after the vote"; }
+                else if (inMeeting) { options.Add(TransitionKinds.None); options.Add(TransitionKinds.Blur); why = "within the meeting: a plain cut keeps the conversation flowing"; }
+                else if (intoDeath) { options.Add(TransitionKinds.Zoom); why = "straight into a kill"; }
+                else if (gap >= 300) { options.Add(TransitionKinds.Fade); why = $"{gap / 60:0} minutes later"; }
+                else if (gap >= 45 && !newChapter) { options.Add(TransitionKinds.Whip); why = $"a jump of {gap:0} s"; }
+                else if (lapseOk && gap >= 20) { options.Add(TransitionKinds.Timelapse); why = $"{gap:0} s in between: fast-forward through it"; }
+                else { options.Add(TransitionKinds.None); options.Add(TransitionKinds.Zoom); why = "a short skip: a plain cut keeps it moving"; }
+                foreach (var st in new[] { TransitionKinds.Whip, TransitionKinds.Fade, TransitionKinds.Zoom, TransitionKinds.Flash, TransitionKinds.Glitch, TransitionKinds.Blur, TransitionKinds.Timelapse, TransitionKinds.None })
+                    if (!options.Contains(st) && (st != TransitionKinds.Timelapse || lapseOk)) options.Add(st);
+                string suggested = options[0];
+                // "varied": the suggestion, but never the same look twice in a row
+                // (you asked for transitions: where a plain cut would suit best, the next best look; never the same twice running)
+                var looks = options.Where(o => o != TransitionKinds.None).ToList();
+                string variedPick = looks.FirstOrDefault(o => o != prevStyle) ?? looks[0];
+                if (variedPick == prevStyle) variedPick = looks[(1 + variety++) % looks.Count];
+                var pick = tw.Cuts.FirstOrDefault(c => Math.Abs(c.From - gapTo) < 0.5);
+                string style = pick?.Style ?? (tw.TransitionStyle == TransitionKinds.Mixed ? variedPick : tw.TransitionStyle);
+                if (style == TransitionKinds.Timelapse && !lapseOk) style = gap >= 45 ? TransitionKinds.Fade : TransitionKinds.None; // nothing to fast-forward (or a lobby in between)
+                if (!TransitionKinds.Styles.Contains(style)) style = TransitionKinds.None;
+                string suggestedSound = TransitionKinds.SoundFor(suggested);
+                string[] soundCycle = { "whoosh", "soft", "pop", "riser", "impact" };
+                string sound = pick?.Sound ?? tw.TransitionSound switch
+                {
+                    "auto" => TransitionKinds.SoundFor(style),
+                    TransitionKinds.Mixed => style == TransitionKinds.None ? "none" : soundCycle[cutPlans.Count % soundCycle.Length],
+                    var x => style == TransitionKinds.None && pick?.Sound is null ? "none" : x,
+                };
+                if (!tw.TransitionSounds) sound = "none";
+                Piece? lapse = null;
+                if (style == TransitionKinds.Timelapse)
+                {
+                    // the time between, fast: ~1/10 of it, 2–6 s
+                    double len = Math.Clamp(gap / 10, Math.Min(2, gap / 3), 6);
+                    lapse = new Piece { Role = "lapse", In = gapFrom, Out = gapTo, Speed = gap / len, Mute = true };
+                    plan.Pieces.Insert(firstIdx, lapse);
+                    _momentIndex[lapse] = i;
+                }
+                else if (style != TransitionKinds.None)
+                {
+                    last.TransOut = style; first.TransIn = style;
+                    if (style == TransitionKinds.Whip) { last.WhipOut = true; first.WhipIn = true; }
+                }
+                prevStyle = style;
+                cutPlans.Add((i, last, lapse ?? first, style, sound, suggested, suggestedSound, why, options, lapse));
+            }
+        }
+
+        // ---------------------------------------------------------------- VAR checks (Among Us): you explain where you were, the replay shows it
+        var varCues = new List<(Piece Piece, PieceOverlay Ov)>();
+        if (amongUs && tw.VarChecks && s.WordsFromMic && words.Count > 0)
+        {
+            // your own words (the mic track only: never another player's) claiming where you were or what you did
+            var claim = new System.Text.RegularExpressions.Regex(@"^(i was|i went|i came|i did|i walked|i saw|i stayed|i ran|i followed|i fixed|i scanned|my tasks?|i had|i finished|i started|i left)$|^(electrical|electric|medbay|med bay|admin|cafeteria|cafe|navigation|nav|o2|oxygen|shields|weapons|reactor|security|storage|comms|communications|engine|specimen|laboratory|lab|office|decontam|boiler|dropship|vault|kitchen|cockpit|records|lounge|showers|greenhouse|garage|crates)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            double lastVar = -999;
+            int perMeetingCount = 0; double meetingStartSeen = -1;
+            for (int k = 0; k + 1 < words.Count; k++)
+            {
+                double tc = words[k].Start;
+                int b = Math.Clamp((int)(tc / Bin), 0, n - 1);
+                if (phase[b] != PhaseKind.Meeting) continue;
+                string pair = (words[k].Text + " " + words[k + 1].Text).ToLowerInvariant().Trim('.', ',', '!', '?');
+                string one = words[k].Text.ToLowerInvariant().Trim('.', ',', '!', '?');
+                string before = k > 0 ? words[k - 1].Text.ToLowerInvariant().Trim('.', ',', '!', '?') : "";
+                // "I was…", "I went…", or a room said as a place ("in electrical", "to admin"), not just the word
+                bool isClaim = claim.IsMatch(pair) && pair.StartsWith("i") || claim.IsMatch(one) && one.StartsWith("my")
+                               || claim.IsMatch(one) && before is "in" or "at" or "to" or "from" or "by" or "near" or "the" or "through";
+                if (!isClaim) continue;
+                static bool isClaimAfterPrep(string b) => b is "in" or "at" or "to" or "from" or "by" or "near" or "through";
+                // the meeting this is in, and the round of play just before it (what you did)
+                int ms = b; while (ms > 0 && phase[ms - 1] == PhaseKind.Meeting) ms--;
+                if (ms != (int)(meetingStartSeen / Bin)) { meetingStartSeen = ms * Bin; perMeetingCount = 0; }
+                if (perMeetingCount >= 2 || tc - lastVar < 20) continue;
+                int pe = ms; while (pe > 0 && phase[pe - 1] != PhaseKind.Play) pe--;
+                int ps = pe; while (ps > 0 && phase[ps - 1] == PhaseKind.Play) ps--;
+                double roundFrom = ps * Bin, roundTo = pe * Bin;
+                if (roundTo - roundFrom < 6) continue;
+                // (a round starts with the ejection and the role screen: the replay starts after them)
+                if (roundTo - roundFrom >= 20) roundFrom += Math.Min(8, (roundTo - roundFrom) * 0.15);
+                var host = plan.Pieces.FirstOrDefault(p => p.Role == "moment" && p.Speed == 1 && p.Overlay is null && tc >= p.In && tc <= p.Out - 3);
+                if (host is null) continue;
+                double start = Math.Max(0, tc - host.In - 0.2), len = Math.Min(8, host.Out - host.In - start - 0.3);
+                if (len < 3) continue;
+                // what you said, as the replay's caption (up to the end of the sentence)
+                var said = words.Skip(Math.Max(0, k - (isClaimAfterPrep(before) ? 1 : 0))).TakeWhile(w => w.Start < tc + len).Take(7).Select(w => w.Text);
+                var ov = new PieceOverlay(roundFrom, roundTo, start, len, Captions.Tidy(string.Join(' ', said)));
+                host.Overlay = ov;
+                varCues.Add((host, ov));
+                lastVar = tc; perMeetingCount++;
+            }
         }
 
         // ---------------------------------------------------------------- end card: the last frame, frozen and blurred
@@ -489,6 +612,21 @@ public static class VodPlanner
         // ---------------------------------------------------------------- the timeline
         double at = 0;
         foreach (var p in plan.Pieces) { p.At = at; at += plan.FramesOf(p) / plan.Fps; } // whole frames, so nothing drifts
+
+        foreach (var c in cutPlans)
+        {
+            double cutAt = c.First.At;
+            if (TransitionKinds.Kind(c.Sound) is { } kind)
+                plan.Sfx.Add(new SfxCue(kind is SfxKind.Riser ? cutAt - 0.9 : kind is SfxKind.Whoosh or SfxKind.SoftWhoosh ? cutAt - 0.22 : cutAt, kind, kind is SfxKind.Impact ? 0.8f : 0.7f));
+            plan.Cuts.Add(new CutInfo(cutAt, c.Lapse?.Out ?? c.First.In, c.Style, c.Sound, c.Suggested, c.SuggestedSound, c.Why, c.Options));
+            if (c.Lapse is { } lp) plan.Texts.Add(new TextCue("lapse", lp.At + 0.1, Math.Max(0.5, lp.Length - 0.2), $"▶▶ {lp.Speed:0}×"));
+        }
+        foreach (var (host, ov) in varCues)
+        {
+            plan.Texts.Add(new TextCue("var", host.At + ov.Start, ov.Length, "VAR CHECK", ov.Quote.Length > 0 ? $"“{ov.Quote}”" : null));
+            plan.Sfx.Add(new SfxCue(host.At + ov.Start - 0.5, SfxKind.Riser, 0.55f));
+            plan.Sfx.Add(new SfxCue(host.At + ov.Start, SfxKind.Pop, 0.6f));
+        }
 
         // title, chapters, "later" tags
         var titlePiece = plan.Pieces.First(p => p.Role == "title");
@@ -527,7 +665,7 @@ public static class VodPlanner
             double gap = chosen[i].From - chosen[i - 1].To;
             if (gap < 300) continue;
             var fp = plan.Pieces.FirstOrDefault(p => _momentIndex.TryGetValue(p, out var mi) && mi == i);
-            if (fp is null) continue;
+            if (fp is null || fp.Role == "lapse") continue;
             string later = gap >= 3300 ? $"{Math.Round(gap / 3600.0, 1):0.#} HOURS LATER".Replace("1 HOURS", "AN HOUR") : $"{Math.Round(gap / 60)} MINUTES LATER";
             plan.Texts.Add(new TextCue("later", fp.At + 0.1, 2.0, later));
             if (!fp.WhipIn) plan.Sfx.Add(new SfxCue(fp.At, SfxKind.SoftWhoosh, 0.6f));
@@ -555,6 +693,38 @@ public static class VodPlanner
             if (p.Role == "face") plan.Sfx.Add(new SfxCue(p.At, SfxKind.Pop, 0.55f));
         }
         plan.Sfx.Add(new SfxCue(plan.Pieces[^1].At, SfxKind.SoftWhoosh, 0.6f));
+        if (!tw.TransitionSounds)
+        {
+            // only the slow-motion hits stay (they're the moment's own sound, not a transition)
+            var slowStarts = plan.Pieces.Where(p => p.Role == "slow").Select(p => p.At).ToList();
+            plan.Sfx.RemoveAll(c => !(c.Kind is SfxKind.Impact or SfxKind.SubDrop && slowStarts.Any(a => Math.Abs(c.At - a) < 0.1))
+                                    && !varCues.Any(v => Math.Abs(c.At - (v.Piece.At + v.Ov.Start)) < 0.6));
+        }
+
+        // ---------------------------------------------------------------- loudness: every part at the same level
+        plan.EvenLoudness = tw.EvenLoudness;
+        if (tw.EvenLoudness && s.HasAudio && s.Loud.Length > 0)
+        {
+            // each piece's speaking level: the loud end of its sound (quiet gaps don't count)
+            double Level(Piece p)
+            {
+                var v = new List<double>();
+                for (double t = p.In; t < p.Out; t += 0.1) { double l = s.LoudAt(t); if (l > -50) v.Add(l); }
+                if (v.Count < 5) return double.NaN;
+                v.Sort();
+                return v[(int)(v.Count * 0.8)];
+            }
+            var sounding = plan.Pieces.Where(p => !p.Mute && p.Role is "cold" or "moment" or "slow" or "face").ToList();
+            var levels = sounding.Select(p => (p, L: Level(p))).Where(x => !double.IsNaN(x.L)).ToList();
+            if (levels.Count >= 2)
+            {
+                // the target: the length-weighted middle of all parts
+                var byLevel = levels.OrderBy(x => x.L).ToList();
+                double total = byLevel.Sum(x => x.p.Length), acc = 0, middle = byLevel[^1].L;
+                foreach (var x in byLevel) { acc += x.p.Length; if (acc >= total / 2) { middle = x.L; break; } }
+                foreach (var (p, l) in levels) p.GainDb = Math.Clamp(middle - l, -10, 8);
+            }
+        }
 
         // ---------------------------------------------------------------- music: a track per chapter, cut for deaths
         if (o.Music)

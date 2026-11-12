@@ -75,7 +75,7 @@ static class VodTests
         string[] talk = { "where", "were", "you", "i", "was", "in", "electrical", "doing", "wires", "red", "is", "sus" };
         for (double t = 0; t < D; t += 10)
             for (int k = 0; k < 8; k++) (k % 2 == 0 ? mine : others).Add(new VodWord(talk[(int)(t / 10 + k) % talk.Length], t + k * 0.7, t + k * 0.7 + 0.5));
-        foreach (var (t, w) in new[] { (99.0, "no way he vented"), (189.0, "oh my god it was red"), (269.0, "lets go again guys") })
+        foreach (var (t, w) in new[] { (99.0, "no way he vented"), (189.0, "oh my god it was red"), (192.5, "i was in electrical doing wires the whole time"), (269.0, "lets go again guys") })
         {
             var ws = w.Split(' ');
             for (int k = 0; k < ws.Length; k++) mine.Add(new VodWord(ws[k], t + k * 0.4, t + k * 0.4 + 0.35));
@@ -101,11 +101,117 @@ static class VodTests
         var with = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120));
         check(with.Chapters.Any(c => c.Title.StartsWith("Meeting")) && with.Chapters.Any(c => c.Title.StartsWith("Round")),
             $"…chapters on: named by meeting and round ({string.Join(" / ", with.Chapters.Select(c => c.Title))})");
+
+        // transitions: never by default (plain cuts), but every cut comes with the editor's suggestion
+        string Cuts(EditPlan pl) => string.Join(" | ", pl.Cuts.Select(c => $"{c.At:0}: {c.Style}/{c.Sound} (suggests {c.Suggested}: {c.Why})"));
+        check(with.Pieces.All(p => p.TransIn is null && p.TransOut is null && !p.WhipIn && p.Role != "lapse") && with.Cuts.Count > 0
+              && with.Cuts.All(c => c.Style == TransitionKinds.None && c.Sound == "none") && !with.Sfx.Any(x => x.Kind is SfxKind.Whoosh),
+            $"…transitions: plain cuts unless asked for, each cut with a suggestion ({Cuts(with)})");
+        var lapsed = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120), new EditTweaks { TransitionStyle = TransitionKinds.Timelapse });
+        var lapses = lapsed.Pieces.Where(p => p.Role == "lapse").ToList();
+        check(lapses.Count >= 1 && lapses.All(l => l.Speed > 1.5 && l.Out <= 240 && l.Length is >= 1 and <= 6.01) && lapsed.Texts.Any(x => x.Kind == "lapse"),
+            $"…timelapse: the gameplay between clips fast-forwarded (speed shown), never through the lobby ({string.Join(", ", lapses.Select(l => $"{l.In:0}–{l.Out:0} ×{l.Speed:0.0}"))}; {Cuts(lapsed)})");
+        var mixed = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120), new EditTweaks { TransitionStyle = TransitionKinds.Mixed, TransitionSound = TransitionKinds.Mixed });
+        var styles = mixed.Cuts.Select(c => c.Style).ToList();
+        check(styles.All(x => x != TransitionKinds.None) && styles.Zip(styles.Skip(1)).All(z => z.First != z.Second) && mixed.Cuts.All(c => c.Sound != "none"),
+            $"…varied: a transition at every cut, never the same twice running, with varied sounds ({Cuts(mixed)})");
+        var one = with.Cuts[0];
+        var picked = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120), new EditTweaks { Cuts = { new CutPick { From = one.From, Style = TransitionKinds.Glitch, Sound = "pop" } } });
+        check(picked.Cuts.Count(c => c.Style == TransitionKinds.Glitch && c.Sound == "pop") == 1 && picked.Cuts.Count(c => c.Style == TransitionKinds.None) == picked.Cuts.Count - 1,
+            $"…one cut set by hand changes just that cut ({Cuts(picked)})");
+        // VAR check: you (on your mic) say where you were in the meeting → a replay of your round over it
+        var vars = with.Pieces.Where(p => p.Overlay is not null).ToList();
+        check(vars.Count == 1 && vars[0].Overlay!.In >= 60 && vars[0].Overlay!.Out <= 150.5 && vars[0].In <= 192.5 && vars[0].Out > 195
+              && with.Texts.Any(x => x.Kind == "var" && x.Sub!.Contains("electrical")),
+            $"…VAR check: “i was in electrical” in the meeting plays the round before it ({string.Join(", ", vars.Select(v => $"{v.Overlay!.In:0}–{v.Overlay.Out:0} over {v.In:0}–{v.Out:0}"))})");
+        var noMic = VodPlanner.Plan(new VodSignals
+        {
+            Duration = s.Duration, Width = s.Width, Height = s.Height, Fps = s.Fps, Loud = s.Loud, Motion = s.Motion, Brightness = s.Brightness, Words = s.Words, Markers = s.Markers,
+            WordsFromMic = false, Novelty = s.Novelty, MeetingUi = s.MeetingUi, Lobby = s.Lobby, Others = s.Others, Layout = s.Layout,
+        }, new VodEditOptions("Among Us", 120));
+        check(noMic.Pieces.All(p => p.Overlay is null), "…only from your microphone: without a mic track (words from the speakers) there's no VAR check");
+    }
+
+    /// <summary>The editor learns your taste: a choice you make in two or more edits becomes where new edits start.</summary>
+    public static void Learning(Action<bool, string> check)
+    {
+        var st = new EditStyle();
+        VodProject Made(string id, Action<EditTweaks> set) { var p = new VodProject { Id = id, Game = "Among Us" }; set(p.Tweaks); return p; }
+        st.Record(Made("a", t => { t.TransitionSound = "none"; t.TransitionSounds = false; t.EvenLoudness = true; t.MusicVolume = 0.5; }));
+        var (t1, n1) = st.Learned("Among Us");
+        check(n1 == "" && !t1.EvenLoudness, "Learning: one edit isn't a habit yet");
+        st.Record(Made("b", t => { t.TransitionSound = "none"; t.TransitionSounds = false; t.EvenLoudness = true; t.MusicVolume = 0.45; t.TransitionStyle = TransitionKinds.Timelapse; }));
+        st.Record(Made("c", t => { t.EvenLoudness = true; t.MusicVolume = 0.55; t.TransitionStyle = TransitionKinds.Timelapse; t.TransitionSounds = false; t.TransitionSound = "none"; }));
+        st.Record(Made("c", t => { t.EvenLoudness = true; t.MusicVolume = 0.55; t.TransitionStyle = TransitionKinds.Timelapse; t.TransitionSounds = false; t.TransitionSound = "none"; }));
+        var (t2, n2) = st.Learned("Among Us");
+        check(st.Count("Among Us") == 3 && t2.EvenLoudness && !t2.TransitionSounds && t2.TransitionSound == "none" && t2.TransitionStyle == TransitionKinds.Timelapse
+              && Math.Abs(t2.MusicVolume - 0.5) < 0.06 && t2.Zooms == 2 && n2.Length > 0,
+            $"Learning: choices you keep making become the starting point (a revision replaces its edit's earlier choices) ({n2})");
+        check(st.Learned("other").Note == "" && !st.Learned("other").Tweaks.EvenLoudness, "…per game: your Among Us taste doesn't change other games' edits");
+    }
+
+    /// <summary>Feedback in many ways of saying it: each becomes the right change; nothing is an error.</summary>
+    public static void FeedbackPhrasings(Action<bool, string> check)
+    {
+        (EditTweaks T, EditFeedback.Result R) F(string text)
+        {
+            var p = new VodProject { TargetSeconds = 900, Duration = 600 };
+            p.Tweaks.TransitionStyle = TransitionKinds.Mixed;   // (as if transitions had been asked for before)
+            return (p.Tweaks, EditFeedback.Apply(text, p));
+        }
+        const string N = TransitionKinds.None;
+        var cases = new (string Text, Func<EditTweaks, bool> Ok)[]
+        {
+            ("Remove Transitions", t => t.TransitionStyle == N),
+            ("I dont want the transitions audio", t => t.TransitionStyle != N && t.TransitionSound == "none" && !t.TransitionSounds),
+            ("I don’t want the transition sounds", t => t.TransitionStyle != N && t.TransitionSound == "none"),
+            ("get rid of the swooshes", t => t.TransitionSound == "none"),
+            ("the transistions are annoying", t => t.TransitionStyle == N),
+            ("bring back the transitions", t => t.TransitionStyle == TransitionKinds.Mixed),
+            ("use fade transitions", t => t.TransitionStyle == TransitionKinds.Fade),
+            ("crossfade between clips", t => t.TransitionStyle == TransitionKinds.Fade),
+            ("glitch transitions please", t => t.TransitionStyle == TransitionKinds.Glitch),
+            ("mix up the transitions", t => t.TransitionStyle == TransitionKinds.Mixed),
+            ("timelapse the gameplay between clips", t => t.TransitionStyle == TransitionKinds.Timelapse),
+            ("fast forward through the boring parts of each game", t => t.TransitionStyle == TransitionKinds.Timelapse),
+            ("use a pop sound for transitions", t => t.TransitionSound == "pop"),
+            ("vary the transition sounds", t => t.TransitionSound == TransitionKinds.Mixed),
+            ("just plain cuts", t => t.TransitionStyle == N),
+            ("no var checks", t => !t.VarChecks),
+            ("show what i did when i explain my pathing", t => t.VarChecks),
+            ("fix the mismatching loudness of audio between segments", t => t.EvenLoudness),
+            ("the volume jumps between clips", t => t.EvenLoudness),
+            ("some parts are way louder than others", t => t.EvenLoudness),
+            ("normalize the audio", t => t.EvenLoudness),
+            ("audio levels are inconsistent", t => t.EvenLoudness),
+            ("can't hear me over the music", t => t.MusicVolume < 1 && t.Music),
+            ("music is blasting", t => t.MusicVolume < 1),
+            ("lose the music", t => !t.Music),
+            ("turn off the subs", t => !t.Captions),
+            ("no screen shake", t => !t.Shake),
+            ("too chaotic", t => t.Zooms < 2 && !t.Shake),
+            ("way too many zooms", t => t.Zooms < 2),
+            ("no more sfx", t => t.SfxVolume == 0),
+            ("the sound effects are too loud", t => t.SfxVolume < 1 && t.SfxVolume > 0),
+            ("it drags", t => t.Pace == -1),
+            ("get rid of the black bars", t => !t.Letterbox),
+        };
+        var failed = new List<string>();
+        foreach (var (text, ok) in cases)
+        {
+            var (t, r) = F(text);
+            if (!ok(t) || r.Understood.Count == 0) failed.Add($"“{text}” → {string.Join(", ", r.Understood)}");
+        }
+        check(failed.Count == 0, $"Revise: {cases.Length - failed.Count} of {cases.Length} ways of saying it understood{(failed.Count > 0 ? ": missed " + string.Join(" | ", failed) : "")}");
+        var (_, odd) = F("the colors look weird");
+        check(odd.Understood.Count == 0 && odd.NotUnderstood.Count == 1, "…something the editor can't change is just noted (with what it can change), not an error");
     }
 
     private static async Task RunInnerAsync(string ffmpeg, string work, Action<bool, string> check)
     {
         AmongUsPlan(check);
+        Learning(check);
+        FeedbackPhrasings(check);
         check(VodRenderer.HardwareEncoderOf(new[] { "-c:v", "h264_amf", "-quality", "quality" }) == "h264_amf"
               && VodRenderer.HardwareEncoderOf(new[] { "-c:v", "libx264", "-crf", "18" }) is null
               && VodRenderer.PieceVideo("h264_amf").Contains("cqp") && VodRenderer.PieceVideo("libx264").Contains("ultrafast"),
