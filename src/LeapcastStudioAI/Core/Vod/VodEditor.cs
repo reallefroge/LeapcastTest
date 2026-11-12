@@ -107,6 +107,16 @@ public static class VodEditor
         var plan = VodPlanner.Plan(signals, options, project.Tweaks);
         Took($"planning ({plan.Pieces.Count} pieces, {TimeSpan.FromSeconds(plan.Duration):mm\\:ss} long)");
 
+        // a revision whose changes don't change the video isn't rendered again (it would be the same file)
+        string print = PlanPrint(plan, project.Tweaks);
+        if (revise && !planOnly && project.Video.Length > 0 && File.Exists(project.Video) && project.PlanPrint == print)
+        {
+            VodRenderer.Note("Revision: nothing in the video changes; not rendered again");
+            LastProject = project;
+            return new VodRenderer.Result(project.Video, Path.ChangeExtension(project.Video, ".jpg"), Path.ChangeExtension(project.Video, ".txt"),
+                TimeSpan.FromSeconds(plan.Duration)) { Unchanged = true };
+        }
+
         if (planOnly)
         {
             // review first: nothing rendered yet; the review panel shows the plan and its suggestions
@@ -128,6 +138,29 @@ public static class VodEditor
                 VodRenderer.Note($"captions (Whisper, alongside the pieces): {capWatch.Elapsed:mm\\:ss}");
             }, ct);
         }
+        // the clips are watched before the video is made from them: one that's frozen, black or silent is swapped
+        // for the next best moment (twice at most), and the captions follow the final choice
+        string pieceCache = Path.Combine(project.WorkDir, "pieces");
+        var swapped = new List<string>();
+        for (int round = 0; round < 3; round++)
+        {
+            progress?.Report(new Progress(0.3, round == 0 ? "Making the clips" : "Making the replacement clips"));
+            var files = await VodRenderer.PiecesAsync(ffmpeg, recording, plan, videoArgs(plan.Width, plan.Height, plan.Fps),
+                new Progress<(double, string)>(x => progress?.Report(new Progress(0.3 + 0.45 * x.Item1, x.Item2))), ct, pieceCache, project.WorkDir);
+            progress?.Report(new Progress(0.66, "Watching the clips back (frozen, black or silent ones are replaced)"));
+            var bad = await VodRenderer.BadPiecesAsync(ffmpeg, plan, files, ct);
+            if (bad.Count == 0 || round == 2) break;
+            foreach (var (i, why) in bad)
+            {
+                var p = plan.Pieces[i];
+                project.Tweaks.Remove.Add(new[] { p.In - 0.5, p.Out + 0.5 });
+                swapped.Add($"{EditFeedback.Clock(p.At)} ({why})");
+            }
+            VodRenderer.Note("clip check: replaced " + string.Join(", ", bad.Select(b => $"piece {b.Index + 1} ({b.Why})")));
+            plan = VodPlanner.Plan(signals, options, project.Tweaks);
+            if (captions is not null) { await captions; captions = CaptionAsync(ffmpeg, project, plan, signals, new Progress<double>(_ => { }), ct); }
+        }
+        print = PlanPrint(plan, project.Tweaks);
         string baseName = revise && project.Video.Length > 0 ? NextVersion(project.Video) : $"{Safe(options.Title)} - {DateTime.Now:yyyy-MM-dd HH-mm}";
         var result = await VodRenderer.RenderAsync(ffmpeg, recording, plan, project.OutputFolder, baseName, videoArgs(plan.Width, plan.Height, plan.Fps), signals,
             new Progress<(double, string)>(x => progress?.Report(new Progress(0.3 + 0.7 * x.Item1, x.Item2))), ct, Path.Combine(project.WorkDir, "pieces"), captions);
@@ -135,6 +168,10 @@ public static class VodEditor
         VodRenderer.Note($"Done in {total.Elapsed:h\\:mm\\:ss}");
         project.Video = result.Video;
         project.Remember(plan);
+        project.PlanPrint = print;
+        project.QualityNote = "Checked before saving: " + (swapped.Count > 0 ? $"{swapped.Count} clip(s) swapped for better ones ({string.Join(", ", swapped)}); " : "every clip watched back (none frozen, black or silent); ")
+                              + VodRenderer.LoudnessCheck + ".";
+        VodRenderer.Note(project.QualityNote);
         try { project.Save(); } catch { }
         // every video you make or revise teaches the editor your taste (the last version of each edit counts)
         if (StylePath is { } stylePath) try { var st = EditStyle.Load(stylePath); st.Record(project); st.Save(stylePath); } catch { }
@@ -152,16 +189,41 @@ public static class VodEditor
         var signals = project.LoadSignals() ?? throw new InvalidOperationException("The recording's analysis isn't there any more: make the edit again.");
         if (BrandProvider is not null) project.Brand = BrandProvider();
         var plan = VodPlanner.Plan(signals, project.Options(), project.Tweaks);
+        // the clips watched back first, as for the real video (a frozen, black or silent one is swapped)
+        string cache = Path.Combine(project.WorkDir, "preview-pieces");
+        var draftArgs = new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p" };
+        for (int round = 0; round < 2; round++)
+        {
+            var s0 = plan.Resized(640, 360, 30);
+            var files = await VodRenderer.PiecesAsync(ffmpeg, project.Recording, s0, draftArgs,
+                new Progress<(double, string)>(x => progress?.Report(new Progress(0.6 * x.Item1, "Preview: " + x.Item2))), ct, cache, project.WorkDir);
+            progress?.Report(new Progress(0.6, "Preview: watching the clips back"));
+            var bad = await VodRenderer.BadPiecesAsync(ffmpeg, s0, files, ct);
+            if (bad.Count == 0) break;
+            foreach (var (i, _) in bad) project.Tweaks.Remove.Add(new[] { plan.Pieces[i].In - 0.5, plan.Pieces[i].Out + 0.5 });
+            plan = VodPlanner.Plan(signals, project.Options(), project.Tweaks);
+        }
         project.Remember(plan);
         var small = plan.Resized(640, 360, 30);
         string folder = Path.Combine(project.WorkDir, "preview");
         Directory.CreateDirectory(folder);
         foreach (var old in Directory.EnumerateFiles(folder, "*.mp4")) try { File.Delete(old); } catch { } // (one playing can't go: it does next time)
         var result = await VodRenderer.RenderAsync(ffmpeg, project.Recording, small, folder, $"preview {DateTime.Now:HHmmss}",
-            new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p" }, signals,
+            draftArgs, signals,
             new Progress<(double, string)>(x => progress?.Report(new Progress(x.Item1, "Preview: " + x.Item2))), ct,
             Path.Combine(project.WorkDir, "preview-pieces"), draft: true);
         return result.Video;
+    }
+
+    /// <summary>Everything that decides what the video looks and sounds like (two plans with the same print make the same video).</summary>
+    public static string PlanPrint(EditPlan plan, EditTweaks tw)
+    {
+        string json = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            plan.Width, plan.Height, plan.Fps, plan.Title, plan.Pieces, plan.Texts, plan.Sfx, plan.Music, plan.MusicVolume, plan.SfxVolume, plan.Brand, plan.EvenLoudness,
+            Chapters = plan.Chapters.Select(c => $"{c.At:0.###} {c.Title}").ToList(), CaptionsOn = tw.Captions, ChaptersOn = tw.Chapters,
+        });
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json)))[..24];
     }
 
     /// <summary>"Title - date.mp4" → "Title - date (2)", then (3)…</summary>

@@ -9,7 +9,11 @@ public static class VodRenderer
 {
     private static string I(double v) => v.ToString("0.####", CultureInfo.InvariantCulture);
 
-    public sealed record Result(string Video, string Thumbnail, string Description, TimeSpan Length);
+    public sealed record Result(string Video, string Thumbnail, string Description, TimeSpan Length)
+    {
+        /// <summary>A revision that wouldn't change the video: nothing was rendered (this is the version as it was).</summary>
+        public bool Unchanged { get; init; }
+    }
 
     /// <param name="videoArgs">The final encode's video settings (the stream's encoder); intermediates use x264.</param>
     public static async Task<Result> RenderAsync(string ffmpeg, string source, EditPlan plan, string outputFolder, string baseName,
@@ -24,67 +28,7 @@ public static class VodRenderer
         {
             // ---- every piece with its effects, exactly its number of frames
             var list = new StringBuilder();
-            // pieces are kept between revisions (named after exactly how they're made): an unchanged one isn't made again
-            if (pieceCache is not null) Directory.CreateDirectory(pieceCache);
-            // pieces are encoded on the graphics card when the stream's encoder is one and you're not live (the encode
-            // is over half of a piece's time on the processor); every piece with the same encoder, so they join cleanly
-            string enc = !BackgroundWork.Live && HardwareEncoderOf(videoArgs) is { } hw ? hw : "libx264";
-            string[] Files(string e) => Enumerable.Range(0, plan.Pieces.Count).Select(i => pieceCache is null ? Path.Combine(work, $"p{i:0000}-{e}.mkv")
-                : Path.Combine(pieceCache, "p-" + PieceKey(source, plan.Pieces[i], plan, e) + ".mkv")).ToArray();
-            var files = Files(enc);
-            int reused = 0;
-            int done = 0;
-            // full effects; if FFmpeg can't (or crashes), simpler effects; at worst the plain shot: the video always gets made
-            async Task<bool> Make(int i, string e, string[] fs, CancellationToken token)
-            {
-                string partial = fs[i] + ".part.mkv";
-                for (int level = 0; level <= 2; level++)
-                {
-                    try { await RunAsync(ffmpeg, PieceArgs(source, plan.Pieces[i], plan, partial, level, e), token); File.Move(partial, fs[i], true); return true; }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception) { if (level < 2) Interlocked.Increment(ref _fallbacks); }
-                }
-                return false;
-            }
-            bool Cached(int i, string[] fs) => pieceCache is not null && File.Exists(fs[i]) && new FileInfo(fs[i]).Length > 0;
-            if (enc != "libx264" && plan.Pieces.Count > 0 && !Cached(0, files) && !await Make(0, enc, files, ct))
-            {
-                Note($"pieces: {enc} couldn't make them here, using x264");
-                enc = "libx264"; files = Files(enc);
-            }
-            bool hwBroken = false;
-            // several pieces at once when you're not live (one, gently, while you are)
-            await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
-                new ParallelOptions { MaxDegreeOfParallelism = BackgroundWork.Parallel, CancellationToken = ct }, async (i, token) =>
-                {
-                    if (Cached(i, files) || (i == 0 && File.Exists(files[0])))
-                    {
-                        if (Cached(i, files)) Interlocked.Increment(ref reused);
-                        int dd = Interlocked.Increment(ref done);
-                        progress?.Report((0.05 + 0.75 * dd / plan.Pieces.Count, $"Editing: piece {dd} of {plan.Pieces.Count}{(Cached(i, files) ? " (unchanged)" : "")}"));
-                        return;
-                    }
-                    if (!await Make(i, enc, files, token))
-                    {
-                        if (enc == "libx264") throw new InvalidOperationException($"Piece {i + 1} couldn't be made.");
-                        hwBroken = true;
-                    }
-                    int d = Interlocked.Increment(ref done);
-                    progress?.Report((0.05 + 0.75 * d / plan.Pieces.Count, $"Editing: piece {d} of {plan.Pieces.Count}"));
-                });
-            if (hwBroken)
-            {
-                // a piece the graphics card couldn't encode: all of them again on the processor (one encoder for the whole video)
-                Note($"pieces: {enc} failed on a piece, making them all with x264");
-                enc = "libx264"; files = Files(enc);
-                await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
-                    new ParallelOptions { MaxDegreeOfParallelism = BackgroundWork.Parallel, CancellationToken = ct }, async (i, token) =>
-                    {
-                        if (!Cached(i, files) && !await Make(i, enc, files, token)) throw new InvalidOperationException($"Piece {i + 1} couldn't be made.");
-                    });
-            }
-            PieceEncoder = enc;
-            Reused = reused;
+            var files = await PiecesAsync(ffmpeg, source, plan, videoArgs, progress, ct, pieceCache, work);
             foreach (var file in files) list.AppendLine($"file '{file.Replace("\\", "/").Replace("'", "'\\''")}'");
             string listFile = Path.Combine(work, "pieces.txt");
             await File.WriteAllTextAsync(listFile, list.ToString(), ct);
@@ -98,29 +42,20 @@ public static class VodRenderer
             string bed = Path.Combine(work, "bed.wav");
             await Task.Run(() => Dsp.WriteWav(bed, Bed(plan, signals, ffmpeg)), ct);
 
+            // ---- every part at one loudness: each piece is measured and brought to the level of the rest
+            progress?.Report((0.84, "Evening out the loudness between parts"));
+            var gains = await PieceGainsAsync(ffmpeg, plan, files, ct);
             // ---- text, grade, mix, final encode
             progress?.Report((0.86, "Final render"));
             string ass = Path.Combine(work, "text.ass");
             await File.WriteAllTextAsync(ass, AssWriter.Build(plan), new UTF8Encoding(false), ct);
             string output = Unique(Path.Combine(outputFolder, baseName + ".mp4"));
-            // even loudness: big swings inside a part are smoothed too (slowly: no pumping)
-            string mix = "[0:a]highpass=f=70," + (plan.EvenLoudness ? "dynaudnorm=f=250:g=21:p=0.9:m=6:s=8," : "") +
-                         "acompressor=threshold=0.12:ratio=3:attack=8:release=180:makeup=1.6[p];" +
-                         "[1:a]equalizer=f=2600:t=q:w=1.3:g=-3[b];[p][b]amix=inputs=2:normalize=0:duration=first";
-            // loudness in two passes (measure, then apply exactly): YouTube plays everything at -14 LUFS
-            string norm = "loudnorm=I=-14:TP=-1.5:LRA=11";
-            if (!draft)
-            try
-            {
-                var (_, report) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-i", body, "-i", bed, "-filter_complex",
-                    mix + ",loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[a]", "-map", "[a]", "-f", "null", "-" }, TimeSpan.FromMinutes(30), ct);
-                string M(string key) => System.Text.RegularExpressions.Regex.Match(report, $"\"{key}\"\\s*:\\s*\"(-?[0-9.inf]+)\"").Groups[1].Value;
-                if (M("input_i") is { Length: > 0 } ii && !ii.Contains("inf") && M("input_tp") is { Length: > 0 } tp && M("input_lra") is { Length: > 0 } lra
-                    && M("input_thresh") is { Length: > 0 } th && M("target_offset") is { Length: > 0 } off)
-                    norm = $"loudnorm=I=-14:TP=-1.5:LRA=11:measured_I={ii}:measured_TP={tp}:measured_LRA={lra}:measured_thresh={th}:offset={off}:linear=true";
-            }
-            catch (OperationCanceledException) { throw; }
-            catch { }
+            // the stream's sound (each part at its gain), then the music and effects under it
+            string Mix(double[] g, int bodyIn, int bedIn) =>
+                $"[{bodyIn}:a]{GainFilter(plan, g)}highpass=f=70," + (plan.EvenLoudness ? "dynaudnorm=f=250:g=21:p=0.9:m=6:s=8," : "") +
+                "acompressor=threshold=0.12:ratio=3:attack=8:release=180:makeup=1.6[p];" +
+                $"[{bedIn}:a]equalizer=f=2600:t=q:w=1.3:g=-3[b];[p][b]amix=inputs=2:normalize=0:duration=first";
+            string norm = await NormAsync(ffmpeg, new[] { "-i", body, "-i", bed }, Mix(gains, 0, 1), ct);
             // the full finish; if that fails: the stream's encoder swapped for x264, then without the grade
             var x264 = new[] { "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p" };
             var tries = new (string Video, IReadOnlyList<string> Enc)[]
@@ -132,12 +67,37 @@ public static class VodRenderer
             for (int t = 0; ; t++)
             {
                 var args = new List<string> { "-y", "-v", "error", "-i", body, "-i", bed, "-filter_complex",
-                    $"[0:v]{tries[t].Video}[v];" + mix + $",{norm},aresample=48000[a]", "-map", "[v]", "-map", "[a]" };
+                    $"[0:v]{tries[t].Video}[v];" + Mix(gains, 0, 1) + $",{norm},aresample=48000[a]", "-map", "[v]", "-map", "[a]" };
                 args.AddRange(tries[t].Enc);
                 args.AddRange(new[] { "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output });
                 try { await RunAsync(ffmpeg, args, ct); break; }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception) when (t + 1 < tries.Length) { Interlocked.Increment(ref _fallbacks); }
+            }
+
+            // ---- the finished video, listened to again before it's handed over: a part louder or quieter than the
+            // rest is brought in line (only the sound is made again: the picture is copied as it is)
+            int evened = 0;
+            LoudnessCheck = "";
+            for (int pass = 0; pass < 3; pass++)
+            {
+                progress?.Report((0.93, pass == 0 ? "Checking the finished video: the loudness of every part" : "Listening again after evening it out"));
+                var off = await PartDeviationsAsync(ffmpeg, output, plan, ct);
+                var bad = off.Where(kv => Math.Abs(kv.Value) > 2.5).ToList();
+                if (bad.Count == 0 || pass == 2)
+                {
+                    double worst = off.Count == 0 ? 0 : off.Values.Max(Math.Abs);
+                    LoudnessCheck = $"listened back: every part within {Math.Max(1, Math.Ceiling(worst)):0} dB of the rest" + (evened > 0 ? $" ({evened} part(s) evened out after listening)" : "");
+                    Note("loudness check: " + LoudnessCheck + (off.Count > 0 ? $"; parts measured: {off.Count}" : ""));
+                    break;
+                }
+                foreach (var (i, dev) in bad) gains[i] = Math.Clamp(gains[i] - dev, -20, 20);
+                evened += bad.Count;
+                string fixedOut = Path.Combine(work, "relevel.mp4");
+                string n2 = await NormAsync(ffmpeg, new[] { "-i", body, "-i", bed }, Mix(gains, 0, 1), ct);
+                await RunAsync(ffmpeg, new[] { "-y", "-v", "error", "-i", output, "-i", body, "-i", bed, "-filter_complex", Mix(gains, 1, 2) + $",{n2},aresample=48000[a]",
+                    "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", fixedOut }, ct);
+                File.Move(fixedOut, output, true);
             }
 
             if (draft) { progress?.Report((1, "Done")); return new Result(output, "", "", TimeSpan.FromSeconds(plan.Duration)); }
@@ -153,6 +113,223 @@ public static class VodRenderer
             return new Result(output, thumb, desc, TimeSpan.FromSeconds(plan.Duration));
         }
         finally { try { Directory.Delete(work, true); } catch { } }
+    }
+
+    /// <summary>
+    /// Every piece of the plan as its own file (pieces already made, cached by exactly how they're made, are reused).
+    /// </summary>
+    public static async Task<string[]> PiecesAsync(string ffmpeg, string source, EditPlan plan, IReadOnlyList<string> videoArgs,
+        IProgress<(double, string)>? progress, CancellationToken ct, string? pieceCache, string work)
+    {
+        // pieces are kept between revisions (named after exactly how they're made): an unchanged one isn't made again
+        if (pieceCache is not null) Directory.CreateDirectory(pieceCache);
+        // pieces are encoded on the graphics card when the stream's encoder is one and you're not live (the encode
+        // is over half of a piece's time on the processor); every piece with the same encoder, so they join cleanly
+        string enc = !BackgroundWork.Live && HardwareEncoderOf(videoArgs) is { } hw ? hw : "libx264";
+        string[] Files(string e) => Enumerable.Range(0, plan.Pieces.Count).Select(i => pieceCache is null ? Path.Combine(work, $"p{i:0000}-{e}.mkv")
+            : Path.Combine(pieceCache, "p-" + PieceKey(source, plan.Pieces[i], plan, e) + ".mkv")).ToArray();
+        var files = Files(enc);
+        int reused = 0;
+        int done = 0;
+        // full effects; if FFmpeg can't (or crashes), simpler effects; at worst the plain shot: the video always gets made
+        async Task<bool> Make(int i, string e, string[] fs, CancellationToken token)
+        {
+            string partial = fs[i] + ".part.mkv";
+            for (int level = 0; level <= 2; level++)
+            {
+                try { await RunAsync(ffmpeg, PieceArgs(source, plan.Pieces[i], plan, partial, level, e), token); File.Move(partial, fs[i], true); return true; }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception) { if (level < 2) Interlocked.Increment(ref _fallbacks); }
+            }
+            return false;
+        }
+        bool Cached(int i, string[] fs) => pieceCache is not null && File.Exists(fs[i]) && new FileInfo(fs[i]).Length > 0;
+        if (enc != "libx264" && plan.Pieces.Count > 0 && !Cached(0, files) && !await Make(0, enc, files, ct))
+        {
+            Note($"pieces: {enc} couldn't make them here, using x264");
+            enc = "libx264"; files = Files(enc);
+        }
+        bool hwBroken = false;
+        // several pieces at once when you're not live (one, gently, while you are)
+        await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = BackgroundWork.Parallel, CancellationToken = ct }, async (i, token) =>
+            {
+                if (Cached(i, files) || (i == 0 && File.Exists(files[0])))
+                {
+                    if (Cached(i, files)) Interlocked.Increment(ref reused);
+                    int dd = Interlocked.Increment(ref done);
+                    progress?.Report((0.05 + 0.75 * dd / plan.Pieces.Count, $"Editing: piece {dd} of {plan.Pieces.Count}{(Cached(i, files) ? " (unchanged)" : "")}"));
+                    return;
+                }
+                if (!await Make(i, enc, files, token))
+                {
+                    if (enc == "libx264") throw new InvalidOperationException($"Piece {i + 1} couldn't be made.");
+                    hwBroken = true;
+                }
+                int d = Interlocked.Increment(ref done);
+                progress?.Report((0.05 + 0.75 * d / plan.Pieces.Count, $"Editing: piece {d} of {plan.Pieces.Count}"));
+            });
+        if (hwBroken)
+        {
+            // a piece the graphics card couldn't encode: all of them again on the processor (one encoder for the whole video)
+            Note($"pieces: {enc} failed on a piece, making them all with x264");
+            enc = "libx264"; files = Files(enc);
+            await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
+                new ParallelOptions { MaxDegreeOfParallelism = BackgroundWork.Parallel, CancellationToken = ct }, async (i, token) =>
+                {
+                    if (!Cached(i, files) && !await Make(i, enc, files, token)) throw new InvalidOperationException($"Piece {i + 1} couldn't be made.");
+                });
+        }
+        PieceEncoder = enc;
+        Reused = reused;
+        return files;
+    }
+
+    /// <summary>What the last check of the finished video found about its loudness (for the window and the log).</summary>
+    public static string LoudnessCheck { get; private set; } = "";
+
+    /// <summary>One piece, watched and listened to: its loudness (LUFS), and how much of it is a frozen or black picture.</summary>
+    public sealed record PieceCheck(double Lufs, double Frozen, double Black);
+
+    /// <summary>A piece checked (once: the result is kept next to a cached piece).</summary>
+    public static async Task<PieceCheck> CheckPieceAsync(string ffmpeg, string file, CancellationToken ct)
+    {
+        string cache = file + ".check";
+        try
+        {
+            if (File.Exists(cache) && File.GetLastWriteTimeUtc(cache) >= File.GetLastWriteTimeUtc(file)
+                && System.Text.Json.JsonSerializer.Deserialize<PieceCheck>(await File.ReadAllTextAsync(cache, ct)) is { } known) return known;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { }
+        var (_, log) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-nostats", "-i", file,
+            "-vf", "scale=320:-2,freezedetect=d=1.5,blackdetect=d=0.4:pix_th=0.10", "-af", "ebur128=framelog=quiet", "-f", "null", "-" }, TimeSpan.FromMinutes(5), ct);
+        double Sum(string key) => System.Text.RegularExpressions.Regex.Matches(log, key + @":\s*(-?[0-9.]+)")
+            .Sum(m => double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture));
+        var i = System.Text.RegularExpressions.Regex.Matches(log, @"I:\s+(-?[0-9.]+|-inf) LUFS").LastOrDefault();
+        double lufs = i is null || !double.TryParse(i.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? -70 : v;
+        var r = new PieceCheck(lufs, Sum("freeze_duration"), Sum("black_duration"));
+        try { await File.WriteAllTextAsync(cache, System.Text.Json.JsonSerializer.Serialize(r), ct); } catch (OperationCanceledException) { throw; } catch { }
+        return r;
+    }
+
+    /// <summary>The parts with a sound of their own (not the muted intro, not the end screen), long enough to judge.</summary>
+    private static bool Judged(Piece p, EditPlan plan) =>
+        !p.Mute && p.Role is not ("title" or "end") && plan.FramesOf(p) / plan.Fps >= 1.5;
+
+    /// <summary>Each piece's gain (dB) to bring it to the level of the rest (the median part); a silent piece is left alone.</summary>
+    private static async Task<double[]> PieceGainsAsync(string ffmpeg, EditPlan plan, string[] files, CancellationToken ct)
+    {
+        var gains = new double[plan.Pieces.Count];
+        var lufs = new double?[plan.Pieces.Count];
+        await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, BackgroundWork.Parallel), CancellationToken = ct }, async (i, token) =>
+            {
+                if (!Judged(plan.Pieces[i], plan)) return;
+                try { var c = await CheckPieceAsync(ffmpeg, files[i], token); if (c.Lufs > -62) lufs[i] = c.Lufs; }
+                catch (OperationCanceledException) { throw; }
+                catch { }
+            });
+        var known = lufs.Where(x => x is not null).Select(x => x!.Value).OrderBy(x => x).ToList();
+        if (known.Count < 2) return gains;
+        double target = known[known.Count / 2];
+        for (int i = 0; i < gains.Length; i++)
+            if (lufs[i] is { } l) gains[i] = Math.Clamp(target - l, -18, 18);
+        Note($"loudness between parts: {known.Count} parts measured, {known[0]:0.0} to {known[^1]:0.0} LUFS, evened to {target:0.0}");
+        return gains;
+    }
+
+    /// <summary>Each piece's gain as one volume step in the stream's sound (at the piece's start; the pieces' own
+    /// edges are faded, so a step is never heard).</summary>
+    private static string GainFilter(EditPlan plan, double[] g)
+    {
+        if (g.All(x => Math.Abs(x) < 0.1)) return "";
+        var sb = new StringBuilder();
+        int open = 0;
+        for (int i = 0; i < plan.Pieces.Count; i++)
+        {
+            string lin = Math.Pow(10, g[i] / 20).ToString("0.####", CultureInfo.InvariantCulture);
+            if (i == plan.Pieces.Count - 1) { sb.Append(lin); break; }
+            double end = plan.Pieces[i].At + plan.FramesOf(plan.Pieces[i]) / plan.Fps;
+            sb.Append($"if(lt(t,{end.ToString("0.###", CultureInfo.InvariantCulture)}),{lin},");
+            open++;
+        }
+        sb.Append(new string(')', open));
+        return $"volume='{sb}':eval=frame,";
+    }
+
+    /// <summary>The two-pass loudness setting for this mix (YouTube's -14 LUFS, applied exactly).</summary>
+    private static async Task<string> NormAsync(string ffmpeg, string[] inputs, string mix, CancellationToken ct)
+    {
+        string norm = "loudnorm=I=-14:TP=-1.5:LRA=11";
+        try
+        {
+            var (_, report) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner" }.Concat(inputs).Concat(new[] { "-filter_complex",
+                mix + ",loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[a]", "-map", "[a]", "-f", "null", "-" }), TimeSpan.FromMinutes(30), ct);
+            string M(string key) => System.Text.RegularExpressions.Regex.Match(report, $"\"{key}\"\\s*:\\s*\"(-?[0-9.inf]+)\"").Groups[1].Value;
+            if (M("input_i") is { Length: > 0 } ii && !ii.Contains("inf") && M("input_tp") is { Length: > 0 } tp && M("input_lra") is { Length: > 0 } lra
+                && M("input_thresh") is { Length: > 0 } th && M("target_offset") is { Length: > 0 } off)
+                norm = $"loudnorm=I=-14:TP=-1.5:LRA=11:measured_I={ii}:measured_TP={tp}:measured_LRA={lra}:measured_thresh={th}:offset={off}:linear=true";
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { }
+        return norm;
+    }
+
+    /// <summary>
+    /// The finished video listened to: each part's typical loudness (short-term, over the part) against the rest's.
+    /// Returns piece index → how far it is from the others (LU, + = louder).
+    /// </summary>
+    public static async Task<Dictionary<int, double>> PartDeviationsAsync(string ffmpeg, string video, EditPlan plan, CancellationToken ct)
+    {
+        var (_, log) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-hide_banner", "-nostats", "-i", video, "-vn", "-af", "ebur128=framelog=info", "-f", "null", "-" },
+            TimeSpan.FromMinutes(20), ct);
+        var st = new List<(double T, double S)>();
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(log, @"t:\s*([0-9.]+)\s.*?\sS:\s*(-?[0-9.]+)"))
+            if (double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var t)
+                && double.TryParse(m.Groups[2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var sv)) st.Add((t, sv));
+        var level = new Dictionary<int, double>();
+        for (int i = 0; i < plan.Pieces.Count; i++)
+        {
+            var p = plan.Pieces[i];
+            double len = plan.FramesOf(p) / plan.Fps;
+            if (!Judged(p, plan) || len < 4) continue;
+            // the 3 s window fully inside the part, and not silence
+            var inside = st.Where(x => x.T >= p.At + 3 && x.T <= p.At + len && x.S > -50).Select(x => x.S).OrderBy(x => x).ToList();
+            if (inside.Count < 5) continue;
+            level[i] = inside[inside.Count / 2];
+        }
+        if (level.Count < 3) return new();
+        var sorted = level.Values.OrderBy(x => x).ToList();
+        double median = sorted[sorted.Count / 2];
+        return level.ToDictionary(kv => kv.Key, kv => kv.Value - median);
+    }
+
+    /// <summary>
+    /// The clips, watched before the video is made from them: one that's mostly a frozen picture, mostly black, or
+    /// silent isn't worth showing. Returns those pieces (index and why).
+    /// </summary>
+    public static async Task<List<(int Index, string Why)>> BadPiecesAsync(string ffmpeg, EditPlan plan, string[] files, CancellationToken ct)
+    {
+        var bad = new System.Collections.Concurrent.ConcurrentBag<(int, string)>();
+        await System.Threading.Tasks.Parallel.ForEachAsync(Enumerable.Range(0, plan.Pieces.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, BackgroundWork.Parallel), CancellationToken = ct }, async (i, token) =>
+            {
+                var p = plan.Pieces[i];
+                if (p.Role is not ("moment" or "slow" or "face" or "cold") || p.Source is not null) return;
+                double len = plan.FramesOf(p) / plan.Fps;
+                if (len < 2) return;
+                try
+                {
+                    var c = await CheckPieceAsync(ffmpeg, files[i], token);
+                    string? why = c.Frozen >= 0.6 * len ? "the picture is frozen" : c.Black >= 0.5 * len ? "the screen is black"
+                        : c.Lufs < -62 && !p.Mute ? "there's no sound" : null;
+                    if (why is not null) bad.Add((i, why));
+                }
+                catch (OperationCanceledException) { throw; }
+                catch { }
+            });
+        return bad.OrderBy(b => b.Item1).ToList();
     }
 
     private static string Unique(string path)
@@ -486,12 +663,9 @@ public static class VodRenderer
             last = at;
         }
         sb.AppendLine();
-        sb.AppendLine(plan.Brand.MusicSource switch
-        {
-            "folder" when MusicLibrary.Tracks(plan.Brand.MusicFolder).Count > 0 => "Edited with Leapcast Studio AI.",
-            "none" => "Edited with Leapcast Studio AI.",
-            _ => "Edited with Leapcast Studio AI. Music: original, generated for this video (no copyright).",
-        });
+        sb.AppendLine(plan.Music.Count > 0 && plan.Brand.MusicSource == "generated"
+            ? "Edited with Leapcast Studio AI. Music: original, generated for this video (no copyright)."
+            : "Edited with Leapcast Studio AI.");
         if (plan.Texts.Any(t => t.Kind == "endscreen"))
         {
             var end = plan.Texts.First(t => t.Kind == "endscreen");

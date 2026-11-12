@@ -208,6 +208,10 @@ public sealed class VodProject
     public string Game { get; set; } = "other";
     /// <summary>What this edit started from, learned from your earlier edits ("" = nothing yet).</summary>
     public string LearnedNote { get; set; } = "";
+    /// <summary>What the editor checked in the finished video before saving it (clips swapped, loudness listened back).</summary>
+    public string QualityNote { get; set; } = "";
+    /// <summary>The print of the last rendered plan (a revision with the same print isn't rendered again).</summary>
+    public string PlanPrint { get; set; } = "";
     /// <summary>The cuts between clips in the last plan (what each uses, what the editor suggests).</summary>
     public List<CutInfo> Cuts { get; set; } = new();
     public List<EditMoment> Moments { get; set; } = new();
@@ -372,8 +376,22 @@ public static class EditFeedback
                 m.Groups[3].Success ? int.Parse(m.Groups[1].Value) * 3600 + int.Parse(m.Groups[2].Value) * 60 + int.Parse(m.Groups[3].Value)
                                     : int.Parse(m.Groups[1].Value) * 60 + int.Parse(m.Groups[2].Value)).Select(x => (double)x).ToList();
             // a part at a time that isn't worth keeping ("at 4:12: this part is boring"): that part goes, the pace stays
-            bool partNotWanted = times.Count > 0 && Regex.IsMatch(s, @"\b(boring|dull|pointless|unnecessary|not needed|do not need|nothing happens|dead air|filler|drags?|too long|not funny|not interesting|cringe)\b")
+            bool partNotWanted = times.Count > 0 && Regex.IsMatch(s, @"\b(boring|dull|pointless|unnecessary|not needed|do not need|nothing happens|dead air|filler|drags?|too long|not funny|not interesting|cringe|hate|awful|aweful|terrible|horrible|garbage|trash|bad|worst|lame|sucks?)\b")
                                  && !Regex.IsMatch(s, @"\b(transitions?|music|captions?|subtitles?|sound effects|zooms?)\b");
+
+            // ---- the clips themselves ("I hate the clips", "awful choices", "pick different moments"): all new ones
+            if (times.Count == 0 && Regex.IsMatch(s, @"\b(clips?|moments?|choices?|picks?|parts?|highlights?|footage|scenes?|selections?|what (it|you) (picked|chose))\b")
+                && Regex.IsMatch(s, @"\b(hate|awful|aweful|terrible|horrible|bad|garbage|trash|worst|lame|sucks?|boring|not good|no good|different|other|better|new ones|replace|swap|redo|wrong)\b")
+                && !Regex.IsMatch(s, @"\b(transitions?|music|captions?|subtitles?|zooms?|audio|sound|volume|loud\w*|quiet\w*|cuts? between|fast forward|speed|timelapse|time lapse|skip through)\b"))
+            {
+                int n = 0;
+                foreach (var m in project.Moments)
+                    if (!t.Remove.Any(r => r[0] <= m.From + 0.5 && r[1] >= m.To - 0.5)) { t.Remove.Add(new[] { m.From, m.To }); n++; }
+                ok.Add(n > 0
+                    ? $"Different clips: the {n} moments in this version are left out and the editor picks the next best ones from the stream (each one watched back before it's used). Untick or ▶ any below to judge them; if the stream runs out of good moments the video gets shorter"
+                    : "Different clips: every moment shown is already left out, so the editor uses the next best ones");
+                continue;
+            }
 
             // ---- everything you can turn on/off, up/down: by what it's about and which way you want it
             if (!partNotWanted) Settings(s, t, project, ok);
@@ -486,7 +504,7 @@ public static class EditFeedback
         bool aboutLevels = Has(s, @"\b(loudness|volume|levels?|audio|sound|loud|quiet)\b");
         bool levelsRule = false;
         if ((aboutLevels && Has(s, @"\b(mismatch\w*|uneven|inconsistent|different|differ|varies|vary|varying|jumps?|jumping|all over|balance\w*|even( it| them)? out|evenly|normali[sz]\w*|match\w*|consistent|same level|same volume|equali[sz]\w*|spikes?|jarring|fluctuat\w*)\b"))
-            || Has(s, @"\bsome parts\b.*\b(louder|quieter|loud|quiet)\b|\b(louder|quieter) than (the )?(others?|rest)\b|\bnormali[sz]e\b"))
+            || Has(s, @"\b(quiet|soft|loud)\w*\b.*\b(one|some|other|another|next|the other)\b.*\b(loud|quiet|soft)\w*\b|\b(one|some) (clip|part|moment|bit)s?\b.*\b(loud|quiet)\w*\b|\bsome parts\b.*\b(louder|quieter|loud|quiet)\b|\b(louder|quieter) than (the )?(others?|rest)\b|\bnormali[sz]e\b"))
         {
             bool off = Has(s, @"\b(do not|no|stop|without)\b.*\b(even|balanc|normali|match)");
             t.EvenLoudness = !off; levelsRule = true;

@@ -355,7 +355,7 @@ public sealed class VodEditWindow : Window
             RefreshControls(); // the times now match the preview
             Watch(file, true, $"Watching a quick preview of the edit as it stands (small and fast, captions not final; made in {(DateTime.Now - started):m\\:ss}). ▶ next to a cut or moment jumps there. Change anything, preview again (only what changed is remade), then render.");
             _bar.Value = 0.3;
-            _step.Text = "Preview ready: watch it above.";
+            _step.Text = "Preview ready: watch it above. " + VodRenderer.LoudnessCheck;
             Play();
         }
         catch (OperationCanceledException) { _step.Text = "Stopped."; _bar.Value = 0; WatchProject(pr); }
@@ -708,11 +708,19 @@ public sealed class VodEditWindow : Window
             Busy = true;
             var result = await Task.Run(() => VodEditor.ReviseAsync(ffmpeg, pr, _engine.VodVideoArgs, progress, _cts.Token))
                 .ContinueWith(t => { Busy = false; return t; }).Unwrap();
+            if (result.Unchanged)
+            {
+                _bar.Value = 0;
+                _step.Text = "Not rendered again: nothing you asked for changes this video (it would come out the same file). Look under each suggestion for what it understood; " +
+                             "say what you'd like different, e.g. “different clips”, “remove the part at 3:20”, “even out the loudness”, or untick moments below.";
+                return;
+            }
             _lastVideo = result.Video;
             _bar.Value = 1;
-            _step.Text = firstRender
+            _step.Text = (firstRender
                 ? $"Rendered in {(DateTime.Now - started):h\\:mm\\:ss}: {Path.GetFileName(result.Video)} ({result.Length:m\\:ss}), with a thumbnail and a description next to it. You can keep revising it below."
-                : $"Revised in {(DateTime.Now - started):h\\:mm\\:ss}: {Path.GetFileName(result.Video)} ({result.Length:m\\:ss}); {VodRenderer.Reused} of {pr.Pieces.Count} parts reused. The earlier version is still there (pick it under “Start from” to revise it instead).";
+                : $"Revised in {(DateTime.Now - started):h\\:mm\\:ss}: {Path.GetFileName(result.Video)} ({result.Length:m\\:ss}); {VodRenderer.Reused} of {pr.Pieces.Count} parts reused. The earlier version is still there (pick it under “Start from” to revise it instead).")
+                + (pr.QualityNote.Length > 0 ? " " + pr.QualityNote : "");
             ShowLearned();
             _open.Visibility = Visibility.Visible;
             ShowRevise(pr);
@@ -820,7 +828,8 @@ public sealed class VodEditWindow : Window
             _bar.Value = 1;
             _step.Text = $"Done in {(DateTime.Now - started):h\\:mm\\:ss}: {Path.GetFileName(result.Video)} ({result.Length:m\\:ss}), with a thumbnail and a description with chapters next to it."
                          + (VodRenderer.Fallbacks > 0 ? $" ({VodRenderer.Fallbacks} effect(s) were simplified; details in logs\\vod-edit.log)" : "")
-                         + (VodEditor.LastProject?.LearnedNote is { Length: > 0 } ln2 ? " " + ln2 : "");
+                         + (VodEditor.LastProject?.LearnedNote is { Length: > 0 } ln2 ? " " + ln2 : "")
+                         + (VodEditor.LastProject?.QualityNote is { Length: > 0 } qn ? " " + qn : "");
             _open.Visibility = Visibility.Visible;
         }
         catch (OperationCanceledException) { _step.Text = "Stopped."; _bar.Value = 0; }

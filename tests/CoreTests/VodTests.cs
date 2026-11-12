@@ -195,6 +195,7 @@ static class VodTests
             ("the sound effects are too loud", t => t.SfxVolume < 1 && t.SfxVolume > 0),
             ("it drags", t => t.Pace == -1),
             ("get rid of the black bars", t => !t.Letterbox),
+            ("Audio is quiet one clip, loud another", t => t.EvenLoudness),
             ("no hook at the start", t => !t.Hook),
             ("remove the teaser", t => !t.Hook),
             ("get rid of the outro", t => !t.EndScreen),
@@ -222,6 +223,12 @@ static class VodTests
               && lp.Tweaks.Cuts.Any(c => c.From == 2400 && c.Style == TransitionKinds.Fade) && lp.Tweaks.TransitionStyle == TransitionKinds.None && lp.Tweaks.Include.Count == 0
               && lp.Tweaks.EvenLoudness && l3.NotUnderstood.Count == 0,
             $"Revise: a note at a time changes that spot (boring part removed, a fade on that cut only, a loud part evened): {string.Join(" | ", l1.Understood.Concat(l2.Understood).Concat(l3.Understood))}");
+        var hp = new VodProject { TargetSeconds = 900, Duration = 600 };
+        hp.Moments.Add(new EditMoment(1195, 1232, 3, "let's go"));
+        hp.Moments.Add(new EditMoment(2398, 2442, 33, "no way"));
+        var hate = EditFeedback.Apply("I hate the clips, they're aweful choices", hp);
+        check(hp.Tweaks.Remove.Count == 2 && hate.NotUnderstood.Count == 0 && hate.Understood.Any(u => u.StartsWith("Different clips")),
+            $"Revise: “I hate the clips” → all different ones ({string.Join(" | ", hate.Understood.Concat(hate.NotUnderstood))})");
         var (_, odd) = F("the colors look weird");
         check(odd.Understood.Count == 0 && odd.NotUnderstood.Count == 1, "…something the editor can't change is just noted (with what it can change), not an error");
     }
@@ -336,7 +343,51 @@ static class VodTests
         string pv2 = await VodEditor.PreviewAsync(ffmpeg, proj, null, CancellationToken.None);
         check(File.Exists(pv2) && VodRenderer.Reused == proj.Pieces.Count, $"…previewing again after no change remakes no piece ({VodRenderer.Reused} of {proj.Pieces.Count} reused, {psw2.Elapsed.TotalSeconds:0} s)");
 
+        // ---- a revision that changes nothing isn't rendered again (and says so)
+        var nsw = System.Diagnostics.Stopwatch.StartNew();
+        var same = await VodEditor.ReviseAsync(ffmpeg, proj, (w, h, f) => new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "22" }, null, CancellationToken.None);
+        check(same.Unchanged && same.Video == proj.Video && nsw.Elapsed.TotalSeconds < 20,
+            $"Revise: suggestions that change nothing don't make the same video again ({nsw.Elapsed.TotalSeconds:0.0} s, unchanged: {same.Unchanged})");
+        check(proj.QualityNote.StartsWith("Checked before saving"), $"…every video is checked before it's saved: {proj.QualityNote}");
+
+        await QualityAsync(ffmpeg, Path.Combine(work, "quality"), check);
         await KitAsync(ffmpeg, Path.Combine(work, "kit"), check);
+    }
+
+    /// <summary>
+    /// The editor watches its clips and listens to the finished video: a black clip and a silent clip are caught, and
+    /// parts recorded 20 dB apart come out at the same loudness.
+    /// </summary>
+    public static async Task QualityAsync(string ffmpeg, string dir, Action<bool, string> check)
+    {
+        Directory.CreateDirectory(dir);
+        string src = Path.Combine(dir, "levels.mp4");
+        await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=100", "-f", "lavfi", "-i", "anoisesrc=d=100:c=pink:a=0.5",
+            "-vf", "drawbox=c=black:t=fill:enable='between(t,60,80)'",
+            "-af", "volume='if(lt(t,30),0.05,if(lt(t,60),0.5,if(between(t,85,100),0,0.2)))':eval=frame",
+            "-ac", "2", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", src }, TimeSpan.FromMinutes(3), CancellationToken.None);
+        var signals = await VodAnalyzer.AnalyzeAsync(ffmpeg, src, null, CancellationToken.None, useWhisper: false);
+        EditPlan Make(params (double In, double Out)[] spans)
+        {
+            var pl = new EditPlan { Width = 640, Height = 360, Fps = 30, Title = "levels" };
+            double at = 0;
+            foreach (var (a, b) in spans) { pl.Pieces.Add(new Piece { Role = "moment", In = a, Out = b, At = at }); at += b - a; }
+            return pl;
+        }
+        var args = new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "26" };
+        var withBad = Make((5, 15), (35, 45), (62, 72), (87, 95));
+        var files = await VodRenderer.PiecesAsync(ffmpeg, src, withBad, args, null, CancellationToken.None, Path.Combine(dir, "cache"), dir);
+        var bad = await VodRenderer.BadPiecesAsync(ffmpeg, withBad, files, CancellationToken.None);
+        check(bad.Select(b => b.Index).SequenceEqual(new[] { 2, 3 }), $"Clip check: a black clip and a silent clip are caught, the good ones pass ({string.Join(", ", bad.Select(b => $"{b.Index + 1}: {b.Why}"))})");
+        var a0 = await VodRenderer.CheckPieceAsync(ffmpeg, files[0], CancellationToken.None);
+        var a1 = await VodRenderer.CheckPieceAsync(ffmpeg, files[1], CancellationToken.None);
+        var good = Make((5, 15), (35, 45), (20, 28), (50, 58));
+        var res = await VodRenderer.RenderAsync(ffmpeg, src, good, Path.Combine(dir, "out"), "levels", args, signals, null, CancellationToken.None, Path.Combine(dir, "cache"));
+        var dev = await VodRenderer.PartDeviationsAsync(ffmpeg, res.Video, good, CancellationToken.None);
+        double worst = dev.Count == 0 ? 99 : dev.Values.Max(Math.Abs);
+        check(Math.Abs(a1.Lufs - a0.Lufs) > 15 && dev.Count == 4 && worst <= 2.5,
+            $"Loudness: parts recorded {Math.Abs(a1.Lufs - a0.Lufs):0} dB apart come out within {worst:0.0} dB of each other ({VodRenderer.LoudnessCheck})");
     }
 
     /// <summary>

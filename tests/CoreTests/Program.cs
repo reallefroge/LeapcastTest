@@ -35,6 +35,15 @@ if (args.Length > 0 && args[0] == "--au")
     VodTests.Learning((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
     return af == 0 ? 0 : 1;
 }
+// quick mode: the clip check and the loudness check of the finished video
+if (args.Length > 0 && args[0] == "--quality")
+{
+    int qf = 0;
+    LeapcastStudioAI.Vod.VodRenderer.LogPath = Path.Combine(Path.GetTempPath(), "leapcast-q.log");
+    await VodTests.QualityAsync(Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg", Path.Combine(Path.GetTempPath(), "leapcast-q-" + Guid.NewGuid().ToString("N")[..6]),
+        (ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) qf++; });
+    return qf == 0 ? 0 : 1;
+}
 // quick mode: the Wizard101 kit filling itself from a recording
 if (args.Length > 0 && args[0] == "--kit")
 {
