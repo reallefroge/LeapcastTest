@@ -207,6 +207,21 @@ static class VodTests
             if (!ok(t) || r.Understood.Count == 0) failed.Add($"“{text}” → {string.Join(", ", r.Understood)}");
         }
         check(failed.Count == 0, $"Revise: {cases.Length - failed.Count} of {cases.Length} ways of saying it understood{(failed.Count > 0 ? ": missed " + string.Join(" | ", failed) : "")}");
+        // one suggestion per line, each with the time you were at ("Note at this time")
+        var lp = new VodProject { TargetSeconds = 900, Duration = 600 };
+        lp.Pieces.Add(new VodProject.PieceInfo("title", 50, 53, 0, 3, 1));
+        lp.Pieces.Add(new VodProject.PieceInfo("moment", 1200, 1230, 3, 30, 1));
+        lp.Pieces.Add(new VodProject.PieceInfo("moment", 2400, 2440, 33, 40, 1));
+        lp.Moments.Add(new EditMoment(1195, 1232, 3, "let's go"));
+        lp.Moments.Add(new EditMoment(2398, 2442, 33, "no way"));
+        lp.Cuts.Add(new CutInfo(33, 2400, "none", "none", "fade", "soft", "test", TransitionKinds.Styles));
+        var l1 = EditFeedback.Apply("at 0:40: this part is boring", lp);
+        var l2 = EditFeedback.Apply("at 0:33: use a fade here", lp);
+        var l3 = EditFeedback.Apply("at 0:10: way too loud", lp);
+        check(lp.Tweaks.Remove.Any(r => r[0] == 2398) && lp.Tweaks.Pace == 0 && l1.NotUnderstood.Count == 0
+              && lp.Tweaks.Cuts.Any(c => c.From == 2400 && c.Style == TransitionKinds.Fade) && lp.Tweaks.TransitionStyle == TransitionKinds.None && lp.Tweaks.Include.Count == 0
+              && lp.Tweaks.EvenLoudness && l3.NotUnderstood.Count == 0,
+            $"Revise: a note at a time changes that spot (boring part removed, a fade on that cut only, a loud part evened): {string.Join(" | ", l1.Understood.Concat(l2.Understood).Concat(l3.Understood))}");
         var (_, odd) = F("the colors look weird");
         check(odd.Understood.Count == 0 && odd.NotUnderstood.Count == 1, "…something the editor can't change is just noted (with what it can change), not an error");
     }

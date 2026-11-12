@@ -368,15 +368,25 @@ public static class EditFeedback
                 continue;
             }
 
-            // ---- everything you can turn on/off, up/down: by what it's about and which way you want it
-            Settings(s, t, project, ok);
-
-            // ---- moments: remove (times in the finished video), add (times in the recording)
             var times = Regex.Matches(s, @"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b").Select(m =>
                 m.Groups[3].Success ? int.Parse(m.Groups[1].Value) * 3600 + int.Parse(m.Groups[2].Value) * 60 + int.Parse(m.Groups[3].Value)
                                     : int.Parse(m.Groups[1].Value) * 60 + int.Parse(m.Groups[2].Value)).Select(x => (double)x).ToList();
+            // a part at a time that isn't worth keeping ("at 4:12: this part is boring"): that part goes, the pace stays
+            bool partNotWanted = times.Count > 0 && Regex.IsMatch(s, @"\b(boring|dull|pointless|unnecessary|not needed|do not need|nothing happens|dead air|filler|drags?|too long|not funny|not interesting|cringe)\b")
+                                 && !Regex.IsMatch(s, @"\b(transitions?|music|captions?|subtitles?|sound effects|zooms?)\b");
+
+            // ---- everything you can turn on/off, up/down: by what it's about and which way you want it
+            if (!partNotWanted) Settings(s, t, project, ok);
+            // a loudness complaint at a time ("at 2:00: too loud"): that part is brought in line with the rest
+            if (ok.Count == before && times.Count > 0 && Regex.IsMatch(s, @"\b(too (loud|quiet|soft)|so (loud|quiet)|really (loud|quiet)|way (louder|quieter)|louder|quieter|blasting|ear ?rape|cannot hear|volume|peaks?|clipping|distorted)\b"))
+            {
+                t.EvenLoudness = true;
+                ok.Add($"Even loudness between parts (the part at {string.Join(", ", times.Select(Clock))} is brought in line with the rest)");
+            }
+
+            // ---- moments: remove (times in the finished video), add (times in the recording)
             bool inRecording = Regex.IsMatch(s, @"\b(stream|recording|vod|original|raw)\b");
-            if (times.Count > 0 && Regex.IsMatch(s, @"\b(remove|cut|drop|delete|get rid of|lose|skip)\b"))
+            if (times.Count > 0 && (partNotWanted || Regex.IsMatch(s, @"\b(remove|cut|drop|delete|get rid of|lose|skip)\b")) && !(ok.Count > before && ok[^1].StartsWith("Cut at")))
             {
                 foreach (var tm in times)
                 {
@@ -387,7 +397,7 @@ public static class EditFeedback
                     else not.Add($"{raw} (nothing from the recording plays at {Clock(tm)}: that's a title or end card)");
                 }
             }
-            else if (times.Count > 0 && Regex.IsMatch(s, @"\b(add|include|keep|put in|use|want)\b"))
+            else if (times.Count > 0 && Regex.IsMatch(s, @"\b(add|include|keep|put in|use|want)\b") && (ok.Count == before || Regex.IsMatch(s, @"\b(moment|part|clip|bit|this)\b.*\b(of the|from the) (stream|recording|vod)\b")))
             {
                 foreach (var tm in times)
                 {
@@ -398,7 +408,7 @@ public static class EditFeedback
                 }
             }
 
-            if (ok.Count == before) not.Add(raw);
+            if (ok.Count == before && !not.Any(n => n.StartsWith(raw, StringComparison.Ordinal))) not.Add(raw);
         }
         return new Result(ok, not);
     }

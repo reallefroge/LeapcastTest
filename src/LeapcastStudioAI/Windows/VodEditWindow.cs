@@ -189,7 +189,16 @@ public sealed class VodEditWindow : Window
 
     private VodProject? _project;
     private readonly Border _revise = new() { Visibility = Visibility.Collapsed, Margin = new Thickness(0, 16, 0, 0), Padding = new Thickness(14), CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1) };
-    private readonly TextBox _feedback = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 64, MaxHeight = 140, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+    // feedback: one suggestion per line (Enter applies it and starts the next)
+    private sealed class Suggestion
+    {
+        public required TextBox Box { get; init; }
+        public required TextBlock Result { get; init; }
+        public required FrameworkElement Row { get; init; }
+        public string? Applied { get; set; }
+    }
+    private readonly List<Suggestion> _suggestions = new();
+    private readonly StackPanel _suggestionRows = new();
     private readonly TextBlock _understood = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 6, 0, 0) };
     private readonly TextBox _rTitle = new(), _rMinutes = new() { Width = 60 };
     private readonly StackPanel _cards = new(), _moments = new();
@@ -273,8 +282,9 @@ public sealed class VodEditWindow : Window
         {
             string at = EditFeedback.Clock(_player.Position.TotalSeconds) + (_watchIsEdit ? "" : " of the stream");
             string add = $"at {at}: ";
-            _feedback.Text = _feedback.Text.TrimEnd() is { Length: > 0 } cur ? cur + Environment.NewLine + add : add;
-            _feedback.Focus(); _feedback.CaretIndex = _feedback.Text.Length;
+            var row = _suggestions.LastOrDefault(x => x.Box.Text.Trim().Length == 0) ?? AddSuggestion();
+            row.Box.Text = add;
+            row.Box.Focus(); row.Box.CaretIndex = row.Box.Text.Length;
             Pause();
         };
         _previewButton.Click += async (_, _) => await PreviewAsync();
@@ -328,7 +338,7 @@ public sealed class VodEditWindow : Window
     {
         if (_project is not { } pr) return;
         if (_engine.FfmpegPath is not { } ffmpeg) { _step.Text = "FFmpeg isn't available."; return; }
-        if (_feedback.Text.Trim().Length > 0 && _understood.Text.Length == 0) ApplyFeedback();
+        ApplyFeedback(); // lines typed but not applied yet
         ReadControls();
         Pause();
         try { _player.Close(); } catch { }
@@ -376,11 +386,11 @@ public sealed class VodEditWindow : Window
         r.Children.Add(BuildPlayer());
         r.Children.Add(new TextBlock { Foreground = Res("MutedBrush"), TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 2, 0, 8),
             Text = "Say what to change, or change it below. The recording isn't watched again and unchanged parts are reused, so a revision is quick." });
-        r.Children.Add(Label("What should change?"));
-        r.Children.Add(_feedback);
+        r.Children.Add(Label("What should change? (one suggestion per line: press Enter to apply it and start the next)"));
+        r.Children.Add(_suggestionRows);
         r.Children.Add(new TextBlock { Foreground = Res("MutedBrush"), TextWrapping = TextWrapping.Wrap, FontSize = 11, Margin = new Thickness(0, 3, 0, 0),
-            Text = "Write it however you like, e.g. “remove transitions” · “I don't want the transition sounds” · “the volume jumps between clips” · “music quieter by 50%” · “rename part 2 to Khrysalis boss fight” · “remove the part at 3:20” · “add the moment at 1:12:30 of the stream” · “too chaotic” · “make it 12 minutes”" });
-        var apply = new Button { Content = "Apply", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0), MinWidth = 90 };
+            Text = "Write each however you like, e.g. “remove transitions” · “I don't want the transition sounds” · “the volume jumps between clips” · “music quieter by 50%” · “rename part 2 to Khrysalis boss fight” · “remove the part at 3:20” · “add the moment at 1:12:30 of the stream” · “too chaotic” · “make it 12 minutes”" });
+        var apply = new Button { Content = "Apply all", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0), MinWidth = 90 };
         apply.Click += (_, _) => ApplyFeedback();
         r.Children.Add(apply);
         r.Children.Add(_understood);
@@ -439,7 +449,8 @@ public sealed class VodEditWindow : Window
         _reviseHeader.Text = review ? "Review the edit before it's rendered" : "Revise this video";
         _rerender.Content = review ? "Render" : "Re-render with changes";
         _revise.Visibility = Visibility.Visible;
-        _feedback.Text = "";
+        _suggestions.Clear(); _suggestionRows.Children.Clear();
+        AddSuggestion();
         _understood.Text = "";
         RefreshVersions();
         RefreshControls();
@@ -584,29 +595,106 @@ public sealed class VodEditWindow : Window
             }
     }
 
+    /// <summary>A new suggestion line (after <paramref name="after"/>, else at the end).</summary>
+    private Suggestion AddSuggestion(Suggestion? after = null)
+    {
+        var box = new TextBox { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 30, Padding = new Thickness(6, 4, 6, 4) };
+        var num = new TextBlock { Width = 22, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 6, 0, 0), Foreground = Res("MutedBrush"), FontSize = 12 };
+        var result = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(22, 2, 0, 0), Visibility = Visibility.Collapsed };
+        var line = new DockPanel();
+        line.Children.Add(num); DockPanel.SetDock(num, Dock.Left);
+        line.Children.Add(box);
+        var row = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
+        row.Children.Add(line); row.Children.Add(result);
+        var sg = new Suggestion { Box = box, Result = result, Row = row };
+        int at = after is null ? _suggestions.Count : _suggestions.IndexOf(after) + 1;
+        _suggestions.Insert(at, sg);
+        _suggestionRows.Children.Insert(at, row);
+        Renumber();
+        box.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == System.Windows.Input.Key.Enter)
+            {
+                // Enter: this suggestion is applied, and the next line is ready
+                e.Handled = true;
+                ApplySuggestion(sg);
+                int k = _suggestions.IndexOf(sg);
+                var next = k + 1 < _suggestions.Count && _suggestions[k + 1].Box.Text.Trim().Length == 0 ? _suggestions[k + 1]
+                    : sg.Box.Text.Trim().Length == 0 ? sg : AddSuggestion(sg);
+                next.Box.Focus();
+            }
+            else if (e.Key == System.Windows.Input.Key.Back && box.Text.Length == 0 && _suggestions.Count > 1)
+            {
+                // Backspace on an empty line: the line goes, back to the one above
+                e.Handled = true;
+                int k = _suggestions.IndexOf(sg);
+                _suggestions.RemoveAt(k); _suggestionRows.Children.Remove(row);
+                Renumber();
+                var prev = _suggestions[Math.Max(0, k - 1)];
+                prev.Box.Focus(); prev.Box.CaretIndex = prev.Box.Text.Length;
+            }
+            else if (e.Key == System.Windows.Input.Key.Up && box.GetLineIndexFromCharacterIndex(box.CaretIndex) == 0 && _suggestions.IndexOf(sg) > 0)
+            { e.Handled = true; _suggestions[_suggestions.IndexOf(sg) - 1].Box.Focus(); }
+            else if (e.Key == System.Windows.Input.Key.Down && box.GetLineIndexFromCharacterIndex(box.CaretIndex) >= box.LineCount - 1 && _suggestions.IndexOf(sg) < _suggestions.Count - 1)
+            { e.Handled = true; _suggestions[_suggestions.IndexOf(sg) + 1].Box.Focus(); }
+        };
+        // pasted lines become one suggestion each
+        box.TextChanged += (_, _) =>
+        {
+            if (!box.Text.Contains('\n')) return;
+            var lines = box.Text.Replace("\r", "").Split('\n');
+            box.Text = lines[0];
+            var last = sg;
+            foreach (var l in lines.Skip(1).Where(l => l.Trim().Length > 0)) { last = AddSuggestion(last); last.Box.Text = l; }
+            last.Box.Focus(); last.Box.CaretIndex = last.Box.Text.Length;
+        };
+        // an applied line that's edited shows it needs applying again
+        box.TextChanged += (_, _) => { if (sg.Applied is not null && box.Text.Trim() != sg.Applied) sg.Result.Opacity = 0.45; else sg.Result.Opacity = 1; };
+        return sg;
+    }
+
+    private void Renumber()
+    {
+        for (int k = 0; k < _suggestions.Count; k++)
+            if (_suggestions[k].Row is StackPanel sp && sp.Children[0] is DockPanel dp && dp.Children[0] is TextBlock n) n.Text = $"{k + 1}.";
+    }
+
+    /// <summary>One suggestion → the changes it asks for, shown under it (never an error: what can't be changed is noted).</summary>
+    private void ApplySuggestion(Suggestion sg)
+    {
+        if (_project is not { } pr) return;
+        string text = sg.Box.Text.Trim();
+        if (text.Length == 0 || text == sg.Applied) return;
+        ReadControls(); // what's already been changed by hand stays
+        var res = EditFeedback.Apply(text, pr);
+        RefreshControls();
+        sg.Applied = text;
+        var parts = res.Understood.Select(x => "✓ " + x).ToList();
+        if (res.NotUnderstood.Count > 0) parts.Add("Noted: " + string.Join("; ", res.NotUnderstood.Select(x => "“" + x + "”")) + " (see what the editor can change below)");
+        sg.Result.Text = string.Join(Environment.NewLine, parts);
+        sg.Result.Foreground = res.Understood.Count > 0 ? Res("TextBrush") : Res("MutedBrush");
+        sg.Result.Opacity = 1;
+        sg.Result.Visibility = Visibility.Visible;
+        bool anyNoted = _suggestions.Any(x => x.Result.Text.Contains("Noted:"));
+        _understood.Text = (anyNoted
+            ? "The editor can change the music, sound effects, transitions, loudness between parts, captions, chapters and their text, zooms, slow motion, screen shake, " +
+              "cuts to your face, the hook, the end screen, the cold open, pace, length, what it focuses on, the title, and which moments are in. Say which of those you'd like different, or adjust them below. "
+            : "") + "Press “" + _rerender.Content + "” when you're ready, or “Quick preview of the edit” to watch the changes first.";
+        _understood.Foreground = Res("MutedBrush");
+    }
+
+    /// <summary>Every line typed but not applied yet.</summary>
     private void ApplyFeedback()
     {
-        if (_project is not { } pr || _feedback.Text.Trim().Length == 0) return;
-        ReadControls(); // what's already been changed by hand stays
-        var res = EditFeedback.Apply(_feedback.Text, pr);
-        RefreshControls();
-        // feedback is never "wrong": what maps to a change is applied; anything else is noted with what the editor can do
-        var lines = res.Understood.Select(x => "✓ " + x).ToList();
-        if (res.NotUnderstood.Count > 0)
-            lines.Add((res.Understood.Count > 0 ? "Also noted: " : "Noted: ") + string.Join("; ", res.NotUnderstood.Select(x => "“" + x + "”")) +
-                ". The editor can change the music, sound effects, transitions, loudness between parts, captions, chapters and their text, zooms, " +
-                "slow motion, screen shake, cuts to your face, the cold open, pace, length, what it focuses on, the title, and which moments are in. " +
-                "Say which of those you'd like different, or adjust them below.");
-        _understood.Text = string.Join(Environment.NewLine, lines)
-            + (res.Understood.Count > 0 ? Environment.NewLine + "Press “Re-render with changes” when you're ready (you can adjust anything below first)." : "");
-        _understood.Foreground = Res("TextBrush");
+        foreach (var sg in _suggestions.ToList()) ApplySuggestion(sg);
+        if (_suggestions.Count == 0 || _suggestions[^1].Box.Text.Trim().Length > 0) AddSuggestion();
     }
 
     private async Task ReviseAsync()
     {
         if (_project is not { } pr) return;
         if (_engine.FfmpegPath is not { } ffmpeg) { _step.Text = "FFmpeg isn't available."; return; }
-        if (_feedback.Text.Trim().Length > 0 && _understood.Text.Length == 0) ApplyFeedback(); // typed but not applied yet
+        ApplyFeedback(); // lines typed but not applied yet
         ReadControls();
         bool firstRender = pr.Video.Length == 0;   // (a reviewed plan, not rendered yet)
         _cts = new CancellationTokenSource();
