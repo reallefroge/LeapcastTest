@@ -580,8 +580,10 @@ public static class VodPlanner
 
         // ---------------------------------------------------------------- VAR checks (Among Us): you explain where you were, the replay shows it
         var varCues = new List<(Piece Piece, PieceOverlay Ov)>();
-        if (amongUs && tw.VarChecks && s.WordsFromMic && words.Count > 0)
+        if (amongUs && s.WordsFromMic && words.Count > 0)
         {
+            bool Near(List<double> list, double t) => list.Any(x => Math.Abs(x - t) < 4);
+            int meetingNo = 0; double lastMeetingStart = -1;
             // your own words (the mic track only: never another player's) claiming where you were or what you did
             var claim = new System.Text.RegularExpressions.Regex(@"^(i was|i went|i came|i did|i walked|i saw|i stayed|i ran|i followed|i fixed|i scanned|my tasks?|i had|i finished|i started|i left)$|^(electrical|electric|medbay|med bay|admin|cafeteria|cafe|navigation|nav|o2|oxygen|shields|weapons|reactor|security|storage|comms|communications|engine|specimen|laboratory|lab|office|decontam|boiler|dropship|vault|kitchen|cockpit|records|lounge|showers|greenhouse|garage|crates)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             double lastVar = -999;
@@ -602,7 +604,10 @@ public static class VodPlanner
                 // the meeting this is in, and the round of play just before it (what you did)
                 int ms = b; while (ms > 0 && phase[ms - 1] == PhaseKind.Meeting) ms--;
                 if (ms != (int)(meetingStartSeen / Bin)) { meetingStartSeen = ms * Bin; perMeetingCount = 0; }
-                if (perMeetingCount >= 2 || tc - lastVar < 20) continue;
+                if (ms * Bin != lastMeetingStart) { lastMeetingStart = ms * Bin; meetingNo = 1 + Enumerable.Range(0, ms).Count(x => phase[x] == PhaseKind.Meeting && (x == 0 || phase[x - 1] != PhaseKind.Meeting)); }
+                if (tc - lastVar < 20 || plan.VarClaims.Any(v => Math.Abs(v.At - tc) < 20)) continue;
+                // shown: VAR checks on (at most two a meeting, and not ones you turned off), or this one asked for
+                bool wanted = Near(tw.VarOn, tc) || tw.VarChecks && perMeetingCount < 2 && !Near(tw.VarOff, tc);
                 int pe = ms; while (pe > 0 && phase[pe - 1] != PhaseKind.Play) pe--;
                 int ps = pe; while (ps > 0 && phase[ps - 1] == PhaseKind.Play) ps--;
                 double roundFrom = ps * Bin, roundTo = pe * Bin;
@@ -616,6 +621,8 @@ public static class VodPlanner
                 // what you said, as the replay's caption (up to the end of the sentence)
                 var said = words.Skip(Math.Max(0, k - (isClaimAfterPrep(before) ? 1 : 0))).TakeWhile(w => w.Start < tc + len).Take(7).Select(w => w.Text);
                 var ov = new PieceOverlay(roundFrom, roundTo, start, len, Captions.Tidy(string.Join(' ', said)));
+                plan.VarClaims.Add(new VarClaim(tc, ov.Quote, meetingNo, wanted));
+                if (!wanted) continue;
                 host.Overlay = ov;
                 varCues.Add((host, ov));
                 lastVar = tc; perMeetingCount++;

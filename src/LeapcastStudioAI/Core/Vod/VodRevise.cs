@@ -40,6 +40,12 @@ public sealed class EditTweaks
     public bool EndScreen { get; set; } = true;
     /// <summary>Among Us: when you describe where you were in a meeting (on your mic), a fast replay of your round over it.</summary>
     public bool VarChecks { get; set; } = true;
+    /// <summary>VAR checks you asked for one by one (where you said it, recording seconds): shown even with VAR checks off.</summary>
+    public List<double> VarOn { get; set; } = new();
+    /// <summary>VAR checks you turned off one by one (recording seconds).</summary>
+    public List<double> VarOff { get; set; } = new();
+    /// <summary>The editor's suggestions you dismissed (they don't come back).</summary>
+    public List<string> Dismissed { get; set; } = new();
 
     public CutPick Cut(double from)
     {
@@ -215,6 +221,8 @@ public sealed class VodProject
     /// <summary>The cuts between clips in the last plan (what each uses, what the editor suggests).</summary>
     public List<CutInfo> Cuts { get; set; } = new();
     public List<EditMoment> Moments { get; set; } = new();
+    /// <summary>Where you explained where you were in a meeting (Among Us), shown as a VAR check or not.</summary>
+    public List<VarClaim> VarClaims { get; set; } = new();
     public double Duration { get; set; }
 
     public sealed record PieceInfo(string Role, double In, double Out, double At, double Length, double Speed);
@@ -244,6 +252,7 @@ public sealed class VodProject
         Chapters = plan.Texts.Where(t => t.Kind == "chapter").Select((t, i) => new ChapterInfo(i + 2, t.At, t.Text, t.Sub ?? "")).ToList();
         Moments = plan.Moments.ToList();
         Cuts = plan.Cuts.ToList();
+        VarClaims = plan.VarClaims.ToList();
         Duration = plan.Duration;
     }
 
@@ -378,6 +387,27 @@ public static class EditFeedback
             // a part at a time that isn't worth keeping ("at 4:12: this part is boring"): that part goes, the pace stays
             bool partNotWanted = times.Count > 0 && Regex.IsMatch(s, @"\b(boring|dull|pointless|unnecessary|not needed|do not need|nothing happens|dead air|filler|drags?|too long|not funny|not interesting|cringe|hate|awful|aweful|terrible|horrible|garbage|trash|bad|worst|lame|sucks?)\b")
                                  && !Regex.IsMatch(s, @"\b(transitions?|music|captions?|subtitles?|sound effects|zooms?)\b");
+
+            // ---- a VAR check at a time ("show what I did at 5:10", "no replay at 7:02")
+            if (times.Count > 0 && Regex.IsMatch(s, @"\b(var|replay|what i did|my round|my pathing|where i was|recall)\b"))
+            {
+                bool off = Off(s);
+                bool rec = Regex.IsMatch(s, @"\b(stream|recording|vod|original|raw)\b");
+                foreach (var tm in times)
+                {
+                    double? src = rec ? tm : project.SourceAt(tm);
+                    var claim = src is { } v ? project.VarClaims.Where(c => Math.Abs(c.At - v) < 20).OrderBy(c => Math.Abs(c.At - v)).FirstOrDefault() : null;
+                    if (claim is null)
+                    {
+                        not.Add($"{raw} (at {Clock(tm)} you don't say where you were in a meeting, which a VAR check needs: try a time from the editor's suggestions)");
+                        continue;
+                    }
+                    t.VarOn.RemoveAll(x => Math.Abs(x - claim.At) < 4); t.VarOff.RemoveAll(x => Math.Abs(x - claim.At) < 4);
+                    if (off) { t.VarOff.Add(claim.At); ok.Add($"No VAR check at {Clock(tm)}"); }
+                    else { t.VarOn.Add(claim.At); ok.Add($"VAR check at {Clock(tm)}: a replay of your round plays over “{claim.Quote}”"); }
+                }
+                continue;
+            }
 
             // ---- the clips themselves ("I hate the clips", "awful choices", "pick different moments"): all new ones
             if (times.Count == 0 && Regex.IsMatch(s, @"\b(clips?|moments?|choices?|picks?|parts?|highlights?|footage|scenes?|selections?|what (it|you) (picked|chose))\b")

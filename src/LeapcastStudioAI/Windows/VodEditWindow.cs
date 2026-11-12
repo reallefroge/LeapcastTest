@@ -235,6 +235,13 @@ public sealed class VodEditWindow : Window
     private readonly Button _previewButton = new() { Content = "Quick preview of the edit", Margin = new Thickness(8, 0, 0, 0) };
     private readonly System.Windows.Threading.DispatcherTimer _tick = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private string? _watchFile;
+    private bool _opened;
+    private (double At, double? StopAt)? _pendingSeek;
+    /// <summary>The video (or its preview) the player goes back to after showing a bit of the recording.</summary>
+    private (string File, string What)? _editWatch;
+    // the editor's own suggestions for this edit
+    private readonly StackPanel _suggestPanel = new();
+    private int _suggestGen;
     private bool _watchIsEdit, _playing, _seeking;
     private double? _stopAt;
 
@@ -258,7 +265,15 @@ public sealed class VodEditWindow : Window
         _player.MediaOpened += (_, _) =>
         {
             _seek.Maximum = _player.NaturalDuration.HasTimeSpan ? Math.Max(1, _player.NaturalDuration.TimeSpan.TotalSeconds) : 1;
-            if (!_playing) { _player.Play(); _player.Pause(); } // the first frame shows
+            _opened = true;
+            if (_pendingSeek is { } ps)
+            {
+                // a ▶ pressed before the file was open: play from there now
+                _pendingSeek = null;
+                _player.Position = TimeSpan.FromSeconds(ps.At); _stopAt = ps.StopAt;
+                Play();
+            }
+            else if (!_playing) { _player.Play(); _player.Pause(); } // the first frame shows
         };
         _player.MediaEnded += (_, _) => Pause();
         _player.MediaFailed += (_, e) =>
@@ -302,19 +317,38 @@ public sealed class VodEditWindow : Window
         {
             _playing = false; _playPause.Content = "▶";
             try { _player.Close(); } catch { }
-            _watchFile = file; _watchIsEdit = isEdit;
+            _watchFile = file; _watchIsEdit = isEdit; _opened = false;
             _player.Source = new Uri(file);
         }
+        if (isEdit) _editWatch = (file, what);
         _watching.Text = what;
+    }
+
+    /// <summary>Plays from a point of what's open (once it's open, if it's still opening).</summary>
+    private void Seek(double at, double? stopAt)
+    {
+        if (!_opened) { _pendingSeek = (Math.Max(0, at), stopAt); return; }
+        _player.Position = TimeSpan.FromSeconds(Math.Max(0, at)); _stopAt = stopAt;
+        Play();
+    }
+
+    /// <summary>A bit of the recording that isn't in the video (a suggestion to add it): the player shows the recording there.</summary>
+    private void PlaySource(double sourceAt, double len)
+    {
+        if (_project is not { } pr || !File.Exists(pr.Recording)) return;
+        if (_watchIsEdit || _watchFile is null)
+            Watch(pr.Recording, false, "Watching the recording (this part isn't in the video). ▶ on a moment or a cut goes back to the video.");
+        Seek(sourceAt, sourceAt + len);
     }
 
     /// <summary>Plays a spot: in the edit when you're watching the edit, else in the recording (just that stretch).</summary>
     private void PlayAt(double videoAt, double sourceAt, double sourceLen)
     {
         if (_watchFile is null) return;
-        if (_watchIsEdit) { _stopAt = null; _player.Position = TimeSpan.FromSeconds(Math.Max(0, videoAt)); }
-        else { _player.Position = TimeSpan.FromSeconds(Math.Max(0, sourceAt)); _stopAt = sourceAt + sourceLen; }
-        Play();
+        // back to the video if a suggestion was showing the recording
+        if (!_watchIsEdit && _editWatch is { } ew && File.Exists(ew.File)) Watch(ew.File, true, ew.What);
+        if (_watchIsEdit) Seek(videoAt, null);
+        else Seek(sourceAt, sourceAt + sourceLen);
     }
 
     private Button PlayButton(Action play) => new()
@@ -353,6 +387,7 @@ public sealed class VodEditWindow : Window
             Busy = true;
             string file = await Task.Run(() => VodEditor.PreviewAsync(ffmpeg, pr, progress, _cts.Token)).ContinueWith(t => { Busy = false; return t; }).Unwrap();
             RefreshControls(); // the times now match the preview
+            RefreshSuggestions();
             Watch(file, true, $"Watching a quick preview of the edit as it stands (small and fast, captions not final; made in {(DateTime.Now - started):m\\:ss}). ▶ next to a cut or moment jumps there. Change anything, preview again (only what changed is remade), then render.");
             _bar.Value = 0.3;
             _step.Text = "Preview ready: watch it above. " + VodRenderer.LoudnessCheck;
@@ -386,6 +421,10 @@ public sealed class VodEditWindow : Window
         r.Children.Add(BuildPlayer());
         r.Children.Add(new TextBlock { Foreground = Res("MutedBrush"), TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 2, 0, 8),
             Text = "Say what to change, or change it below. The recording isn't watched again and unchanged parts are reused, so a revision is quick." });
+        r.Children.Add(Label("The editor's suggestions (▶ to watch the spot, Apply to do it, ✕ to dismiss)"));
+        r.Children.Add(new Border { Child = new ScrollViewer { Content = _suggestPanel, MaxHeight = 260, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
+            BorderBrush = Res("LineBrush"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(6) });
+        r.Children.Add(new TextBlock { Foreground = Res("MutedBrush"), TextWrapping = TextWrapping.Wrap, FontSize = 11, Margin = new Thickness(0, 4, 0, 0), Text = VodSuggestions.HowTo });
         r.Children.Add(Label("What should change? (one suggestion per line: press Enter to apply it and start the next)"));
         r.Children.Add(_suggestionRows);
         r.Children.Add(new TextBlock { Foreground = Res("MutedBrush"), TextWrapping = TextWrapping.Wrap, FontSize = 11, Margin = new Thickness(0, 3, 0, 0),
@@ -455,6 +494,49 @@ public sealed class VodEditWindow : Window
         RefreshVersions();
         RefreshControls();
         WatchProject(project);
+        RefreshSuggestions();
+    }
+
+    /// <summary>The editor's suggestions for the edit as it stands now (planned again in the background: a second or two).</summary>
+    private async void RefreshSuggestions()
+    {
+        if (_project is not { } pr) return;
+        int gen = ++_suggestGen;
+        _suggestPanel.Children.Clear();
+        _suggestPanel.Children.Add(new TextBlock { Text = "Looking for what could be better…", Foreground = Res("MutedBrush"), FontSize = 12 });
+        List<EditSuggestion> list;
+        try { list = await Task.Run(() => VodEditor.Suggest(pr)); }
+        catch (Exception ex) { list = new(); VodRenderer.Note("suggestions: " + ex.Message); }
+        if (gen != _suggestGen || !ReferenceEquals(pr, _project)) return;
+        _suggestPanel.Children.Clear();
+        if (list.Count == 0)
+            _suggestPanel.Children.Add(new TextBlock { Text = "Nothing to suggest right now. Watch it and write what you'd change below.", Foreground = Res("MutedBrush"), FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        foreach (var sug in list)
+        {
+            var row = new DockPanel { Margin = new Thickness(0, 2, 0, 4) };
+            var item = sug;
+            if (sug.At >= 0 || sug.SourceAt >= 0)
+            {
+                var play = Watchable(() => { if (item.At >= 0) PlayAt(item.At, Math.Max(0, item.SourceAt), 8); else PlaySource(item.SourceAt, 10); });
+                row.Children.Add(play); DockPanel.SetDock(play, Dock.Left);
+            }
+            var dismiss = new Button { Content = "✕", Width = 28, Height = 24, Padding = new Thickness(0), Margin = new Thickness(4, 0, 0, 0), ToolTip = "Not for this video (won't be suggested again)", VerticalAlignment = VerticalAlignment.Top };
+            var apply = new Button { Content = "Apply", MinWidth = 64, Height = 24, Padding = new Thickness(8, 0, 8, 0), Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Top, ToolTip = "Adds “" + sug.Apply + "” to your suggestions and applies it" };
+            row.Children.Add(dismiss); DockPanel.SetDock(dismiss, Dock.Right);
+            row.Children.Add(apply); DockPanel.SetDock(apply, Dock.Right);
+            row.Children.Add(new TextBlock { Text = sug.Text, TextWrapping = TextWrapping.Wrap, FontSize = 12, VerticalAlignment = VerticalAlignment.Center });
+            dismiss.Click += (_, _) => { pr.Tweaks.Dismissed.Add(item.Id); _suggestPanel.Children.Remove(row); };
+            apply.Click += (_, _) =>
+            {
+                var line = _suggestions.LastOrDefault(x => x.Box.Text.Trim().Length == 0) ?? AddSuggestion();
+                line.Box.Text = item.Apply;
+                ApplySuggestion(line);
+                if (_suggestions[^1].Box.Text.Trim().Length > 0) AddSuggestion();
+                _suggestPanel.Children.Remove(row);
+                RefreshSuggestions();
+            };
+            _suggestPanel.Children.Add(row);
+        }
     }
 
     /// <summary>Every version made from the same recording (the original and each revision), newest first.</summary>
@@ -675,6 +757,7 @@ public sealed class VodEditWindow : Window
         sg.Result.Foreground = res.Understood.Count > 0 ? Res("TextBrush") : Res("MutedBrush");
         sg.Result.Opacity = 1;
         sg.Result.Visibility = Visibility.Visible;
+        RefreshSuggestions();
         bool anyNoted = _suggestions.Any(x => x.Result.Text.Contains("Noted:"));
         _understood.Text = (anyNoted
             ? "The editor can change the music, sound effects, transitions, loudness between parts, captions, chapters and their text, zooms, slow motion, screen shake, " +

@@ -130,6 +130,23 @@ static class VodTests
             WordsFromMic = false, Novelty = s.Novelty, MeetingUi = s.MeetingUi, Lobby = s.Lobby, Others = s.Others, Layout = s.Layout,
         }, new VodEditOptions("Among Us", 120));
         check(noMic.Pieces.All(p => p.Overlay is null), "…only from your microphone: without a mic track (words from the speakers) there's no VAR check");
+
+        // the editor's suggestions: with VAR checks off, it suggests the one where you explained where you were;
+        // applying the suggestion shows that replay (and only that one)
+        var twOff = new EditTweaks { VarChecks = false };
+        var off = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120), twOff);
+        var sugg = VodSuggestions.For(off, s, twOff, "Among Us");
+        var vs = sugg.FirstOrDefault(x => x.Kind == "var");
+        check(off.Pieces.All(p => p.Overlay is null) && vs is not null && vs.Text.Contains("electrical") && vs.At > 0,
+            $"Suggestions: “{vs?.Text}” → “{vs?.Apply}” ({sugg.Count} suggestions: {string.Join(" | ", sugg.Select(x => x.Kind))})");
+        var vp = new VodProject { TargetSeconds = 120, Duration = off.Duration, Tweaks = twOff };
+        vp.Remember(off);
+        var applied = EditFeedback.Apply(vs!.Apply, vp);
+        var on = VodPlanner.Plan(s, new VodEditOptions("Among Us", 120), vp.Tweaks);
+        check(on.Pieces.Count(p => p.Overlay is not null) == 1 && applied.NotUnderstood.Count == 0 && !VodSuggestions.For(on, s, vp.Tweaks, "Among Us").Any(x => x.Kind == "var"),
+            $"…Apply turns on that replay only ({string.Join(" | ", applied.Understood)}), and it's no longer suggested");
+        vp.Tweaks.Dismissed.Add(sugg[0].Id);
+        check(VodSuggestions.For(off, s, vp.Tweaks, "Among Us").All(x => x.Id != sugg[0].Id), "…a dismissed suggestion doesn't come back");
     }
 
     /// <summary>The editor learns your taste: a choice you make in two or more edits becomes where new edits start.</summary>

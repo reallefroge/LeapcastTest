@@ -45,6 +45,9 @@ public sealed class Piece
 public sealed record SfxCue(double At, SfxKind Kind, float Gain, int Seed = 0);
 
 /// <summary>Footage played over a piece: source In–Out, sped up to fit Length seconds, starting Start seconds into the piece.</summary>
+/// <summary>You explaining where you were in a meeting: when (recording seconds), what you said, which meeting, and whether the replay shows.</summary>
+public sealed record VarClaim(double At, string Quote, int Meeting, bool Shown);
+
 public sealed record PieceOverlay(double In, double Out, double Start, double Length, string Quote);
 
 /// <summary>A cut between two clips of the edit: what the editor suggests there, and what it uses.</summary>
@@ -102,6 +105,8 @@ public sealed class EditPlan
     public double SfxVolume { get; set; } = 1;
     /// <summary>Your channel's look (intro, music, end screen).</summary>
     public VodBrand Brand { get; set; } = new();
+    /// <summary>Everywhere you explained where you were in a meeting (Among Us), shown as a VAR check or not.</summary>
+    public List<VarClaim> VarClaims { get; } = new();
     /// <summary>The cuts between clips (for the review panel), in order.</summary>
     public List<CutInfo> Cuts { get; } = new();
     /// <summary>Parts brought to one loudness (each piece's <see cref="Piece.GainDb"/>, plus smoothing in the mix).</summary>

@@ -215,6 +215,26 @@ public static class VodEditor
         return result.Video;
     }
 
+    private static (string Id, VodSignals Signals)? _signalsCache;
+
+    /// <summary>
+    /// The editor's suggestions for this edit as it stands now (with your changes so far): planned again from what it
+    /// learned about the recording (nothing is watched or rendered; a second or two).
+    /// </summary>
+    public static List<EditSuggestion> Suggest(VodProject project)
+    {
+        VodSignals? s = _signalsCache is { } sc && sc.Id == project.Id ? sc.Signals : null;
+        if (s is null)
+        {
+            s = project.LoadSignals();
+            if (s is null) return new();
+            _signalsCache = (project.Id, s);
+        }
+        var plan = VodPlanner.Plan(s, project.Options(), project.Tweaks);
+        project.VarClaims = plan.VarClaims.ToList();
+        return VodSuggestions.For(plan, s, project.Tweaks, project.Game);
+    }
+
     /// <summary>Everything that decides what the video looks and sounds like (two plans with the same print make the same video).</summary>
     public static string PlanPrint(EditPlan plan, EditTweaks tw)
     {
