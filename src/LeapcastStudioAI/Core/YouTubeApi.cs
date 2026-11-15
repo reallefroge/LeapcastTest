@@ -23,7 +23,8 @@ public sealed record YouTubeBroadcast(string Id, string Title, DateTime? Schedul
 }
 
 /// <summary>Where to send video for a broadcast (its bound stream's RTMP ingestion point).</summary>
-public sealed record YouTubeIngest(string StreamId, string ServerUrl, string StreamKey);
+/// <param name="Note">Said when the broadcast was given its own stream (it shared one with another scheduled broadcast).</param>
+public sealed record YouTubeIngest(string StreamId, string ServerUrl, string StreamKey, string? Note = null);
 
 /// <summary>
 /// YouTube Live through the YouTube Data API: sign in with Google (in the browser, PKCE, a loopback redirect: no
@@ -172,11 +173,13 @@ public sealed class YouTubeApi
     }
 
     /// <summary>A new broadcast starting now (starts and ends with the stream).</summary>
-    public async Task<YouTubeBroadcast> CreateBroadcastAsync(string title, string privacy, CancellationToken ct)
+    public async Task<YouTubeBroadcast> CreateBroadcastAsync(string title, string privacy, CancellationToken ct, string description = "")
     {
+        var snippet = new JsonObject { ["title"] = title.Length > 100 ? title[..100] : title, ["scheduledStartTime"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture) };
+        if (description.Trim().Length > 0) snippet["description"] = description.Trim();
         var body = new JsonObject
         {
-            ["snippet"] = new JsonObject { ["title"] = title, ["scheduledStartTime"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture) },
+            ["snippet"] = snippet,
             ["status"] = new JsonObject { ["privacyStatus"] = privacy, ["selfDeclaredMadeForKids"] = false },
             ["contentDetails"] = new JsonObject { ["enableAutoStart"] = true, ["enableAutoStop"] = true },
         };
@@ -184,25 +187,40 @@ public sealed class YouTubeApi
     }
 
     /// <summary>
-    /// The stream the broadcast is bound to (its server and key). A broadcast with no stream yet is bound to the
-    /// channel's reusable stream (created once, named "Leapcast"), so it's the one YouTube expects video on.
+    /// The stream the broadcast is bound to (its server and key), made so that video sent to it can only go to this
+    /// broadcast. A broadcast with no stream, or one whose stream (often the channel's default key) is also bound to
+    /// another live or scheduled broadcast, gets a stream of its own: one of Leapcast's reusable streams ("Leapcast",
+    /// "Leapcast 2"…) that no other broadcast uses, made the first time it's needed. With one key shared by several
+    /// scheduled broadcasts, YouTube can't tell which one the video is for, and it can land on the wrong one.
     /// </summary>
-    public async Task<YouTubeIngest> IngestForAsync(YouTubeBroadcast b, CancellationToken ct)
+    /// <param name="others">The channel's other broadcasts (from <see cref="ListBroadcastsAsync"/>); looked up when not given.</param>
+    public async Task<YouTubeIngest> IngestForAsync(YouTubeBroadcast b, CancellationToken ct, IReadOnlyCollection<YouTubeBroadcast>? others = null)
     {
+        others ??= await ListBroadcastsAsync(ct);
+        var taken = others.Where(o => o.Id != b.Id && o.BoundStreamId is not null).Select(o => o.BoundStreamId!).ToHashSet();
         string? streamId = b.BoundStreamId;
+        string? note = null;
         JsonNode? stream = null;
+        if (streamId is not null && taken.Contains(streamId))
+        {
+            var sharing = others.Where(o => o.Id != b.Id && o.BoundStreamId == streamId).Select(o => "\"" + o.Title + "\"").ToList();
+            note = $"it shared its stream key with {string.Join(", ", sharing)}, so it was given a key of its own (the video can only go to this broadcast)";
+            streamId = null;
+        }
         if (streamId is not null)
             stream = (await GetAsync($"liveStreams?part=id,cdn,snippet,contentDetails&id={Uri.EscapeDataString(streamId)}", ct))["items"]?.AsArray().FirstOrDefault();
         if (stream is null)
         {
             var mine = (await GetAsync("liveStreams?part=id,cdn,snippet,contentDetails&mine=true&maxResults=50", ct))["items"]?.AsArray() ?? new JsonArray();
-            stream = mine.FirstOrDefault(s => s?["snippet"]?["title"]?.GetValue<string>() == "Leapcast" && s?["contentDetails"]?["isReusable"]?.GetValue<bool>() == true)
-                     ?? mine.FirstOrDefault(s => s?["contentDetails"]?["isReusable"]?.GetValue<bool>() == true && s?["cdn"]?["ingestionType"]?.GetValue<string>() == "rtmp");
+            bool Free(JsonNode? s) => s?["id"]?.GetValue<string>() is { } id && !taken.Contains(id)
+                                      && s?["contentDetails"]?["isReusable"]?.GetValue<bool>() == true && s?["cdn"]?["ingestionType"]?.GetValue<string>() is null or "rtmp";
+            var ours = mine.Where(s => s?["snippet"]?["title"]?.GetValue<string>() is { } t && (t == "Leapcast" || t.StartsWith("Leapcast ", StringComparison.Ordinal))).ToList();
+            stream = ours.FirstOrDefault(Free);
             if (stream is null)
             {
                 var body = new JsonObject
                 {
-                    ["snippet"] = new JsonObject { ["title"] = "Leapcast" },
+                    ["snippet"] = new JsonObject { ["title"] = ours.Count == 0 ? "Leapcast" : $"Leapcast {ours.Count + 1}" },
                     ["cdn"] = new JsonObject { ["ingestionType"] = "rtmp", ["resolution"] = "variable", ["frameRate"] = "variable" },
                     ["contentDetails"] = new JsonObject { ["isReusable"] = true },
                 };
@@ -214,7 +232,7 @@ public sealed class YouTubeApi
         var info = stream["cdn"]?["ingestionInfo"];
         string server = info?["ingestionAddress"]?.GetValue<string>() ?? "rtmp://a.rtmp.youtube.com/live2";
         string key = info?["streamName"]?.GetValue<string>() ?? throw new InvalidOperationException("YouTube didn't return the stream key for this broadcast.");
-        return new YouTubeIngest(streamId!, server, key);
+        return new YouTubeIngest(streamId!, server, key, note);
     }
 
     /// <summary>

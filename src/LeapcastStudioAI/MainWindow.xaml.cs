@@ -1827,10 +1827,23 @@ public partial class MainWindow : Window
         var picks = new List<(StreamOutput Output, YouTubePick Pick)>();
         foreach (var o in outputs)
         {
-            if (o.Service == "YouTube" && YouTube() is { } api)
+            if (o.Service == "YouTube" && _state.Settings.YouTubePickBroadcast)
             {
-                // which broadcast: a scheduled one, the one already live, or a new one
-                var pick = YouTubePicker.Show(this, api, o.Name);
+                // which broadcast: a scheduled one, the one already live, or a new one (set up right there if it isn't yet)
+                var st = _state.Settings;
+                var pick = YouTubePicker.Show(this, YouTube(), o.Name, new YouTubePickerOptions
+                {
+                    Quick = st.YouTubeQuickBroadcast,
+                    Title = st.YouTubeNewTitle, Description = st.YouTubeNewDescription, Privacy = st.YouTubeNewPrivacy,
+                    RememberNew = (t, d, p) => { st.YouTubeNewTitle = t; st.YouTubeNewDescription = d; st.YouTubeNewPrivacy = p; Save(); },
+                    Setup = (id, secret) =>
+                    {
+                        if (st.YouTubeClientId != id) st.YouTubeRefreshProtected = "";
+                        st.YouTubeClientId = id; st.YouTubeClientSecretProtected = SecretStore.Protect(secret);
+                        Save();
+                        return YouTube()!;
+                    },
+                });
                 if (pick is null) { Log($"{o.Name}: not started (no broadcast chosen).", false); continue; }
                 if (pick is { Ingest: { } ing, Broadcast: { } bc })
                 {
@@ -1841,7 +1854,7 @@ public partial class MainWindow : Window
                     }
                     requests.Add((o.Id, ing.StreamKey));
                     picks.Add((o, pick));
-                    Log($"{o.Name}: streaming to \"{bc.Title}\" ({bc.When}).", false);
+                    Log($"{o.Name}: streaming to \"{bc.Title}\" ({bc.When})" + (ing.Note is { } note ? $": {note}." : "."), false);
                     continue;
                 }
             }

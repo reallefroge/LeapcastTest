@@ -133,6 +133,7 @@ public partial class SettingsWindow : Window
         PreviewBackgroundBox.IsChecked = current.PreviewLiveInBackground;
         GpuCompositingBox.IsChecked = current.GpuCompositing;
         YouTubePickBox.IsChecked = current.YouTubePickBroadcast;
+        YouTubeQuickBox.IsChecked = current.YouTubeQuickBroadcast;
         YouTubeClientIdBox.Text = current.YouTubeClientId;
         YouTubeSecretBox.Password = SecretStore.Unprotect(current.YouTubeClientSecretProtected);
         UpdateYouTubeSignedIn(current);
@@ -249,6 +250,7 @@ public partial class SettingsWindow : Window
         s.PreviewLiveInBackground = PreviewBackgroundBox.IsChecked == true;
         s.GpuCompositing = GpuCompositingBox.IsChecked == true;
         s.YouTubePickBroadcast = YouTubePickBox.IsChecked == true;
+        s.YouTubeQuickBroadcast = YouTubeQuickBox.IsChecked == true;
         if (s.YouTubeClientId != YouTubeClientIdBox.Text.Trim()) s.YouTubeRefreshProtected = ""; // a different app: sign in again
         s.YouTubeClientId = YouTubeClientIdBox.Text.Trim();
         s.YouTubeClientSecretProtected = SecretStore.Protect(YouTubeSecretBox.Password.Trim());

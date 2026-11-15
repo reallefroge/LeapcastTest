@@ -478,6 +478,12 @@ public sealed class StudioSettings
     public bool PreviewLiveInBackground { get; set; }
     /// <summary>YouTube: pick the broadcast (scheduled or new) when going live, instead of only using the stream key.</summary>
     public bool YouTubePickBroadcast { get; set; } = true;
+    /// <summary>YouTube: in the broadcast picker, make a new broadcast and go live on it in one click (most useful when nothing's scheduled).</summary>
+    public bool YouTubeQuickBroadcast { get; set; } = true;
+    /// <summary>The last new broadcast's title, description and privacy (filled in next time).</summary>
+    public string YouTubeNewTitle { get; set; } = "";
+    public string YouTubeNewDescription { get; set; } = "";
+    public string YouTubeNewPrivacy { get; set; } = "public";
     /// <summary>Google OAuth "Desktop app" client (Google Cloud console) for the YouTube Data API.</summary>
     public string YouTubeClientId { get; set; } = "";
     public string YouTubeClientSecretProtected { get; set; } = "";

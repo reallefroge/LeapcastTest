@@ -1001,6 +1001,7 @@ Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip 
         var ytLog = new List<string>();
         string? challenge = null;
         bool transitioned = false, bound = false, created = false;
+        string createdTitle = "", newBroadcastBody = "";
         var http = new HttpListener();
         http.Prefixes.Add($"http://127.0.0.1:{ytPort}/");
         http.Start();
@@ -1026,15 +1027,22 @@ Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip 
                 }
                 else if (ctx.Request.Headers["Authorization"] is not ("Bearer A1" or "Bearer A2")) { ctx.Response.StatusCode = 401; resp = "{\"error\":{\"message\":\"no token\"}}"; }
                 else if (path == "/yt/liveBroadcasts" && ctx.Request.HttpMethod == "GET" && q.Contains("broadcastStatus=upcoming"))
-                    resp = "{\"items\":[{\"id\":\"B2\",\"snippet\":{\"title\":\"Later\",\"scheduledStartTime\":\"2030-01-02T03:00:00Z\"},\"status\":{\"lifeCycleStatus\":\"ready\",\"privacyStatus\":\"public\"},\"contentDetails\":{\"enableAutoStart\":false}}," +
-                           "{\"id\":\"B1\",\"snippet\":{\"title\":\"Tonight: Wizard101\",\"scheduledStartTime\":\"2030-01-01T03:00:00Z\"},\"status\":{\"lifeCycleStatus\":\"ready\",\"privacyStatus\":\"unlisted\"},\"contentDetails\":{\"enableAutoStart\":false}}]}";
+                    resp = "{\"items\":[{\"id\":\"B2\",\"snippet\":{\"title\":\"Later\",\"scheduledStartTime\":\"2030-01-02T03:00:00Z\"},\"status\":{\"lifeCycleStatus\":\"ready\",\"privacyStatus\":\"public\"},\"contentDetails\":{\"enableAutoStart\":false,\"boundStreamId\":\"SD\"}}," +
+                           "{\"id\":\"B1\",\"snippet\":{\"title\":\"Tonight: Wizard101\",\"scheduledStartTime\":\"2030-01-01T03:00:00Z\"},\"status\":{\"lifeCycleStatus\":\"ready\",\"privacyStatus\":\"unlisted\"},\"contentDetails\":{\"enableAutoStart\":false,\"boundStreamId\":\"SD\"}}]}";
                 else if (path == "/yt/liveBroadcasts" && ctx.Request.HttpMethod == "GET" && q.Contains("id=B1"))
                     resp = "{\"items\":[{\"id\":\"B1\",\"status\":{\"lifeCycleStatus\":\"ready\"},\"contentDetails\":{\"enableAutoStart\":false}}]}";
                 else if (path == "/yt/liveBroadcasts" && ctx.Request.HttpMethod == "GET") resp = "{\"items\":[]}";
-                else if (path == "/yt/liveStreams" && ctx.Request.HttpMethod == "GET" && q.Contains("mine=true")) resp = "{\"items\":[]}";
+                else if (path == "/yt/liveStreams" && ctx.Request.HttpMethod == "GET" && q.Contains("mine=true"))
+                    resp = "{\"items\":[{\"id\":\"SD\",\"snippet\":{\"title\":\"Default stream key\"},\"contentDetails\":{\"isReusable\":true},\"cdn\":{\"ingestionType\":\"rtmp\",\"ingestionInfo\":{\"ingestionAddress\":\"rtmp://a.rtmp.youtube.com/live2\",\"streamName\":\"shared-key\"}}}]}";
+                else if (path == "/yt/liveBroadcasts" && ctx.Request.HttpMethod == "POST")
+                {
+                    newBroadcastBody = body;
+                    resp = "{\"id\":\"B9\",\"snippet\":{\"title\":\"Quick one\"},\"status\":{\"lifeCycleStatus\":\"ready\",\"privacyStatus\":\"unlisted\"},\"contentDetails\":{\"enableAutoStart\":true}}";
+                }
                 else if (path == "/yt/liveStreams" && ctx.Request.HttpMethod == "POST")
                 {
                     created = body.Contains("\"isReusable\":true");
+                    createdTitle = System.Text.Json.Nodes.JsonNode.Parse(body)?["snippet"]?["title"]?.GetValue<string>() ?? "";
                     resp = "{\"id\":\"S1\",\"cdn\":{\"ingestionInfo\":{\"ingestionAddress\":\"rtmp://a.rtmp.youtube.com/live2\",\"streamName\":\"abcd-1234\"}}}";
                 }
                 else if (path == "/yt/liveStreams" && q.Contains("id=S1")) resp = "{\"items\":[{\"id\":\"S1\",\"status\":{\"streamStatus\":\"active\"}}]}";
@@ -1067,9 +1075,14 @@ Console.WriteLine("Clips for TikTok/Shorts (9:16), Wizard101 death clips, !clip 
         var broadcasts = await yt.ListBroadcastsAsync(CancellationToken.None);
         Check(yt.SignedIn && savedRefresh == "R1" && broadcasts.Count == 2 && broadcasts[0].Title == "Tonight: Wizard101" && broadcasts[0].When.StartsWith("Scheduled"),
             $"YouTube: signs in through the browser (PKCE) and lists the scheduled broadcasts, soonest first ({string.Join(" | ", broadcasts.Select(b => b.Title + ", " + b.When))})");
-        var ingest = await yt.IngestForAsync(broadcasts[0], CancellationToken.None);
-        Check(ingest is { StreamKey: "abcd-1234", StreamId: "S1" } && ingest.ServerUrl.StartsWith("rtmp://") && bound && created,
-            $"…a broadcast with no stream gets Leapcast's reusable stream bound to it, and its key is used ({ingest.ServerUrl}, key {ingest.StreamKey})");
+        var ingest = await yt.IngestForAsync(broadcasts[0], CancellationToken.None, broadcasts);
+        Check(ingest is { StreamKey: "abcd-1234", StreamId: "S1" } && ingest.ServerUrl.StartsWith("rtmp://") && bound && created && createdTitle == "Leapcast" && ingest.Note?.Contains("Later") == true,
+            $"…two scheduled broadcasts on one stream key: the one picked gets a key of its own, so the video can only go to it (key {ingest.StreamKey}; {ingest.Note})");
+        var quick = await yt.CreateBroadcastAsync("Quick one", "unlisted", CancellationToken.None, "Wizard101 with friends");
+        var qb = System.Text.Json.Nodes.JsonNode.Parse(newBroadcastBody);
+        Check(quick.Id == "B9" && qb?["snippet"]?["description"]?.GetValue<string>() == "Wizard101 with friends" && qb?["status"]?["privacyStatus"]?.GetValue<string>() == "unlisted"
+              && qb?["contentDetails"]?["enableAutoStart"]?.GetValue<bool>() == true,
+            "…a quick new broadcast: title, description and privacy as given, starting (and ending) with the stream");
         string went = await yt.GoLiveWhenReadyAsync(broadcasts[0], ingest.StreamId, TimeSpan.FromSeconds(10), CancellationToken.None, TimeSpan.FromMilliseconds(200));
         Check(transitioned && went == "switched to live", $"…and once YouTube receives the video, a broadcast that doesn't start itself is switched to live ({went})");
         var fresh = new YouTubeApi(hc, "client-1", "secret-1", "R1") { TokenUrl = $"http://127.0.0.1:{ytPort}/token", ApiBase = $"http://127.0.0.1:{ytPort}/yt" };
