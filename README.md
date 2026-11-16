@@ -212,9 +212,7 @@ For a complete one-command release workflow, see
 
 ## Support and contributions
 
-- Found a reproducible bug? [Open an issue](https://github.com/reallefroge/LeapCast/issues) with the app version, platform involved, expected result, actual result, and a screenshot with private information blurred.
-- Want to contribute? Fork the repository, make a focused change, test it on Windows, and open a pull request.
-- Never include access tokens, client secrets, stream keys, unblurred chat logs, or personal channel data in an issue.
+- This project is officially retired, no further support given regardless of any updates.
 
 ---
 
