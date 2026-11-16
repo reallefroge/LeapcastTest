@@ -679,7 +679,7 @@
           <ControlTemplate TargetType="Slider">
             <Grid HorizontalAlignment="Center" Width="26">
               <Border Width="4" CornerRadius="2" Background="#14FFFFFF" HorizontalAlignment="Center"/>
-              <Track x:Name="PART_Track" IsDirectionReversed="True">
+              <Track x:Name="PART_Track">
                 <Track.DecreaseRepeatButton>
                   <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
                     <RepeatButton.Template>

@@ -165,7 +165,7 @@ public static class PipelineBuilder
         return k switch
         {
             SourceKind.Display => $"display|{s.MonitorIndex}|{s.CaptureMethod}|{s.CaptureCursor}",
-            SourceKind.Window => $"window|{s.WindowTitle.Trim().ToLowerInvariant()}|{s.CaptureCursor}",
+            SourceKind.Window => $"window|{s.WindowTitle.Trim().ToLowerInvariant()}{(s.WindowInstance > 0 ? "#" + s.WindowInstance : "")}|{s.CaptureCursor}",
             SourceKind.Camera => $"camera|{s.DeviceName}|{s.CameraResolution}|{s.CameraFps}|{s.CameraFormat}",
             SourceKind.Image => $"image|{s.FilePath.ToLowerInvariant()}",
             SourceKind.Text => $"text|{s.Id}",
@@ -598,7 +598,7 @@ public static class PipelineBuilder
         var gates = new List<string>();
         // every preview picture is scaled, converted and copied to the app: a gate right after the frame-rate cut
         // drops them (live, no restart) while nobody is looking, or keeps 1 in 3 while you're in another app
-        string Gate() { string g = $"setpts@pv{gates.Count}"; gates.Add(g); return $"{g}={GateExpr(r.PreviewRate)},select=not(isnan(t)),"; }
+        string Gate() { string g = $"setpts@pv{gates.Count}"; gates.Add(g); return $"{g}={GateExpr(r.PreviewRate).Replace(",", "\\,")},select=not(isnan(t)),"; }
         if (r.Preview)
         {
             int pf = Math.Min(r.PreviewFps, F);

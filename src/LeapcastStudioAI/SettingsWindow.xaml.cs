@@ -228,6 +228,11 @@ public partial class SettingsWindow : Window
         s.ContentType = TagOf(ContentBox, "LowMotion");
         s.QualityProfile = TagOf(ProfileBox, "Auto");
         s.Resolution = string.IsNullOrWhiteSpace(ResolutionBox.Text) ? "1920 × 1080" : ResolutionBox.Text.Trim();
+        // a tall size here is almost always a mix-up with the vertical canvas (which has its own setting)
+        if (SmartTuner.TryParseResolution(s.Resolution, out int rw, out int rh) && rh > rw
+            && MessageBox.Show(this, $"{rw} × {rh} is a tall (portrait) picture. The main stream is normally wide: {rh} × {rw}.\n\nUse {rh} × {rw} instead?\n\n(For TikTok / Shorts there's a separate vertical canvas that streams alongside the wide one.)",
+                "Tall picture", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+            s.Resolution = $"{rh} × {rw}";
         s.FrameRate = int.Parse(TagOf(FrameRateBox, "30"), CultureInfo.InvariantCulture);
         s.MaxBitrateKbps = int.TryParse(BitrateBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var br) ? Math.Clamp(br, 500, 50000) : 4500;
         s.Encoder = TagOf(EncoderBox, "Auto");

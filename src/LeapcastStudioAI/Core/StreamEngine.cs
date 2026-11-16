@@ -34,6 +34,8 @@ public interface IPlatformServices
     (int X, int Y, int W, int H)? MonitorBounds(int index);
     /// <summary>Handle of the visible top-level window with exactly this title (null if not open).</summary>
     long? FindWindow(string title) => null;
+    /// <summary>The n-th window with that title, in the order the clients were opened (several game clients share one title).</summary>
+    long? FindWindow(string title, int instance) => instance <= 0 ? FindWindow(title) : null;
     /// <summary>Client-area size of a window in physical pixels (null if unknown).</summary>
     (int W, int H)? WindowClientSize(long hwnd) => null;
     /// <summary>Starts rendering a web page off-screen (null where browsers aren't supported).</summary>
@@ -303,7 +305,7 @@ public sealed partial class StreamEngine : IDisposable
         Directory.CreateDirectory(_tempDir);
         _cameras = new CameraBridge(_pipeDir);
         _cameras.Error += msg => Message?.Invoke(this, new EngineMessageEventArgs(msg, true));
-        _windows = new WindowCaptureBridge(_pipeDir, title => _platform.FindWindow(title), hwnd => _platform.WindowClientSize(hwnd));
+        _windows = new WindowCaptureBridge(_pipeDir, (title, n) => _platform.FindWindow(title, n), hwnd => _platform.WindowClientSize(hwnd));
         _windows.Message += (msg, err) =>
         {
             if (!_windows.GpuCapture) GpuWindowCaptureSupported = false;
@@ -591,10 +593,62 @@ public sealed partial class StreamEngine : IDisposable
     /// </summary>
     public void SetPreviewRate(PreviewRate rate)
     {
+        _previewWanted = rate;
+        ApplyPreviewRate();
+    }
+
+    // The stream always wins over the preview: when the pipeline falls behind real time, the preview is slowed
+    // (a third of its frames, then a couple a second) before anything the viewers see is touched, and it comes back
+    // after a calm minute. (Your log: 19-27 fps with the preview at full speed, a steady 30 without it.)
+    private PreviewRate _previewWanted = PreviewRate.Full, _previewCap = PreviewRate.Full;
+    private DateTime? _previewSlowSince, _previewCalmSince;
+    private DateTime _previewCapChanged = DateTime.MinValue;
+    /// <summary>The slowest the preview is being held to because the PC was falling behind (Full: not held).</summary>
+    public PreviewRate PreviewCap => _previewCap;
+    /// <summary>Slow the preview when the PC falls behind (on; tests that time the preview turn it off).</summary>
+    public bool PreviewShedding { get; set; } = true;
+
+    private void ApplyPreviewRate()
+    {
+        var rate = (PreviewRate)Math.Max((int)_previewWanted, (int)_previewCap);
         if (rate == _previewRate) return;
         _previewRate = rate;
         var r = _runner; var spec = _runnerSpec;
         if (r is not null && spec is not null) r.SendCommands(PipelineBuilder.PreviewGateCommands(spec, rate));
+    }
+
+    /// <summary>Once a second, with the pipeline's speed (output seconds per second) and its frame rate against the target.</summary>
+    internal void ShedPreview(double speed, double fpsRatio, bool measured, DateTime now)
+    {
+        if (!measured) return;
+        bool behind = speed > 0 && speed < 0.93 && fpsRatio < 0.93;
+        if (behind)
+        {
+            _previewCalmSince = null;
+            _previewSlowSince ??= now;
+            if (_previewCap < PreviewRate.Trickle && now - _previewSlowSince >= TimeSpan.FromSeconds(3) && now - _previewCapChanged >= TimeSpan.FromSeconds(6))
+            {
+                _previewCap = _previewCap == PreviewRate.Full ? PreviewRate.Slow : PreviewRate.Trickle;
+                _previewCapChanged = now; _previewSlowSince = null;
+                LogEvent($"PREVIEW slowed to {_previewCap} (the stream was at {fpsRatio:P0} of its frame rate): the stream comes first");
+                if (_previewCap == PreviewRate.Slow)
+                    Message?.Invoke(this, new EngineMessageEventArgs("Your PC was falling behind, so the preview was slowed down to keep the stream smooth. Viewers aren't affected.", false));
+                ApplyPreviewRate();
+            }
+        }
+        else
+        {
+            _previewSlowSince = null;
+            if (_previewCap == PreviewRate.Full) return;
+            _previewCalmSince ??= now;
+            if (now - _previewCalmSince >= TimeSpan.FromSeconds(60) && now - _previewCapChanged >= TimeSpan.FromSeconds(60))
+            {
+                _previewCap = _previewCap == PreviewRate.Trickle ? PreviewRate.Slow : PreviewRate.Full;
+                _previewCapChanged = now; _previewCalmSince = null;
+                LogEvent($"PREVIEW back to {_previewCap}");
+                ApplyPreviewRate();
+            }
+        }
     }
     private int _lightBusy;
 
@@ -1836,6 +1890,10 @@ public sealed partial class StreamEngine : IDisposable
                 await RestartAsync();
             });
             return;
+        }
+        {
+            double tfps = CurrentPlan?.Fps ?? 0;
+            if (PreviewShedding) ShedPreview(speed, tfps > 0 ? fpsNow / tfps : 1, span >= 2 && DateTime.UtcNow - r.StartedUtc > TimeSpan.FromSeconds(8), DateTime.UtcNow);
         }
         if (_governorPaused || DateTime.UtcNow < _governorHoldUntil) return;
         bool adapt = Settings.AdaptivePerformance;

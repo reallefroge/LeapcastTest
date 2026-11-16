@@ -61,6 +61,7 @@ public partial class SourcePropertiesWindow : Window
         // Window
         if (_kind == SourceKind.Window) LoadWindows();
         WindowBox.Text = source.WindowTitle;
+        WindowInstanceBox.SelectedIndex = Math.Clamp(source.WindowInstance, 0, 5);
 
         // Camera
         CameraBox.Text = source.DeviceName;
@@ -212,6 +213,7 @@ public partial class SourcePropertiesWindow : Window
         s.CropRight = Int(CropR.Text, 0, 0, 8000);
         s.CropBottom = Int(CropB.Text, 0, 0, 8000);
         s.WindowTitle = WindowBox.Text.Trim();
+        s.WindowInstance = Math.Max(0, WindowInstanceBox.SelectedIndex);
         s.DeviceName = CameraBox.Text.Trim();
         s.CameraResolution = TagOf(CamResBox, "Default");
         s.CameraFps = Int(TagOf(CamFpsBox, "0"), 0, 0, 120);

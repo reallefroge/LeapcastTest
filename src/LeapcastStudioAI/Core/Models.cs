@@ -136,6 +136,8 @@ public sealed class StudioSource
     /// <summary>"Auto" = GPU desktop duplication (fast, works with fullscreen games); "GDI" = legacy compatible capture.</summary>
     public string CaptureMethod { get; set; } = "Auto";
     public string WindowTitle { get; set; } = "Wizard101";
+    /// <summary>Which window with that title (several game clients share one title): 0 = the first opened, 1 = the second…</summary>
+    public int WindowInstance { get; set; }
     public bool CaptureCursor { get; set; } = true;
     public int CropLeft { get; set; }
     public int CropTop { get; set; }
@@ -441,6 +443,10 @@ public sealed class StudioSettings
     public int AudioBitrateKbps { get; set; } = 160;
     /// <summary>Master fader for the stream/recording audio (dB).</summary>
     public double MasterVolumeDb { get; set; }
+    /// <summary>The mixer's faders once ran upside down (up = quieter). Set once the levels left behind by that were put right.</summary>
+    public bool MixerFadersFixed { get; set; }
+    /// <summary>Tile every open game client side by side: how many clients the last "show all clients" found.</summary>
+    public int MultiClientCount { get; set; }
     /// <summary>Vertical canvas bitrate (kbps); 0 = automatic from its resolution.</summary>
     public int VerticalBitrateKbps { get; set; }
     /// <summary>Quality (slower encoder settings), Balanced (default) or Performance (fastest settings).</summary>

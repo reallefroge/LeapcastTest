@@ -22,6 +22,8 @@ public sealed class PreviewEditor
     private StudioSource? _drag;
     private Grip _grip;
     private enum EditMode { Move, Resize, Stretch, Crop }
+    private static readonly Brush CropGreen = new SolidColorBrush(Color.FromRgb(0x3D, 0xE0, 0x6A));
+    private static readonly Brush CropTint = new SolidColorBrush(Color.FromArgb(0x38, 0x3D, 0xE0, 0x6A));
     private EditMode _mode;
     private (int L, int T, int R, int B) _startCrop;
     private (int W, int H)? _sourcePixels;
@@ -451,6 +453,32 @@ public sealed class PreviewEditor
             Canvas.SetLeft(box, r.X); Canvas.SetTop(box, r.Y);
             _layer.Children.Add(box);
             if (!sel) continue;
+            // cropped: the part that's cut away, outlined in green dots (and tinted), so you see what the crop removes
+            if ((s.CropLeft | s.CropTop | s.CropRight | s.CropBottom) > 0 && Anchors.Resolve(s) != Anchors.Fill
+                && (ReferenceEquals(s, _drag) && _sourcePixels is not null ? _sourcePixels : SourcePixels(s)) is { } px
+                && px.W - s.CropLeft - s.CropRight > 8 && px.H - s.CropTop - s.CropBottom > 8)
+            {
+                double kx = r.W / (px.W - s.CropLeft - s.CropRight), ky = r.H / (px.H - s.CropTop - s.CropBottom);
+                var full = new LayoutRect(r.X - s.CropLeft * kx, r.Y - s.CropTop * ky, px.W * kx, px.H * ky);
+                void Strip(double x, double y, double w, double h)
+                {
+                    if (w < 0.5 || h < 0.5) return;
+                    var t = new Rectangle { Width = w, Height = h, Fill = CropTint, IsHitTestVisible = false };
+                    Canvas.SetLeft(t, x); Canvas.SetTop(t, y);
+                    _layer.Children.Add(t);
+                }
+                Strip(full.X, full.Y, full.W, r.Y - full.Y);                       // top
+                Strip(full.X, r.Bottom, full.W, full.Bottom - r.Bottom);          // bottom
+                Strip(full.X, r.Y, r.X - full.X, r.H);                             // left
+                Strip(r.Right, r.Y, full.Right - r.Right, r.H);                    // right
+                var outline = new Rectangle
+                {
+                    Width = full.W, Height = full.H, Stroke = CropGreen, StrokeThickness = thick,
+                    StrokeDashArray = new DoubleCollection { 1, 2 }, StrokeDashCap = PenLineCap.Round, IsHitTestVisible = false,
+                };
+                Canvas.SetLeft(outline, full.X); Canvas.SetTop(outline, full.Y);
+                _layer.Children.Add(outline);
+            }
             if (!locked)
             {
                 double hs = 10 / scale;

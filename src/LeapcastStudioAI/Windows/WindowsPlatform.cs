@@ -76,6 +76,34 @@ public sealed class WindowsPlatform : IPlatformServices
     [StructLayout(LayoutKind.Sequential)] private struct CLIENTRECT { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hWnd, out CLIENTRECT rect);
 
+    public long? FindWindow(string title, int instance) => WindowsTitled(title) is var all && instance >= 0 && instance < all.Count ? all[instance] : null;
+
+    /// <summary>
+    /// Every visible window with exactly this title, in the order their programs were started (so "client 1" stays
+    /// client 1 while more are opened or one is restarted last).
+    /// </summary>
+    public static List<long> WindowsTitled(string title)
+    {
+        var found = new List<(long H, DateTime Started, uint Pid)>();
+        uint self = (uint)Environment.ProcessId;
+        EnumWindows((h, lParam) =>
+        {
+            if (!IsWindowVisible(h)) return true;
+            GetWindowThreadProcessId(h, out uint pid);
+            if (pid == self) return true;
+            int len = GetWindowTextLength(h);
+            if (len <= 0) return true;
+            var sb = new StringBuilder(len + 1);
+            GetWindowText(h, sb, sb.Capacity);
+            if (!string.Equals(sb.ToString().Trim(), title, StringComparison.Ordinal)) return true;
+            DateTime started = DateTime.MaxValue;
+            try { using var p = System.Diagnostics.Process.GetProcessById((int)pid); started = p.StartTime; } catch { }
+            found.Add((h.ToInt64(), started, pid));
+            return true;
+        }, IntPtr.Zero);
+        return found.OrderBy(f => f.Started).ThenBy(f => f.Pid).ThenBy(f => f.H).Select(f => f.H).ToList();
+    }
+
     public long? FindWindow(string title)
     {
         long? found = null;

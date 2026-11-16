@@ -2494,6 +2494,23 @@ public partial class MainWindow : Window
     /// </summary>
     private void RebuildMixer()
     {
+        if (!_state.Settings.MixerFadersFixed)
+        {
+            // the faders used to run upside down (pushing one up made it quieter), which left levels far too low:
+            // the stream output goes back to 0 dB, and any source pushed below -30 dB with it
+            _state.Settings.MixerFadersFixed = true;
+            var fixedUp = new List<string>();
+            if (_state.Settings.MasterVolumeDb < -12) { fixedUp.Add($"Stream output {_state.Settings.MasterVolumeDb:0.#} dB → 0 dB"); _state.Settings.MasterVolumeDb = 0; }
+            foreach (var sc in _state.Scenes)
+                foreach (var a in sc.Sources.Where(x => SourceTypes.IsAudio(SourceTypes.KindOf(x.Type)) && x.VolumeDb < -30))
+                { fixedUp.Add($"{a.Name} ({sc.Name}) {a.VolumeDb:0.#} dB → 0 dB"); a.VolumeDb = 0; }
+            if (fixedUp.Count > 0)
+            {
+                Log("Audio levels fixed: the mixer's faders ran upside down (up was quieter), which left the stream far too quiet. Up is louder now. Reset: " + string.Join("; ", fixedUp) + ".", false);
+                _engine.SetAudioLevels(_state.Settings.MasterVolumeDb);
+            }
+            Save();
+        }
         var sources = SelectedScene?.Sources.Where(s => SourceTypes.IsAudio(SourceTypes.KindOf(s.Type))).ToList() ?? new();
         var ids = sources.Select(s => s.Id).Append(Guid.Empty).ToList();
         if (_mixer.Select(c => c.SourceId).SequenceEqual(ids))
@@ -2544,6 +2561,21 @@ public partial class MainWindow : Window
     }
 
     private void MixerMute_Click(object sender, RoutedEventArgs e) { /* the binding updates the channel; OnMixerChanged applies it */ }
+
+    /// <summary>"Balance my audio": a short test sets the microphone and game faders (and the stream output to 0 dB).</summary>
+    private void BalanceAudio_Click(object sender, RoutedEventArgs e)
+    {
+        var mic = _mixer.FirstOrDefault(c => !c.IsMaster && SelectedScene?.Sources.FirstOrDefault(s => s.Id == c.SourceId) is { } s && SourceTypes.KindOf(s.Type) == SourceKind.Microphone);
+        var game = _mixer.FirstOrDefault(c => !c.IsMaster && SelectedScene?.Sources.FirstOrDefault(s => s.Id == c.SourceId) is { } s && SourceTypes.KindOf(s.Type) == SourceKind.DesktopAudio);
+        if (mic is null || game is null) { Status("Balancing needs a microphone and a desktop audio source in this scene."); return; }
+        if (!_engine.Running) { Status("Start the preview first (the test listens through it), then press \"Balance my audio\" again."); return; }
+        if (mic.Muted || game.Muted) { Status("Unmute the microphone and the desktop audio first."); return; }
+        var r = AudioBalanceWindow.Show(this, mic.Name, game.Name, () => _audio.LevelDb(mic.MeterId), () => _audio.LevelDb(game.MeterId), mic.Db, game.Db);
+        if (r is null) return;
+        mic.Db = r.MicDb; game.Db = r.GameDb;
+        if (_mixer.FirstOrDefault(c => c.IsMaster) is { } master) master.Db = 0;
+        Log($"Audio balanced: {mic.Name} {r.MicDb:+0.#;-0.#;0} dB, {game.Name} {r.GameDb:+0.#;-0.#;0} dB, stream output 0 dB (your voice peaked at {r.MicHeardDb:0} dB, the game at {r.GameHeardDb:0} dB in the test).", false);
+    }
 
     private void MixerFader_DoubleClick(object sender, MouseButtonEventArgs e)
     {
@@ -2597,6 +2629,34 @@ public partial class MainWindow : Window
         var oldIndex = ScenesList.SelectedIndex;
         _state.Scenes.Remove(SelectedScene);
         ScenesList.SelectedIndex = Math.Clamp(oldIndex, 0, _state.Scenes.Count - 1);
+    }
+
+    /// <summary>
+    /// Multi-client: every open client of the game (windows sharing the selected window source's title, Wizard101
+    /// otherwise) gets its own window source, tiled side by side. Pressing it again after opening or closing a
+    /// client re-tiles for the new count.
+    /// </summary>
+    private void MultiClient_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedScene is not { } scene) return;
+        string title = (SourcesList.SelectedItem as StudioSource) is { } sel && SourceTypes.KindOf(sel.Type) == SourceKind.Window && sel.WindowTitle.Trim().Length > 0
+            ? sel.WindowTitle.Trim()
+            : scene.Sources.FirstOrDefault(s => SourceTypes.KindOf(s.Type) == SourceKind.Window && s.Shown)?.WindowTitle.Trim() ?? "Wizard101";
+        var open = WindowsPlatform.WindowsTitled(title);
+        if (open.Count == 0) { Status($"No window titled \"{title}\" is open. Open your game clients, then press this again."); return; }
+        // each client keeps its own shape: the first one's size sets the tiles
+        double aspect = 16.0 / 9;
+        if (new WindowsPlatform().WindowClientSize(open[0]) is { } cs && cs.H > 0) aspect = cs.W / (double)cs.H;
+        var (cw, ch) = SmartTuner.ParseResolution(_state.Settings.Resolution);
+        var made = MultiClient.Arrange(scene, title, Math.Min(open.Count, 6), aspect, ch > 0 ? cw / (double)ch : 16.0 / 9);
+        _state.Settings.MultiClientCount = made.Count;
+        RefreshSourceRows();
+        SourcesList.SelectedItem = made[0];
+        Status(made.Count == 1
+            ? $"One \"{title}\" window is open: it fills the picture. Open more clients and press this again to show them side by side."
+            : $"Showing {made.Count} \"{title}\" clients side by side (in the order you opened them). Drag any of them to rearrange; press again after opening or closing a client.");
+        SceneEdited();
+        RedrawEditors();
     }
 
     private void AddSource_Click(object sender, RoutedEventArgs e)

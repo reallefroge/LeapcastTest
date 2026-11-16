@@ -1249,6 +1249,53 @@ var engine = new StreamEngine(audio, new FakePlatform(png), Path.Combine(work, "
     // The "webcam" device: a paced synthetic feed read by the engine's camera reader process (like DirectShow).
     CameraDeviceOverride = src => VideoFifo.Input(work, 640, 360, 30, -1)
 };
+
+// ---- the stream comes before the preview; multi-client; the preview gate at a slow start
+{
+    var t0 = DateTime.UtcNow;
+    engine.ShedPreview(0.70, 0.70, true, t0); engine.ShedPreview(0.70, 0.70, true, t0.AddSeconds(4));
+    var first = engine.PreviewCap;
+    engine.ShedPreview(0.70, 0.70, true, t0.AddSeconds(8)); engine.ShedPreview(0.70, 0.70, true, t0.AddSeconds(12));
+    var second = engine.PreviewCap;
+    engine.ShedPreview(1.0, 1.0, true, t0.AddSeconds(20)); engine.ShedPreview(1.0, 1.0, true, t0.AddSeconds(81));
+    var third = engine.PreviewCap;
+    engine.ShedPreview(1.0, 1.0, true, t0.AddSeconds(142)); engine.ShedPreview(1.0, 1.0, true, t0.AddSeconds(203));
+    Check(first == PreviewRate.Slow && second == PreviewRate.Trickle && third == PreviewRate.Slow && engine.PreviewCap == PreviewRate.Full,
+        $"the stream comes first: a PC falling behind slows the preview (→ {first} → {second}), and it comes back after a calm minute (→ {third} → {engine.PreviewCap})");
+    engine.SetPreviewRate(PreviewRate.Full);
+    engine.PreviewShedding = false; // (the timing tests below measure the preview itself, on a slow test machine)
+
+    var slowSpec = PipelineBuilder.Build(new PipelineRequest
+    {
+        Scenes = new[] { dupA }, ActiveSceneIndex = 0, Preview = true, PreviewRate = PreviewRate.Slow,
+        Plan = new EncodePlan(1920, 1080, 30, 6000, 22, "libx264", EncoderTier.Rich, false, false, "veryfast", "t", Array.Empty<string>()),
+        InputOverride = (src, o) => new InputSpec(new[] { "-f", "lavfi", "-i", "testsrc2=s=800x500:r=30" }, false), IsWindows = true,
+    });
+    var gate = System.Text.RegularExpressions.Regex.Match(slowSpec.FilterGraph, @"setpts@pv0=[^\[]*?select=not\(isnan\(t\)\)").Value;
+    var (gcode, gout) = await EncoderCatalog.RunQuietAsync(ffmpeg, new[] { "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=1", "-vf", gate, "-f", "null", "-" }, TimeSpan.FromSeconds(30), CancellationToken.None);
+    Check(gate.Length > 0 && gcode == 0, $"a pipeline that starts with the preview slowed builds (it crashed: \"No such filter '3)'\"): {gate} {gout.Trim()}");
+
+    var g2 = MultiClient.Grid(2); var g3 = MultiClient.Grid(3); var g4 = MultiClient.Grid(4, 4.0 / 3);
+    bool inside = new[] { g2, g3, g4 }.All(g => g.All(t => t.X >= -1e-9 && t.Y >= -1e-9 && t.X + t.W <= 1 + 1e-9));
+    Check(g2.Count == 2 && Math.Abs(g2[0].W - 0.5) < 1e-9 && Math.Abs(g2[1].X - 0.5) < 1e-9 && Math.Abs(g2[0].Y - 0.25) < 1e-9
+          && Math.Abs(g3[2].X - 0.25) < 1e-9 && Math.Abs(g3[2].Y - 0.5) < 1e-9 && inside,
+        "multi-client: 2 clients sit side by side, 3 make a 2×2 with the third centred, all inside the picture");
+    var mc = new StudioScene { Name = "W101" };
+    mc.Sources.Add(new StudioSource { Type = SourceTypes.Window, Name = "Wizard101 window", WindowTitle = "Wizard101", Anchor = Anchors.Fill, CropTop = 30 });
+    mc.Sources.Add(new StudioSource { Type = SourceTypes.Camera, Name = "Webcam", DeviceName = "cam" });
+    var three = MultiClient.Arrange(mc, "Wizard101", 3);
+    var mcKeys = three.Select(PipelineBuilder.InputKey).Distinct().Count();
+    Check(three.Count == 3 && mcKeys == 3 && three.Select(x => x.WindowInstance).SequenceEqual(new[] { 0, 1, 2 }) && three.All(x => x.CropTop == 30 && x.Anchor == Anchors.Free)
+          && mc.Sources.IndexOf(three[2]) < mc.Sources.IndexOf(mc.Sources.First(x => x.Name == "Webcam")),
+        "…three Wizard101 clients: one capture each (told apart by the order they were opened), your crop copied, tiled under the camera");
+    var bal = AudioBalance.Suggest(Enumerable.Repeat(-60.0, 60).Concat(Enumerable.Repeat(-20.0, 100)).ToList(), Enumerable.Repeat(-10.0, 160).ToList(), 13.5, -45);
+    var quiet = AudioBalance.Suggest(Enumerable.Repeat(-40.0, 100).ToList(), Enumerable.Repeat(-60.0, 100).ToList(), 0, -3);
+    Check(bal.MicDb == 14 && bal.GameDb == -8 && bal.MicNote is null && quiet.MicDb == 20 && quiet.MicNote is not null && quiet.GameDb == -3 && quiet.GameNote is not null,
+        $"balance my audio: a voice peaking at -20 gets +14 dB (peaks at -6), a game at -10 gets -8 dB (12 under the voice); a mic too quiet for its fader says so (mic {bal.MicDb}, game {bal.GameDb})");
+    var back = MultiClient.Arrange(mc, "Wizard101", 1);
+    Check(back.Count == 1 && back[0].Anchor == Anchors.Fill && mc.Sources.Count(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.Visible) == 1,
+        "…and back to one client: it fills the picture again, the others are hidden (not deleted)");
+}
 await engine.ProbeEncodersAsync();
 int frames = 0; engine.FrameReady += f => { var pf = engine.PreviewFrame; if (f.Length == pf.Width * pf.Height * 4) Interlocked.Increment(ref frames); };
 var messages = new List<string>(); engine.Message += (_, e) => { lock (messages) messages.Add(e.Text); Console.WriteLine("    engine: " + e.Text); };

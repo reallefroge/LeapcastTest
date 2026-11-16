@@ -21,6 +21,7 @@ public sealed class WindowCaptureBridge : IDisposable
     private sealed class Reader
     {
         public required string Key, Title, Signature, Name;
+        public int Instance;
         public required int Width, Height, Fps;
         public required string Fill;
         public bool Light;
@@ -83,7 +84,7 @@ public sealed class WindowCaptureBridge : IDisposable
     private readonly List<CountedFramePipe> _pipes = new();
     private readonly object _lock = new();
     private readonly string _scratch;
-    private readonly Func<string, long?> _findWindow;
+    private readonly Func<string, int, long?> _findWindow;
     private readonly Func<long, (int W, int H)?>? _clientSize;
     private readonly CancellationTokenSource _cts = new();
     private string? _ffmpeg;
@@ -101,7 +102,7 @@ public sealed class WindowCaptureBridge : IDisposable
 
     public sealed record WindowFeed(string Path, int Width, int Height);
 
-    public WindowCaptureBridge(string scratchDir, Func<string, long?> findWindow, Func<long, (int W, int H)?>? clientSize = null)
+    public WindowCaptureBridge(string scratchDir, Func<string, int, long?> findWindow, Func<long, (int W, int H)?>? clientSize = null)
     {
         _scratch = scratchDir;
         _findWindow = findWindow;
@@ -127,7 +128,7 @@ public sealed class WindowCaptureBridge : IDisposable
             {
                 var s = need.Source;
                 var crop = (Math.Max(0, s.CropLeft), Math.Max(0, s.CropTop), Math.Max(0, s.CropRight), Math.Max(0, s.CropBottom));
-                string what = $"{s.WindowTitle.Trim()}|{need.Fill}|{fps}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}|{need.Light}";
+                string what = $"{s.WindowTitle.Trim()}#{s.WindowInstance}|{need.Fill}|{fps}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}|{need.Light}";
                 int nw = need.Width, nh = need.Height;
                 _readers.TryGetValue(key, out var reader);
                 // resized on the canvas: a reader that's already big enough keeps going (the pipeline scales it
@@ -154,7 +155,7 @@ public sealed class WindowCaptureBridge : IDisposable
                     }
                     reader = new Reader
                     {
-                        Key = key, Title = s.WindowTitle.Trim(), Name = s.Name, Signature = sig, Width = nw, Height = nh,
+                        Key = key, Title = s.WindowTitle.Trim(), Instance = Math.Max(0, s.WindowInstance), Name = s.Name, Signature = sig, Width = nw, Height = nh,
                         Fill = need.Fill, Fps = fps, Cursor = s.CaptureCursor, Crop = crop, Light = need.Light,
                     };
                     reader.UsedGpu = GpuCapture && !string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase);
@@ -179,14 +180,14 @@ public sealed class WindowCaptureBridge : IDisposable
     {
         var ffmpeg = _ffmpeg;
         if (ffmpeg is null || r.Retired) return;
-        var src = new StudioSource { Type = SourceTypes.Window, WindowTitle = r.Title, CaptureCursor = r.Cursor };
+        var src = new StudioSource { Type = SourceTypes.Window, WindowTitle = r.Title, WindowInstance = r.Instance, CaptureCursor = r.Cursor };
         InputSpec? input = DeviceOverride?.Invoke(src);
         GpuCut? gpuCut = null;
         if (input is null)
         {
             if (r.UsedGpu)
             {
-                var hwnd = _findWindow(r.Title);
+                var hwnd = _findWindow(r.Title, r.Instance);
                 if (hwnd is null or 0) { Wait(r, "waiting for the window"); return; }
                 r.Hwnd = hwnd.Value;
                 r.Client = _clientSize?.Invoke(hwnd.Value);
@@ -207,9 +208,11 @@ public sealed class WindowCaptureBridge : IDisposable
             }
             else
             {
-                if (_findWindow(r.Title) is null or 0 && OperatingSystem.IsWindows()) { Wait(r, "waiting for the window"); return; }
+                var gw = _findWindow(r.Title, r.Instance);
+                if (gw is null or 0 && OperatingSystem.IsWindows()) { Wait(r, "waiting for the window"); return; }
+                // (a second client has the same title as the first: it's picked by its window handle)
                 input = new InputSpec(new[] { "-f", "gdigrab", "-framerate", r.Fps.ToString(CultureInfo.InvariantCulture),
-                    "-draw_mouse", r.Cursor ? "1" : "0", "-i", "title=" + r.Title }, false);
+                    "-draw_mouse", r.Cursor ? "1" : "0", "-i", r.Instance > 0 && gw is > 0 ? "hwnd=" + gw.Value.ToString(CultureInfo.InvariantCulture) : "title=" + r.Title }, false);
             }
         }
 
@@ -303,7 +306,7 @@ public sealed class WindowCaptureBridge : IDisposable
             r.Running = false;
             if (r.Retired) return;
             bool producedNothing = Interlocked.Read(ref r.Frames) == framesAtStart;
-            if (producedNothing && r.UsedGpuScale && DateTime.UtcNow - r.StartedUtc < TimeSpan.FromSeconds(8) && _findWindow(r.Title) is not (null or 0))
+            if (producedNothing && r.UsedGpuScale && DateTime.UtcNow - r.StartedUtc < TimeSpan.FromSeconds(8) && _findWindow(r.Title, r.Instance) is not (null or 0))
             {
                 // the GPU video processor couldn't take this window: scale on the CPU instead (capture stays on the GPU)
                 GpuScale = false;
@@ -313,7 +316,7 @@ public sealed class WindowCaptureBridge : IDisposable
                 r.State = "restarting (CPU scaling)";
                 return;
             }
-            if (producedNothing && r.UsedGpu && DateTime.UtcNow - r.StartedUtc < TimeSpan.FromSeconds(8) && _findWindow(r.Title) is not (null or 0))
+            if (producedNothing && r.UsedGpu && DateTime.UtcNow - r.StartedUtc < TimeSpan.FromSeconds(8) && _findWindow(r.Title, r.Instance) is not (null or 0))
             {
                 // the window exists but GPU capture produced nothing: fall back to GDI for this session
                 GpuCapture = false;

@@ -38,6 +38,15 @@
             <Button DockPanel.Dock="Right" Content="Refresh" Click="RefreshWindows_Click"/>
             <ComboBox x:Name="WindowBox" IsEditable="True"/>
           </DockPanel>
+          <TextBlock Text="Which one, when several windows share this title (multiple game clients)" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="WindowInstanceBox">
+            <ComboBoxItem Content="Client 1 (the first one opened)"/>
+            <ComboBoxItem Content="Client 2"/>
+            <ComboBoxItem Content="Client 3"/>
+            <ComboBoxItem Content="Client 4"/>
+            <ComboBoxItem Content="Client 5"/>
+            <ComboBoxItem Content="Client 6"/>
+          </ComboBox>
           <TextBlock Text="Works in windowed and borderless mode. For exclusive fullscreen, use Display Capture."
                      Style="{StaticResource Hint}"/>
         </StackPanel>

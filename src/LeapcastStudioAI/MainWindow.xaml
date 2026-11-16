@@ -152,6 +152,7 @@
                           </StackPanel.Resources>
                           <Button Style="{StaticResource CompactIcon}" Content="&#xE710;" Click="AddSource_Click" ToolTip="Add source"/>
                           <Button Style="{StaticResource CompactIcon}" Content="&#xE713;" Click="SourceProperties_Click" ToolTip="Properties"/>
+                          <Button Style="{StaticResource CompactIcon}" Content="&#xF0E2;" Click="MultiClient_Click" ToolTip="Multi-client: show every open game client side by side (select a window source first, or it uses Wizard101)"/>
                           <Button Style="{StaticResource CompactIcon}" Content="&#xE8B7;" Click="AddFolder_Click" ToolTip="New folder"/>
                           <Button Style="{StaticResource CompactIcon}" Content="&#xE70E;" Click="MoveSourceUp_Click" ToolTip="Move up"/>
                           <Button Style="{StaticResource CompactIcon}" Content="&#xE70D;" Click="MoveSourceDown_Click" ToolTip="Move down"/>
@@ -299,7 +300,9 @@
                   <Border x:Name="MixerDock" Style="{StaticResource Card}" Padding="10,8">
                     <DockPanel>
                       <DockPanel DockPanel.Dock="Top" Margin="2,0,2,6">
-                        <TextBlock x:Name="MixerHint" DockPanel.Dock="Right" Text="Double-click a fader for 0 dB" Style="{StaticResource Hint}" Margin="0"/>
+                        <TextBlock x:Name="MixerHint" DockPanel.Dock="Right" Text="Up is louder · double-click a fader for 0 dB" Style="{StaticResource Hint}" Margin="0"/>
+                        <Button DockPanel.Dock="Left" Content="Balance my audio…" Click="BalanceAudio_Click" HorizontalAlignment="Left" Padding="10,2"
+                                ToolTip="A 16-second test (you talk, then the game plays) that sets the microphone and game faders for you"/>
                       </DockPanel>
                       <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                         <ItemsControl x:Name="MixerList">

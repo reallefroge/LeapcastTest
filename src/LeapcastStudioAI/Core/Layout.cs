@@ -276,3 +276,67 @@ public static class LayoutMath
 
     internal static string Px(double v) => ((int)Math.Round(v)).ToString(CultureInfo.InvariantCulture);
 }
+
+/// <summary>
+/// Multi-client: every open client of a game side by side. n clients are tiled in a grid (2 → side by side,
+/// 3-4 → 2×2, 5-6 → 3×2…), each keeping its own shape, the grid centred on the canvas.
+/// </summary>
+public static class MultiClient
+{
+    /// <summary>Each tile as fractions of the canvas (X, Y, W; the height follows the picture's shape).</summary>
+    public static List<(double X, double Y, double W)> Grid(int n, double tileAspect = 16.0 / 9, double canvasAspect = 16.0 / 9)
+    {
+        var tiles = new List<(double, double, double)>();
+        if (n <= 0) return tiles;
+        int cols = (int)Math.Ceiling(Math.Sqrt(n)), rows = (int)Math.Ceiling(n / (double)cols);
+        double w = 1.0 / cols, h = w * canvasAspect / tileAspect;          // a tile's height, as a fraction of the canvas height
+        if (h * rows > 1) { double k = 1 / (h * rows); w *= k; h *= k; }     // tall tiles: shrink so every row fits
+        double y0 = (1 - h * rows) / 2;
+        for (int i = 0; i < n; i++)
+        {
+            int row = i / cols, inRow = row == rows - 1 ? n - row * cols : cols;
+            double x0 = (1 - inRow * w) / 2;                                  // a short last row is centred
+            tiles.Add((x0 + (i % cols) * w, y0 + row * h, w));
+        }
+        return tiles;
+    }
+
+    /// <summary>
+    /// Makes the scene show <paramref name="count"/> clients of the window titled <paramref name="title"/>: the
+    /// window sources it already has for that title are reused (client 1, 2…), more are added, extra ones hidden,
+    /// and all are tiled. Returns the sources, client 1 first.
+    /// </summary>
+    public static List<StudioSource> Arrange(StudioScene scene, string title, int count, double tileAspect = 16.0 / 9, double canvasAspect = 16.0 / 9)
+    {
+        var have = scene.Sources.Where(s => SourceTypes.KindOf(s.Type) == SourceKind.Window && string.Equals(s.WindowTitle.Trim(), title, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(s => s.WindowInstance).ToList();
+        var result = new List<StudioSource>();
+        var first = have.FirstOrDefault();
+        for (int i = 0; i < count; i++)
+        {
+            var s = have.FirstOrDefault(x => x.WindowInstance == i && !result.Contains(x));
+            if (s is null)
+            {
+                s = first?.Copy() ?? new StudioSource { Type = SourceTypes.Window, WindowTitle = title };
+                s.Name = $"{title} client {i + 1}";
+                s.WindowInstance = i;
+                s.FolderId = first?.FolderId;
+                // just above the last client, so overlays (camera, chat) stay on top
+                int at = result.Count > 0 ? scene.Sources.IndexOf(result[^1]) + 1 : scene.Sources.Count;
+                scene.Sources.Insert(Math.Clamp(at, 0, scene.Sources.Count), s);
+            }
+            s.Visible = true;
+            result.Add(s);
+        }
+        foreach (var extra in have.Where(x => !result.Contains(x))) extra.Visible = false;
+        var grid = Grid(count, tileAspect, canvasAspect);
+        for (int i = 0; i < result.Count; i++)
+        {
+            var s = result[i];
+            if (count == 1) { s.Anchor = Anchors.Fill; continue; }
+            s.Anchor = Anchors.Free; s.FillMode = Anchors.FillFit;
+            (s.X, s.Y, s.W) = grid[i]; s.H = 0;
+        }
+        return result;
+    }
+}
