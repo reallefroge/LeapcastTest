@@ -35,6 +35,40 @@ if (args.Length > 0 && args[0] == "--au")
     VodTests.Learning((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
     return af == 0 ? 0 : 1;
 }
+// quick mode: the stream timer
+if (args.Length > 0 && args[0] == "--timertest")
+{
+    int tf = 0;
+    await CoreTests.TimerTests.RunAsync(Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg",
+        Path.Combine(Path.GetTempPath(), "leapcast-timer-" + Guid.NewGuid().ToString("N")[..6]),
+        (ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) tf++; });
+    return tf == 0 ? 0 : 1;
+}
+// quick mode: draw the timer card so it can be looked at
+if (args.Length > 0 && args[0] == "--timer")
+{
+    string dir = args.Length > 1 ? args[1] : Path.Combine(Path.GetTempPath(), "leapcast-timer");
+    Directory.CreateDirectory(dir);
+    string tff = Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg";
+    var face = TimerCard.Face() ?? throw new InvalidOperationException("no monospace font found");
+    foreach (var (style, title, widest, fs) in new[] {
+        (TimerCard.Stacked, "Subathon", "1:23:45", 64.0),
+        (TimerCard.Inline,  "Break ends in", "09:58", 54.0),
+        (TimerCard.Plain,   "Next stream", "2:00:00", 60.0) })
+    {
+        var L = TimerCard.Measure(style, title, widest, fs, face.Advance);
+        string txt = Path.Combine(dir, $"t-{style}.txt");
+        TimerCard.Write(txt, widest);
+        string chain = TimerCard.Filter(L, style, title, face.Path, txt);
+        string outPng = Path.Combine(dir, $"card-{style}.png");
+        var (code, log) = await EncoderCatalog.RunQuietAsync(tff, new[] { "-y", "-v", "error",
+            "-f", "lavfi", "-i", $"color=c=0x000000@0.0:s={L.W}x{L.H}:r=1", "-vf", chain, "-frames:v", "1", outPng },
+            TimeSpan.FromSeconds(60), CancellationToken.None);
+        Console.WriteLine($"  {style,-9} {L.W}x{L.H} exit {code} {log.Trim()}");
+    }
+    Console.WriteLine(dir);
+    return 0;
+}
 // quick mode: the clip check and the loudness check of the finished video
 if (args.Length > 0 && args[0] == "--quality")
 {
@@ -2175,6 +2209,9 @@ Console.WriteLine("A recording is never ended by the app: an encoder that dies (
         "each stop is written to stream-health.log with its reason, and the dead run's FFmpeg log is kept (ffmpeg-crash.log)");
     await engine.StopAllAsync();
 }
+
+Console.WriteLine("\nThe stream timer: counting, and the card drawn on the scene");
+await CoreTests.TimerTests.RunAsync(ffmpeg, Path.Combine(work, "timer"), Check);
 
 engine.Dispose();
 Console.WriteLine(failures == 0 ? "\nALL TESTS PASSED" : $"\n{failures} FAILURE(S)");

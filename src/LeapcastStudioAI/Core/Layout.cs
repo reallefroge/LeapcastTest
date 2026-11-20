@@ -44,7 +44,7 @@ public static class LayoutMath
         }
         double ow, oh;
         var kind = SourceTypes.KindOf(s.Type);
-        if ((kind == SourceKind.Text || (kind is SourceKind.Image or SourceKind.Browser && s.SizePercent <= 0)) && naturalSize is { } n)
+        if ((kind is SourceKind.Text or SourceKind.Timer || (kind is SourceKind.Image or SourceKind.Browser && s.SizePercent <= 0)) && naturalSize is { } n)
         { ow = n.w; oh = n.h; }
         else
         {
@@ -128,7 +128,7 @@ public static class LayoutMath
     {
         var k = SourceTypes.KindOf(s.Type);
         if (k == SourceKind.Camera && SmartTuner.TryParseResolution(s.CameraResolution, out var w, out var h)) return w / (double)h;
-        if (k == SourceKind.Text) return 6;
+        if (k is SourceKind.Text or SourceKind.Timer) return 6;
         if (k == SourceKind.Browser) return Math.Max(64, s.BrowserWidth) / (double)Math.Max(64, s.BrowserHeight);
         return 16.0 / 9;
     }

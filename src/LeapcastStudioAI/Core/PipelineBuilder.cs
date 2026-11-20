@@ -52,6 +52,8 @@ public sealed class PipelineRequest
     public IReadOnlyDictionary<Guid, string> AudioInputs { get; init; } = new Dictionary<Guid, string>();
     /// <summary>Text source id → pre-rendered transparent PNG.</summary>
     public IReadOnlyDictionary<Guid, string> RenderedImages { get; init; } = new Dictionary<Guid, string>();
+    /// <summary>Timer sources: the ready-made filter chain that draws each card (the engine builds it).</summary>
+    public IReadOnlyDictionary<Guid, string> TimerFilters { get; init; } = new Dictionary<Guid, string>();
     /// <summary>Monitor index → virtual-desktop rectangle (only needed for GDI display capture).</summary>
     public Func<int, (int X, int Y, int W, int H)?>? MonitorBounds { get; init; }
     /// <summary>False after desktop duplication failed on this PC: display capture falls back to GDI.</summary>
@@ -169,6 +171,7 @@ public static class PipelineBuilder
             SourceKind.Camera => $"camera|{s.DeviceName}|{s.CameraResolution}|{s.CameraFps}|{s.CameraFormat}",
             SourceKind.Image => $"image|{s.FilePath.ToLowerInvariant()}",
             SourceKind.Text => $"text|{s.Id}",
+            SourceKind.Timer => $"timer|{s.Id}",
             SourceKind.Browser => $"browser|{s.Url.Trim()}|{s.BrowserWidth}x{s.BrowserHeight}|{s.BrowserFps}|{s.BrowserCss}",
             SourceKind.Microphone or SourceKind.DesktopAudio => $"audio|{k}|{s.AudioDeviceId}",
             _ => $"other|{s.Id}"
@@ -405,7 +408,7 @@ public static class PipelineBuilder
                 bool big = Large(LayoutMath.Horizontal(src, W, H, AspectFor(src, r.KnownSizes)), W, H);
                 if (big) sceneOverlays[k].Add(name);
                 visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
-                string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, scale)}format={AlphaFormat(alpha, kind)}");
+                string layer = Prep(InputKey(src), $"{Crop(src)}{TimerPrep(src, kind, r)}{CameraPrep(src, kind, scale)}format={AlphaFormat(alpha, kind)}");
                 string on = !src.Shown ? ":enable=0" : big ? Enabled(k) : "";
                 sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                 cur = $"{p}c{j}";
@@ -447,7 +450,7 @@ public static class PipelineBuilder
                     bool big = Large(rect, VW, VH);
                     if (big) sceneOverlays[k].Add(name);
                     visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
-                    string layer = Prep(InputKey(src), $"{Crop(src)}{CameraPrep(src, kind, VerticalScale(src, VW, VH))}format={AlphaFormat(alpha, kind)}");
+                    string layer = Prep(InputKey(src), $"{Crop(src)}{TimerPrep(src, kind, r)}{CameraPrep(src, kind, VerticalScale(src, VW, VH))}format={AlphaFormat(alpha, kind)}");
                     string on = !src.Shown ? ":enable=0" : big ? Enabled(k) : "";
                     sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                     cur = $"{p}c{j}";
@@ -946,6 +949,13 @@ public static class PipelineBuilder
                 if (!r.RenderedImages.TryGetValue(s.Id, out var png) || !File.Exists(png))
                 { warnings.Add($"\"{s.Name}\": text is empty, skipped."); return null; }
                 return new InputSpec(new[] { "-i", png }, false);
+
+            case SourceKind.Timer:
+                // a see-through frame the card is drawn onto; the reading itself is re-read from disk every frame
+                if (!r.TimerFilters.ContainsKey(s.Id) || !r.KnownSizes.TryGetValue(InputKey(s), out var tz))
+                { warnings.Add($"\"{s.Name}\": the timer couldn\u2019t be drawn, skipped."); return null; }
+                return new InputSpec(new[] { "-f", "lavfi", "-i",
+                    $"color=c=0x000000@0.0:s={tz.W}x{tz.H}:r={I(r.Plan?.Fps ?? 30)}" }, false);
         }
         return null;
     }
@@ -980,6 +990,10 @@ public static class PipelineBuilder
     }
 
     /// <summary>Camera: scale down first, then temporal denoise (cheap at small size, and noise is pure wasted bitrate).</summary>
+    /// <summary>The timer card's own chain (it is drawn, not captured), ahead of the usual layer work.</summary>
+    private static string TimerPrep(StudioSource s, SourceKind kind, PipelineRequest r) =>
+        kind == SourceKind.Timer && r.TimerFilters.TryGetValue(s.Id, out var chain) ? chain + "," : "";
+
     private static string CameraPrep(StudioSource s, SourceKind kind, string? scale)
     {
         if (kind != SourceKind.Camera) return scale ?? "";
@@ -1040,7 +1054,7 @@ public static class PipelineBuilder
                 return $"scale={sw}:{Math.Max(16, SmartTuner.Even((int)Math.Round(src.H * H)))}:flags={(light ? "fast_bilinear" : "bicubic")},setsar=1,";
             return $"scale={sw}:-2:flags={(light ? "fast_bilinear" : "bicubic")},";
         }
-        if (kind == SourceKind.Text || (kind is SourceKind.Image or SourceKind.Browser && src.SizePercent <= 0)) return "";
+        if (kind is SourceKind.Text or SourceKind.Timer || (kind is SourceKind.Image or SourceKind.Browser && src.SizePercent <= 0)) return "";
         return $"scale={LayoutMath.OverlayWidth(src, W)}:-2:flags={(light ? "fast_bilinear" : "bicubic")},";
     }
 

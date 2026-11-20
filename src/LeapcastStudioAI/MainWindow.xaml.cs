@@ -203,6 +203,8 @@ public partial class MainWindow : Window
             KeyResolver = o => SecretStore.Unprotect(o.StreamKeyProtected),
         };
 
+        _engine.Timer = _state.Timer;
+        _engine.TimerOutgrew += (_, _) => Dispatcher.BeginInvoke(() => { if (_ready) SceneEdited(); });
         _engine.FrameReady += OnFrame;
         _engine.StatusChanged += st => Dispatcher.BeginInvoke(() => ApplyStatus(st));
         _engine.Message += (_, e) => Dispatcher.BeginInvoke(() => Log(e.Text, e.IsError));
@@ -226,6 +228,10 @@ public partial class MainWindow : Window
         var selected = _state.Scenes.FirstOrDefault(s => s.Id == _state.SelectedSceneId) ?? _state.Scenes.FirstOrDefault();
         if (selected is not null) ScenesList.SelectedItem = selected;
 
+        LoadTimerDock();
+        var tick = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+        tick.Tick += (_, _) => ShowTimer();
+        tick.Start();
         _uiTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(33) }; // 30 FPS preview
         _uiTimer.Tick += (_, _) => OnUiTick();
         _uiTimer.Start();
@@ -2472,6 +2478,109 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Call after any change to the current scene's sources.</summary>
+    // ------------------------------------------------------------------ the stream timer
+
+    private bool _timerLoading;
+
+    private void LoadTimerDock()
+    {
+        _timerLoading = true;
+        var t = _state.Timer;
+        TimerTitleBox.Text = t.Title;
+        TimerModeBox.SelectedIndex = (int)t.Mode;
+        TimerLengthBox.Text = StreamTimerState.Clock(t.DurationSeconds, t.DurationSeconds >= 3600);
+        TimerOvertimeBox.IsChecked = t.Overtime;
+        _timerLoading = false;
+        ShowTimer();
+    }
+
+    /// <summary>The dock's own readout, four times a second.</summary>
+    private void ShowTimer()
+    {
+        var t = _state.Timer;
+        TimerReadout.Text = t.Display(DateTime.UtcNow, DateTime.Now);
+        TimerStartButton.Content = t.Running ? "❚❚  Pause" : "▶  Start";
+        TimerLengthBox.IsEnabled = TimerModeBox.SelectedIndex == 0;
+    }
+
+    /// <summary>Anything that changes the card's shape: saved, then the scene is rebuilt at the new size.</summary>
+    private void TimerShape_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_timerLoading) return;
+        var t = _state.Timer;
+        t.Title = TimerTitleBox.Text;
+        t.Mode = (TimerMode)Math.Max(0, TimerModeBox.SelectedIndex);
+        t.Overtime = TimerOvertimeBox.IsChecked == true;
+        if (StreamTimerState.TryParseDuration(TimerLengthBox.Text, out double secs) && secs > 0) t.DurationSeconds = secs;
+        ShowTimer();
+        SceneEdited();
+    }
+
+    private void TimerLength_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        TimerShape_Changed(sender, e);
+        Keyboard.ClearFocus();
+    }
+
+    private void TimerStart_Click(object sender, RoutedEventArgs e)
+    {
+        var t = _state.Timer;
+        var now = DateTime.UtcNow;
+        if (t.Running) t.Pause(now); else t.Start(now);
+        Save(); ShowTimer();
+    }
+
+    private void TimerReset_Click(object sender, RoutedEventArgs e)
+    {
+        _state.Timer.Reset(DateTime.UtcNow);
+        Save(); ShowTimer();
+    }
+
+    private void TimerAdd_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button b || !double.TryParse((string)b.Tag, out double secs)) return;
+        var before = _state.Timer.Widest(DateTime.UtcNow).Length;
+        _state.Timer.Add(secs, DateTime.UtcNow);
+        Save(); ShowTimer();
+        LoadTimerLength();
+        // a longer reading needs a wider card
+        if (_state.Timer.Widest(DateTime.UtcNow).Length != before) SceneEdited();
+    }
+
+    private void LoadTimerLength()
+    {
+        _timerLoading = true;
+        TimerLengthBox.Text = StreamTimerState.Clock(_state.Timer.DurationSeconds, _state.Timer.DurationSeconds >= 3600);
+        _timerLoading = false;
+    }
+
+    /// <summary>Puts the timer on the scene, out of the way of the game, ready to drag.</summary>
+    private void TimerAddSource_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedScene is not { } scene) { Status("Pick a scene first."); return; }
+        if (scene.Sources.FirstOrDefault(s => SourceTypes.KindOf(s.Type) == SourceKind.Timer) is { } had)
+        {
+            had.Visible = true;
+            SourcesList.SelectedItem = had;
+            Status($"\"{scene.Name}\" already shows the timer.");
+            RefreshSourceRows(); SceneEdited(); RedrawEditors();
+            return;
+        }
+        var src = new StudioSource
+        {
+            Type = SourceTypes.Timer, Name = "Timer",
+            TimerTitle = _state.Timer.Title, TimerStyle = TimerCard.Stacked,
+            FontSize = 56, Anchor = Anchors.TopRight, MarginPx = 28,
+        };
+        scene.Sources.Insert(0, src);
+        RefreshSourceRows();
+        SourcesList.SelectedItem = src;
+        Status("Timer added to the scene: drag it where you want it.");
+        SceneEdited(); RedrawEditors();
+    }
+
     private async void SceneEdited()
     {
         Save();

@@ -293,6 +293,7 @@ public sealed partial class StreamEngine : IDisposable
         _audio = audio;
         _platform = platform;
         _lightTimer = new Timer(_ => AutoLightTick(), null, 1500, 1000);
+        _timerTick = new Timer(_ => TimerTick(), null, 250, 250);
         // ffmpeg readers/writers (preview, progress, outputs) must never queue behind each other on a small pool
         ThreadPool.GetMinThreads(out int workers, out int io);
         ThreadPool.SetMinThreads(Math.Max(workers, 32), Math.Max(io, 32));
@@ -574,6 +575,7 @@ public sealed partial class StreamEngine : IDisposable
     // ------------------------------------------------------------------ camera auto light
 
     private readonly Timer _lightTimer;
+    private readonly Timer _timerTick;
     private readonly Dictionary<string, CameraAutoLight> _light = new();
     private readonly HashSet<string> _denoiseOff = new();
 
@@ -1393,6 +1395,7 @@ public sealed partial class StreamEngine : IDisposable
         // Pre-render text overlays.
         var rendered = new Dictionary<Guid, string>();
         var scenes = FreshComposited();
+        var timerFilters = BuildTimerCards(scenes, plan.Height);
         _runSceneIds = scenes.Select(sc => sc.Id).ToList();
         foreach (var s in scenes.SelectMany(sc => sc.Sources).Where(s => SourceTypes.KindOf(s.Type) == SourceKind.Text))
         {
@@ -1504,6 +1507,7 @@ public sealed partial class StreamEngine : IDisposable
             CameraDenoiseOff = CameraDenoiseOffNow(),
             AudioInputs = pipes,
             RenderedImages = rendered,
+            TimerFilters = timerFilters,
             MonitorBounds = _platform.MonitorBounds,
             GpuDisplayCapture = !_gpuDisplayFailed,
             GpuDisplayScale = _windows.GpuScale && !_gpuDisplayScaleFailed,
@@ -1675,6 +1679,78 @@ public sealed partial class StreamEngine : IDisposable
         _knownSizes[key] = size;
         RefreshLayout(); // vertical auto layout depends on the real aspect ratios
     }
+
+    // ------------------------------------------------------------------ the stream timer
+
+    /// <summary>The clock behind every Timer source (the Timer dock sets it; one clock across all scenes).</summary>
+    public StreamTimerState Timer { get; set; } = new();
+    private readonly string _timerDir = Path.Combine(StateStore.Folder, "cache", "timer");
+    private volatile string[] _timerFiles = Array.Empty<string>();
+    private string _timerShown = "", _timerSized = "";
+
+    private string TimerFile(Guid id) => Path.Combine(_timerDir, $"timer_{id:N}.txt");
+
+    private static string FfColour(string? hex)
+    {
+        string h = (hex ?? "").Trim().TrimStart('#');
+        return h.Length is 6 or 8 && h.All(Uri.IsHexDigit) ? "0x" + h[..6] : "0xFFFFFF";
+    }
+
+    /// <summary>
+    /// Works out each timer card, books its size for the layout and writes its first reading. The card is sized for
+    /// the longest reading the clock can show, so it never changes width while it runs.
+    /// </summary>
+    private Dictionary<Guid, string> BuildTimerCards(IEnumerable<StudioScene> scenes, int outputHeight)
+    {
+        var filters = new Dictionary<Guid, string>();
+        var sources = scenes.SelectMany(sc => sc.Sources)
+            .Where(s => SourceTypes.KindOf(s.Type) == SourceKind.Timer).ToList();
+        if (sources.Count == 0) { _timerFiles = Array.Empty<string>(); return filters; }
+        if (TimerCard.Face() is not { } face)
+        {
+            Message?.Invoke(this, new EngineMessageEventArgs("The timer needs a fixed-width font (Consolas) and none was found, so it isn't drawn.", true));
+            _timerFiles = Array.Empty<string>();
+            return filters;
+        }
+        var now = DateTime.UtcNow;
+        string widest = Timer.Widest(now), text = Timer.Display(now, DateTime.Now);
+        _timerShown = text; _timerSized = widest;
+        try { Directory.CreateDirectory(_timerDir); } catch { }
+        var files = new List<string>();
+        foreach (var s in sources)
+        {
+            double fs = Math.Clamp(s.FontSize, 14, 400) * outputHeight / 1080.0;
+            var L = TimerCard.Measure(s.TimerStyle, s.TimerTitle, widest, fs, face.Advance);
+            string file = TimerFile(s.Id);
+            try { TimerCard.Write(file, text); } catch { continue; }
+            _knownSizes[PipelineBuilder.InputKey(s)] = (L.W, L.H);
+            filters[s.Id] = TimerCard.Filter(L, s.TimerStyle, s.TimerTitle, face.Path, file, FfColour(s.TextColor));
+            files.Add(file);
+        }
+        _timerFiles = files.ToArray();
+        return filters;
+    }
+
+    /// <summary>Four times a second: the reading goes to disk and drawtext picks it up on the next frame.</summary>
+    private void TimerTick()
+    {
+        var files = _timerFiles;
+        if (files.Length == 0) return;
+        try
+        {
+            var now = DateTime.UtcNow;
+            string text = Timer.Display(now, DateTime.Now);
+            if (text == _timerShown) return;
+            _timerShown = text;
+            foreach (var f in files) TimerCard.Write(f, text);
+            // the reading has outgrown the card it was drawn for (a longer title of a finish, or time added)
+            if (text.Length > _timerSized.Length) TimerOutgrew?.Invoke(this, EventArgs.Empty);
+        }
+        catch { }
+    }
+
+    /// <summary>Raised when the reading no longer fits the card, so the scene is rebuilt at the new width.</summary>
+    public event EventHandler? TimerOutgrew;
 
     private async Task WaitForFirstFrameAsync(FfmpegRunner runner, TimeSpan timeout)
     {
@@ -2027,6 +2103,7 @@ public sealed partial class StreamEngine : IDisposable
         _outputs.Dispose();
         _audio.Dispose();
         _lightTimer.Dispose();
+        _timerTick.Dispose();
         _gpuPipe?.Dispose();
         _gpu?.Dispose();
         _cameras.Dispose();

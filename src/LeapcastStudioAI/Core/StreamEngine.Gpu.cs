@@ -23,6 +23,8 @@ public sealed partial class StreamEngine
     private GpuImages? _gpuImages;
     private volatile Dictionary<string, (SourceKind Kind, StudioSource Src)> _gpuKeys = new();
     private readonly Dictionary<Guid, (string Sig, string? Png)> _gpuText = new();
+    private readonly Dictionary<Guid, (string Sig, string? Png)> _gpuTimer = new();
+    private volatile bool _gpuTimerBusy;
 
     /// <summary>Scenes are layered on the graphics card right now.</summary>
     public bool GpuCompositing => _gpuRun && _gpu is not null;
@@ -94,6 +96,11 @@ public sealed partial class StreamEngine
                 string? png;
                 lock (_gpuText) png = _gpuText.TryGetValue(src.Id, out var t) ? t.Png : null;
                 return png is null ? null : _gpuImages?.Get(png);
+            case SourceKind.Timer:
+                string? card;
+                lock (_gpuTimer) card = _gpuTimer.TryGetValue(src.Id, out var tc) ? tc.Png : null;
+                // the file is rewritten in place as the clock ticks; GpuImages notices the new timestamp
+                return card is null ? null : _gpuImages?.Get(card);
         }
         return null;
     }
@@ -150,9 +157,55 @@ public sealed partial class StreamEngine
         _gpuState = st;
         gpu.SetState(st);
         RenderGpuText(scenes);
+        RenderGpuTimers(scenes);
     }
 
     private GpuState? _gpuState;
+
+    /// <summary>
+    /// Timer sources on the GPU canvas: the same card the encoder draws, rendered to a picture whenever the
+    /// reading changes — one small FFmpeg pass a second, and the look can't drift from the FFmpeg path.
+    /// </summary>
+    private void RenderGpuTimers(IEnumerable<StudioScene> scenes)
+    {
+        var sources = scenes.SelectMany(sc => sc.Sources)
+            .Where(s => SourceTypes.KindOf(s.Type) == SourceKind.Timer && s.Shown).ToList();
+        if (sources.Count == 0 || _gpuTimerBusy || FfmpegPath is not { } ff || TimerCard.Face() is not { } face) return;
+        int h = _gpu?.Height ?? 720;
+        var now = DateTime.UtcNow;
+        string widest = Timer.Widest(now), text = Timer.Display(now, DateTime.Now);
+        var todo = new List<(StudioSource Src, string Sig, string Png, string Chain, int W, int H)>();
+        foreach (var s in sources)
+        {
+            string sig = $"{text}|{widest}|{s.TimerStyle}|{s.TimerTitle}|{s.FontSize}|{s.TextColor}|{h}";
+            lock (_gpuTimer) if (_gpuTimer.TryGetValue(s.Id, out var e) && e.Sig == sig) continue;
+            double fs = Math.Clamp(s.FontSize, 14, 400) * h / 1080.0;
+            var L = TimerCard.Measure(s.TimerStyle, s.TimerTitle, widest, fs, face.Advance);
+            string txt = TimerFile(s.Id), png = TimerFile(s.Id) + ".png";
+            try { Directory.CreateDirectory(_timerDir); TimerCard.Write(txt, text); } catch { continue; }
+            todo.Add((s, sig, png, TimerCard.Filter(L, s.TimerStyle, s.TimerTitle, face.Path, txt, FfColour(s.TextColor)), L.W, L.H));
+        }
+        if (todo.Count == 0) return;
+        _gpuTimerBusy = true;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                foreach (var j in todo)
+                {
+                    string tmp = j.Png + ".tmp.png";
+                    var (code, _) = await EncoderCatalog.RunQuietAsync(ff, new[] { "-y", "-v", "error",
+                        "-f", "lavfi", "-i", $"color=c=0x000000@0.0:s={j.W}x{j.H}:r=1",
+                        "-vf", j.Chain, "-frames:v", "1", tmp }, TimeSpan.FromSeconds(15), _life.Token);
+                    if (code != 0) continue;
+                    try { File.Move(tmp, j.Png, true); } catch { continue; }
+                    lock (_gpuTimer) _gpuTimer[j.Src.Id] = (j.Sig, j.Png);
+                }
+            }
+            catch { }
+            finally { _gpuTimerBusy = false; }
+        });
+    }
 
     /// <summary>Text sources: drawn to an image when their text or style changes (no rebuild).</summary>
     private void RenderGpuText(IEnumerable<StudioScene> scenes)

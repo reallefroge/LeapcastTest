@@ -21,6 +21,7 @@ public partial class SourcePickerWindow : Window
         new(SourceTypes.Browser, "A web page: chat, alerts or widgets."),
         new(SourceTypes.Image, "A PNG or JPG image."),
         new(SourceTypes.Text, "A text label."),
+        new(SourceTypes.Timer, "A countdown or count-up clock, set from the Timer dock."),
         new(SourceTypes.Microphone, "Microphone or line in."),
         new(SourceTypes.DesktopAudio, "Desktop audio."),
         new(SourceTypes.Folder, "Groups sources to show, hide, lock and move together."),
@@ -55,6 +56,7 @@ public partial class SourcePickerWindow : Window
     public static string DefaultName(string type) => type switch
     {
         SourceTypes.Camera => "Webcam",
+        SourceTypes.Timer => "Timer",
         SourceTypes.Window => "Wizard101 window",
         SourceTypes.DesktopAudio => "Desktop audio",
         SourceTypes.Microphone => "Microphone",

@@ -157,6 +157,29 @@
           </UniformGrid>
         </StackPanel>
 
+        <StackPanel x:Name="TimerGroup">
+          <TextBlock Text="Title above the clock (blank shows the clock on its own)" Style="{StaticResource FieldLabel}"/>
+          <TextBox x:Name="TimerTitleField"/>
+          <TextBlock Text="Shape" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="TimerStyleBox">
+            <ComboBoxItem Content="Stacked — title over the clock, on a plate" Tag="Stacked"/>
+            <ComboBoxItem Content="Inline — title and clock on one row (shortest)" Tag="Inline"/>
+            <ComboBoxItem Content="No plate — outlined text only" Tag="No plate"/>
+          </ComboBox>
+          <UniformGrid Columns="2">
+            <StackPanel>
+              <TextBlock Text="Clock size (at 1080p)" Style="{StaticResource FieldLabel}"/>
+              <TextBox x:Name="TimerSizeBox"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="Clock colour (#RRGGBB)" Style="{StaticResource FieldLabel}"/>
+              <TextBox x:Name="TimerColorBox"/>
+            </StackPanel>
+          </UniformGrid>
+          <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                     Text="What it counts, how long for and start/stop all live in the Timer dock, and are shared by every Timer source."/>
+        </StackPanel>
+
         <!-- Placement (all video) -->
         <StackPanel x:Name="PlacementGroup">
           <TextBlock Text="Position" Style="{StaticResource FieldLabel}"/>

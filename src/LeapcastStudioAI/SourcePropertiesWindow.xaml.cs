@@ -34,6 +34,7 @@ public partial class SourcePropertiesWindow : Window
         Toggle(CameraGroup, _kind == SourceKind.Camera);
         Toggle(ImageGroup, _kind == SourceKind.Image);
         Toggle(TextGroup, _kind == SourceKind.Text);
+        Toggle(TimerGroup, _kind == SourceKind.Timer);
         Toggle(BrowserGroup, _kind == SourceKind.Browser);
         Toggle(FillGroup, _kind is SourceKind.Display or SourceKind.Window or SourceKind.Camera or SourceKind.Image);
         ClapButton.IsEnabled = clapTest is not null;
@@ -61,6 +62,10 @@ public partial class SourcePropertiesWindow : Window
         // Window
         if (_kind == SourceKind.Window) LoadWindows();
         WindowBox.Text = source.WindowTitle;
+        TimerTitleField.Text = source.TimerTitle;
+        TimerSizeBox.Text = source.FontSize.ToString("0.#", CultureInfo.InvariantCulture);
+        TimerColorBox.Text = source.TextColor;
+        TimerStyleBox.SelectedIndex = Math.Max(0, Array.IndexOf(TimerCard.Styles, source.TimerStyle));
         WindowInstanceBox.SelectedIndex = Math.Clamp(source.WindowInstance, 0, 5);
 
         // Camera
@@ -93,7 +98,7 @@ public partial class SourcePropertiesWindow : Window
         SelectTag(AnchorBox, string.IsNullOrWhiteSpace(source.Anchor) ? Anchors.Auto : source.Anchor);
         SizeSlider.Value = Math.Clamp(source.SizePercent <= 0 ? 100 : source.SizePercent, 5, 100);
         MarginBox.Text = source.MarginPx.ToString(CultureInfo.InvariantCulture);
-        if (_kind == SourceKind.Text) { SizeLabel.Visibility = Visibility.Collapsed; SizeSlider.Visibility = Visibility.Collapsed; SizeValue.Visibility = Visibility.Collapsed; }
+        if (_kind is SourceKind.Text or SourceKind.Timer) { SizeLabel.Visibility = Visibility.Collapsed; SizeSlider.Visibility = Visibility.Collapsed; SizeValue.Visibility = Visibility.Collapsed; }
         if (_kind == SourceKind.Image) SizeLabel.Text = "Width (% of the stream width; 100 = full width)";
         if (_kind == SourceKind.Browser) SizeLabel.Text = "Width (% of the stream width) for corner positions";
 
@@ -186,6 +191,15 @@ public partial class SourcePropertiesWindow : Window
             MessageBox.Show(this, "Choose an image file that exists.", "Source properties", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
+        if (_kind == SourceKind.Timer)
+        {
+            try { _ = (Color)ColorConverter.ConvertFromString(TimerColorBox.Text.Trim()); }
+            catch
+            {
+                MessageBox.Show(this, "Colour must look like #FFFFFF.", "Source properties", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+        }
         if (_kind == SourceKind.Text)
         {
             try { _ = (Color)ColorConverter.ConvertFromString(ColorBox.Text.Trim()); }
@@ -213,6 +227,14 @@ public partial class SourcePropertiesWindow : Window
         s.CropRight = Int(CropR.Text, 0, 0, 8000);
         s.CropBottom = Int(CropB.Text, 0, 0, 8000);
         s.WindowTitle = WindowBox.Text.Trim();
+        if (_kind == SourceKind.Timer)
+        {
+            s.TimerTitle = TimerTitleField.Text.Trim();
+            s.TimerStyle = TimerCard.Styles[Math.Max(0, TimerStyleBox.SelectedIndex)];
+            s.TextColor = TimerColorBox.Text.Trim();
+            if (double.TryParse(TimerSizeBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double tsz))
+                s.FontSize = Math.Clamp(tsz, 14, 400);
+        }
         s.WindowInstance = Math.Max(0, WindowInstanceBox.SelectedIndex);
         s.DeviceName = CameraBox.Text.Trim();
         s.CameraResolution = TagOf(CamResBox, "Default");

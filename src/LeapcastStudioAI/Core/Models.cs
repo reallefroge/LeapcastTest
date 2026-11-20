@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 namespace LeapcastStudioAI;
 
 /// <summary>What the engine actually does with a source. The persisted <see cref="StudioSource.Type"/> string maps onto this.</summary>
-public enum SourceKind { Display, Window, Camera, Image, Text, Browser, Microphone, DesktopAudio, Folder, Unsupported }
+public enum SourceKind { Display, Window, Camera, Image, Text, Timer, Browser, Microphone, DesktopAudio, Folder, Unsupported }
 
 public static class SourceTypes
 {
@@ -14,6 +14,8 @@ public static class SourceTypes
     public const string Camera = "Video Capture Device";
     public const string Image = "Image";
     public const string Text = "Text";
+    /// <summary>The stream timer drawn on the scene (set from the Timer dock).</summary>
+    public const string Timer = "Timer";
     public const string Microphone = "Audio Input";
     public const string DesktopAudio = "Audio Output";
     public const string Browser = "Browser";
@@ -21,7 +23,7 @@ public static class SourceTypes
     public const string Folder = "Folder";
 
     /// <summary>Types offered in the "Add source" picker.</summary>
-    public static readonly string[] Pickable = { Window, Display, Camera, Browser, Image, Text, Microphone, DesktopAudio, Folder };
+    public static readonly string[] Pickable = { Window, Display, Camera, Browser, Image, Text, Timer, Microphone, DesktopAudio, Folder };
 
     public static SourceKind KindOf(string? type) => type switch
     {
@@ -31,6 +33,7 @@ public static class SourceTypes
         Camera => SourceKind.Camera,
         Image => SourceKind.Image,
         Text => SourceKind.Text,
+        Timer => SourceKind.Timer,
         Browser => SourceKind.Browser,
         Microphone => SourceKind.Microphone,
         DesktopAudio => SourceKind.DesktopAudio,
@@ -38,9 +41,9 @@ public static class SourceTypes
         _ => SourceKind.Unsupported
     };
 
-    public static bool IsVideo(SourceKind k) => k is SourceKind.Display or SourceKind.Window or SourceKind.Camera or SourceKind.Image or SourceKind.Text or SourceKind.Browser;
+    public static bool IsVideo(SourceKind k) => k is SourceKind.Display or SourceKind.Window or SourceKind.Camera or SourceKind.Image or SourceKind.Text or SourceKind.Timer or SourceKind.Browser;
     /// <summary>Has transparency and a natural pixel size (drawn as an overlay, never as the opaque base).</summary>
-    public static bool IsGraphic(SourceKind k) => k is SourceKind.Image or SourceKind.Text or SourceKind.Browser;
+    public static bool IsGraphic(SourceKind k) => k is SourceKind.Image or SourceKind.Text or SourceKind.Timer or SourceKind.Browser;
     public static bool IsAudio(SourceKind k) => k is SourceKind.Microphone or SourceKind.DesktopAudio;
 }
 
@@ -162,6 +165,10 @@ public sealed class StudioSource
     public string FilePath { get; set; } = "";
     public string Text { get; set; } = "";
     public double FontSize { get; set; } = 44;
+    /// <summary>Timer source: the words above (or beside) the clock. Blank shows the clock on its own.</summary>
+    public string TimerTitle { get; set; } = "";
+    /// <summary>Timer source: Stacked, Inline or No plate.</summary>
+    public string TimerStyle { get; set; } = "Stacked";
     public string TextColor { get; set; } = "#FFFFFF";
 
     // Browser
@@ -599,6 +606,8 @@ public sealed class StudioState
 {
     public ObservableCollection<StudioScene> Scenes { get; set; } = new();
     public StudioSettings Settings { get; set; } = new();
+    /// <summary>The stream timer behind every Timer source (one clock, however many scenes show it).</summary>
+    public StreamTimerState Timer { get; set; } = new();
     public Guid? SelectedSceneId { get; set; }
 }
 
