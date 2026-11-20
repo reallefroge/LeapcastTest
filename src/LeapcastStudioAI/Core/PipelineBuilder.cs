@@ -372,8 +372,6 @@ public static class PipelineBuilder
         int? staged = r.Preview && r.StagedSceneIndex is int si ? Math.Clamp(si, 0, N - 1) : null;
         // a scene's own big overlays draw while it's on air or staged in the studio-mode preview
         string Enabled(int k) => k == active || k == staged ? "" : ":enable=0";
-        // the program stack blends only the scene on air
-        string OnAir(int k) => k == active ? "" : ":enable=0";
         bool Large(LayoutRect rect, int cw, int ch) => rect.W * rect.H >= 0.25 * cw * ch;
 
         var sceneGraph = new List<string>();
@@ -541,28 +539,35 @@ public static class PipelineBuilder
         // expression of stream time t). Switching only rewrites mask expressions: no filter reconfiguration,
         // no restart, frame-accurate fades. Invariant: every mask above the on-air scene is transparent.
         // Every scene is opaque, so only the on-air scene's layer of the stack needs blending (the others are off).
-        void Stack(string scenePrefix, string fadePrefix, string stackPrefix, int cw, int ch, string outLabel, int fps = 0)
+        // Every scene in the graph is composited on every frame, on air or not, so the switching machinery must
+        // not grow with the number of scenes: a stack of per-scene masks and overlays cost a measured ~8% of a
+        // core each at 1080p30. Instead two selectors pick the outgoing and incoming pictures and a single mask
+        // crossfades between them, which is flat in scene count. Steady state: both selectors on the scene that
+        // is up, the mask opaque, so the output is that scene.
+        void Stack(string scenePrefix, string fadePrefix, string selectPrefix, int cw, int ch, string outLabel, int fps = 0)
         {
             int sf = fps > 0 ? fps : F;
             if (N == 1) { graph.Add($"[{scenePrefix}0]format=nv12[{outLabel}]"); return; }
-            string cur = $"{scenePrefix}0";
-            for (int k = 1; k < N; k++)
+            var under = new System.Text.StringBuilder();
+            var over = new System.Text.StringBuilder();
+            for (int k = 0; k < N; k++)
             {
-                string initial = k == active ? "1" : "-1";
-                string name = $"overlay@{stackPrefix}{k}";
-                sceneOverlays[k].Add(name);
-                graph.Add($"color=c=black:s={cw}x{ch}:r={sf},format=gray,{fadePrefix}{k}=eval=frame:brightness={initial}[{scenePrefix}m{k}]");
-                graph.Add($"[{scenePrefix}{k}][{scenePrefix}m{k}]alphamerge[{scenePrefix}a{k}]");
-                graph.Add($"[{cur}][{scenePrefix}a{k}]{name}=format=yuv420:eof_action=repeat{OnAir(k)}[{scenePrefix}st{k}]");
-                cur = $"{scenePrefix}st{k}";
+                graph.Add($"[{scenePrefix}{k}]split=2[{scenePrefix}u{k}][{scenePrefix}o{k}]");
+                under.Append($"[{scenePrefix}u{k}]");
+                over.Append($"[{scenePrefix}o{k}]");
             }
-            graph.Add($"[{cur}]format=nv12[{outLabel}]");
+            graph.Add($"{under}streamselect@{selectPrefix}under=inputs={N}:map={active}[{scenePrefix}under]");
+            graph.Add($"{over}streamselect@{selectPrefix}over=inputs={N}:map={active}[{scenePrefix}over]");
+            graph.Add($"color=c=black:s={cw}x{ch}:r={sf},format=gray,{fadePrefix}=eval=frame:brightness=1[{scenePrefix}mask]");
+            graph.Add($"[{scenePrefix}over][{scenePrefix}mask]alphamerge[{scenePrefix}oa]");
+            graph.Add($"[{scenePrefix}under][{scenePrefix}oa]overlay@{selectPrefix}fade=format=yuv420:eof_action=repeat[{scenePrefix}stacked]");
+            graph.Add($"[{scenePrefix}stacked]format=nv12[{outLabel}]");
         }
-        Stack("scene", FadeFilter, "stk", W, H, "vfinal");
-        if (vertical) Stack("vscene", VerticalFadeFilter, "vstk", VW, VH, "vvfinal");
+        Stack("scene", FadeFilter, SceneSelect, W, H, "vfinal");
+        if (vertical) Stack("vscene", VerticalFadeFilter, VerticalSceneSelect, VW, VH, "vvfinal");
         if (clip)
         {
-            Stack("cscene", ClipFadeFilter, "cstk", CW, CH, "cvfinal", r.ClipPlan!.Fps);
+            Stack("cscene", ClipFadeFilter, ClipSceneSelect, CW, CH, "cvfinal", r.ClipPlan!.Fps);
             if (!string.IsNullOrWhiteSpace(r.ClipHandle) && !string.IsNullOrWhiteSpace(r.ClipFont))
                 graph.Add($"[cvfinal]drawtext=fontfile='{VerticalClip.EscapeFilter(r.ClipFont)}':text='{VerticalClip.EscapeFilter(r.ClipHandle.Trim())}':" +
                           $"fontcolor=white:fontsize={SmartTuner.Even((int)(CW * 0.045))}:x=(w-text_w)/2:y=h-{SmartTuner.Even((int)(CH * 0.06))}-text_h:" +
@@ -779,6 +784,8 @@ public static class PipelineBuilder
 
     public const string VerticalFadeFilter = "eq@vfade";
     public const string ClipFadeFilter = "eq@cfade";
+    /// <summary>Which selector pair belongs to which canvas: "streamselect@&lt;this&gt;under" and "…over".</summary>
+    public const string SceneSelect = "s", VerticalSceneSelect = "v", ClipSceneSelect = "c";
 
     /// <summary>
     /// Runtime commands (ffmpeg stdin "C" lines) that crossfade from scene <paramref name="from"/> to <paramref name="to"/>.
@@ -798,29 +805,25 @@ public static class PipelineBuilder
         var lines = new List<string>();
         critical = 0;
         if (spec.SceneCount < 2 || from == to) return lines;
+        if (from < 0 || to < 0 || from >= spec.SceneCount || to >= spec.SceneCount) return lines;
         double d = Math.Max(0.001, seconds);
         string ramp = $"clip((t-{I(startAt)})/{I(d)},0,1)";
-        // the incoming scene's switched-off overlays come on first (still invisible under its mask)
+        // the incoming scene's switched-off overlays come on first (still invisible: the top is transparent)
         if (to < spec.SceneOverlays.Count)
             foreach (var name in spec.SceneOverlays[to].Where(n => !hidden(n))) lines.Add($"{name} -1 enable 1");
-        // brightness is added to a black mask: ≤ -0.1 → fully transparent, ≥ 1 → fully opaque
-        var fades = new List<string> { FadeFilter };
-        if (spec.HasVertical) fades.Add(VerticalFadeFilter);
-        if (spec.HasClip) fades.Add(ClipFadeFilter);
-        foreach (var fade in fades)
+        // Between switches the two selectors both show the scene that is up and the mask is opaque. To change
+        // scene: put what is on screen underneath, hide the top, swap the top to the new scene while nothing can
+        // see it, then fade it in. Every step leaves the picture as it was, so there is no flash at any point.
+        // brightness is added to a black mask: ≤ -0.1 → fully transparent, ≥ 1 → fully opaque.
+        var canvases = new List<(string Fade, string Select)> { (FadeFilter, SceneSelect) };
+        if (spec.HasVertical) canvases.Add((VerticalFadeFilter, VerticalSceneSelect));
+        if (spec.HasClip) canvases.Add((ClipFadeFilter, ClipSceneSelect));
+        foreach (var (fade, sel) in canvases)
         {
-            if (to > from)
-            {
-                // everything between is already transparent: just fade the new scene in on top
-                lines.Add($"{fade}{to} -1 brightness -0.1+1.1*{ramp}");
-            }
-            else
-            {
-                // reveal a lower scene: prepare it (hidden under the current one), then fade the current one out
-                for (int k = to + 1; k < from; k++) lines.Add($"{fade}{k} -1 brightness -1");
-                if (to > 0) lines.Add($"{fade}{to} -1 brightness 1");
-                lines.Add($"{fade}{from} -1 brightness 1-1.1*{ramp}");
-            }
+            lines.Add($"streamselect@{sel}under -1 map {from}");
+            lines.Add($"{fade} -1 brightness -1");
+            lines.Add($"streamselect@{sel}over -1 map {to}");
+            lines.Add($"{fade} -1 brightness -0.1+1.1*{ramp}");
         }
         foreach (var g in spec.AudioGains)
         {

@@ -35,6 +35,15 @@ if (args.Length > 0 && args[0] == "--au")
     VodTests.Learning((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
     return af == 0 ? 0 : 1;
 }
+// quick mode: scene switching on the real graph
+if (args.Length > 0 && args[0] == "--switchtest")
+{
+    int sf = 0;
+    await CoreTests.SwitchTests.RunAsync(Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg",
+        Path.Combine(Path.GetTempPath(), "leapcast-switch-" + Guid.NewGuid().ToString("N")[..6]),
+        (ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) sf++; });
+    return sf == 0 ? 0 : 1;
+}
 // quick mode: the stream timer
 if (args.Length > 0 && args[0] == "--timertest")
 {
@@ -330,12 +339,20 @@ var dupSpec = PipelineBuilder.Build(new PipelineRequest
 });
 int fillScales = System.Text.RegularExpressions.Regex.Matches(dupSpec.FilterGraph, "force_original_aspect_ratio=increase").Count;
 Check(fillScales == 1, $"a game used by two scenes is scaled once and shared ({fillScales} scale chain(s))");
-Check(dupSpec.FilterGraph.Contains("overlay@stk1=format=yuv420:eof_action=repeat:enable=0") && dupSpec.SceneOverlays[1].Contains("overlay@stk1"),
-    "the hidden scene isn't blended until it's switched to");
+Check(dupSpec.FilterGraph.Contains("streamselect@sunder=inputs=2:map=0") && dupSpec.FilterGraph.Contains("streamselect@sover=inputs=2:map=0"),
+    "the program is whichever scene the selectors point at, so a hidden scene is never blended in");
 var tcmds = PipelineBuilder.TransitionCommands(dupSpec, 0, 1, 10, 0.5, out int tcrit);
-Check(tcmds[0] == "overlay@stk1 -1 enable 1" && tcrit < tcmds.Count + 1, $"switching turns the incoming scene on first ({string.Join(" | ", tcmds)})");
+Check(tcmds.IndexOf("streamselect@sunder -1 map 0") < tcmds.IndexOf("eq@fade -1 brightness -1")
+      && tcmds.IndexOf("eq@fade -1 brightness -1") < tcmds.IndexOf("streamselect@sover -1 map 1")
+      && tcmds.Last(l => l.StartsWith("eq@fade")).Contains("-0.1+1.1*clip((t-10)/0.5,0,1)") && tcrit <= tcmds.Count,
+    $"switching puts what is on screen underneath, hides the top, swaps it, then fades it in ({string.Join(" | ", tcmds)})");
 var tback = PipelineBuilder.TransitionCommands(dupSpec, 1, 0, 20, 0.5, out int tcrit2);
-Check(tback.Last().StartsWith("overlay@stk1 -1 enable lt(t,20.6") && tcrit2 == tback.Count - 1, "the outgoing scene is switched off after its fade");
+Check(tback.Contains("streamselect@sunder -1 map 1") && tback.Contains("streamselect@sover -1 map 0")
+      && tback.Count(l => l.StartsWith("eq@fade")) == 2,
+    $"…the same way going back down the list, with one fade either way ({string.Join(" | ", tback)})");
+Check(PipelineBuilder.TransitionCommands(dupSpec, 0, 9, 10, 0.5, out _).Count == 0
+      && PipelineBuilder.TransitionCommands(dupSpec, 0, 0, 10, 0.5, out _).Count == 0,
+    "a switch to a scene that isn't there, or to the one already up, sends nothing");
 Check(PipelineBuilder.FillChain(new StudioSource(), 1920, 1080, 30, true).Contains("increase") && LayoutMath.FillRect(new StudioSource(), 1920, 1080, 1.6) is { X: 0, W: 1920 } fr && fr.H > 1080,
     "fill mode Crop covers the canvas (16:10 game: full width, edges trimmed top/bottom)");
 
@@ -2209,6 +2226,9 @@ Console.WriteLine("A recording is never ended by the app: an encoder that dies (
         "each stop is written to stream-health.log with its reason, and the dead run's FFmpeg log is kept (ffmpeg-crash.log)");
     await engine.StopAllAsync();
 }
+
+Console.WriteLine("Scene switching on the built graph: one crossfade however many scenes there are");
+await CoreTests.SwitchTests.RunAsync(ffmpeg, Path.Combine(work, "switch"), Check);
 
 Console.WriteLine("The performance log: what to read when the app is asked to use less of the PC");
 {
