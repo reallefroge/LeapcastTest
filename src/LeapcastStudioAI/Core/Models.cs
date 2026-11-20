@@ -522,6 +522,8 @@ public sealed class StudioSettings
     public bool VerticalClips { get; set; } = true;
     /// <summary>Captions on clips: what you said (transcribed from your mic, on this PC) burned into the clip.</summary>
     public bool ClipCaptions { get; set; } = true;
+    /// <summary>Record the 9:16 canvas instead of the 16:9 one, so the recording is ready for TikTok as it stands.</summary>
+    public bool RecordVertical { get; set; }
     /// <summary>Stream safety: desktop audio (and so the stream, recordings and clips) runs this far behind, so a
     /// filtered word can be muted before it goes out. Off: no delay (the slur filter can't work).</summary>
     public bool SafetyDelay { get; set; }

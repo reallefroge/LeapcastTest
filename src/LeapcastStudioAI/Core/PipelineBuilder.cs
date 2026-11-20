@@ -17,6 +17,8 @@ public sealed class PipelineRequest
 
     /// <summary>TS bus the main (horizontal) encode streams into for multistream outputs. Null = none.</summary>
     public string? MainBusPath { get; init; }
+    /// <summary>Where the 9:16 canvas's segments go, when it is being recorded (null: not recorded).</summary>
+    public string? VerticalSegmentPattern { get; init; }
     /// <summary>Vertical (9:16) canvas: composited when set; encoded to <see cref="VerticalBusPath"/> when that is set.</summary>
     public (int W, int H)? VerticalCanvas { get; init; }
     public EncodePlan? VerticalPlan { get; init; }
@@ -268,7 +270,8 @@ public static class PipelineBuilder
         int inputCount = 0;
         bool clip = r.ClipCanvas is not null && r.ClipPlan is not null && r.ClipSegmentPattern is not null;
         int CW = r.ClipCanvas?.W ?? 0, CH = r.ClipCanvas?.H ?? 0;
-        bool encoded = r.SegmentPattern is not null || r.MainBusPath is not null || r.VerticalBusPath is not null || r.ExtraEncodes.Count > 0 || clip;
+        bool encoded = r.SegmentPattern is not null || r.MainBusPath is not null || r.VerticalBusPath is not null
+                       || r.VerticalSegmentPattern is not null || r.ExtraEncodes.Count > 0 || clip;
         string shift = "setpts=PTS-" + I(r.WallclockOrigin) + "/TB,";
 
         // ---------- which sources each canvas shows ----------
@@ -578,7 +581,7 @@ public static class PipelineBuilder
         var hOuts = new List<string>(); var vOuts = new List<string>();
         bool mainEncode = r.SegmentPattern is not null || r.MainBusPath is not null;
         if (mainEncode) hOuts.Add("venc");
-        bool vertEncode = vertical && r.VerticalBusPath is not null && r.VerticalPlan is not null;
+        bool vertEncode = vertical && r.VerticalPlan is not null && (r.VerticalBusPath is not null || r.VerticalSegmentPattern is not null);
         if (vertEncode) vOuts.Add("vvenc");
         for (int e = 0; e < r.ExtraEncodes.Count; e++)
             if (r.ExtraEncodes[e].Vertical && vertical) vOuts.Add($"vxenc{e}"); else if (!r.ExtraEncodes[e].Vertical) hOuts.Add($"xenc{e}");
@@ -714,7 +717,13 @@ public static class PipelineBuilder
             args.AddRange(new[] { "-map", "[vvenc]", "-map", $"[aout{aout++}]" });
             args.AddRange(EncoderCatalog.BuildVideoArgs(r.VerticalPlan!));
             AudioArgs();
-            args.AddRange(new[] { "-flags", "+global_header", "-bsf:v", "dump_extra=freq=keyframe", "-f", "mpegts", r.VerticalBusPath! });
+            var vSlaves = new List<string>();
+            if (r.VerticalSegmentPattern is not null)
+                vSlaves.Add($"[f=segment:segment_time={r.SegmentSeconds}:segment_format=mpegts:onfail=ignore]" +
+                            TeeEscape(r.VerticalSegmentPattern.Replace('\\', '/')));
+            if (r.VerticalBusPath is not null)
+                vSlaves.Add("[f=mpegts:onfail=ignore]" + TeeEscape(r.VerticalBusPath.Replace('\\', '/')));
+            args.AddRange(new[] { "-flags", "+global_header", "-bsf:v", "dump_extra=freq=keyframe", "-f", "tee", string.Join("|", vSlaves) });
         }
         for (int e = 0; e < r.ExtraEncodes.Count; e++)
         {

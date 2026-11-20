@@ -2480,7 +2480,8 @@ public partial class MainWindow : Window
     /// <summary>Call after any change to the current scene's sources.</summary>
     // ------------------------------------------------------------------ the stream timer
 
-    private bool _timerLoading;
+    // the dock's own boxes raise their events while the XAML is still being parsed, before any of this exists
+    private bool _timerLoading = true;
 
     private void LoadTimerDock()
     {
@@ -2497,6 +2498,7 @@ public partial class MainWindow : Window
     /// <summary>The dock's own readout, four times a second.</summary>
     private void ShowTimer()
     {
+        if (TimerReadout is null || TimerStartButton is null || TimerLengthBox is null || TimerModeBox is null) return;
         var t = _state.Timer;
         TimerReadout.Text = t.Display(DateTime.UtcNow, DateTime.Now);
         TimerStartButton.Content = t.Running ? "❚❚  Pause" : "▶  Start";
@@ -2506,7 +2508,7 @@ public partial class MainWindow : Window
     /// <summary>Anything that changes the card's shape: saved, then the scene is rebuilt at the new size.</summary>
     private void TimerShape_Changed(object sender, RoutedEventArgs e)
     {
-        if (_timerLoading) return;
+        if (_timerLoading || TimerModeBox is null || TimerLengthBox is null || TimerOvertimeBox is null) return;
         var t = _state.Timer;
         t.Title = TimerTitleBox.Text;
         t.Mode = (TimerMode)Math.Max(0, TimerModeBox.SelectedIndex);

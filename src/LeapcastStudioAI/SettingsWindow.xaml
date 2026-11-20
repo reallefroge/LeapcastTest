@@ -302,6 +302,9 @@
             <CheckBox x:Name="VerticalClipsBox" Content="Save clips as 9:16 (TikTok / Shorts)"/>
             <TextBlock Text="A small camera at the top, the game big below it, blurred game behind. Only the 9:16 file is kept (off: 16:9 clips)."
                        Style="{StaticResource Hint}"/>
+            <CheckBox x:Name="RecordVerticalBox" Content="Record in 9:16 only (for TikTok)" Margin="0,8,0,0"/>
+            <TextBlock Text="Record saves the 9:16 picture instead of the widescreen one, ready to upload as it is. Clips, the stream and instant replay are unchanged. Takes effect on the next recording."
+                       Style="{StaticResource Hint}"/>
             <CheckBox x:Name="ClipCaptionsBox" Content="Captions on clips (what you say)" Margin="0,8,0,0"/>
             <TextBlock Text="Your mic is transcribed on this PC while clips can be taken; the words said during a clip are burned into it as captions."
                        Style="{StaticResource Hint}"/>

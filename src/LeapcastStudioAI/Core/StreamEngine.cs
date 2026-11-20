@@ -81,6 +81,7 @@ public sealed partial class StreamEngine : IDisposable
     private readonly string _segmentsRoot;
     /// <summary>The live 9:16 clip canvas's own recent segments (Settings → 9:16 clips).</summary>
     private readonly SegmentCache _clipCache;
+    private readonly SegmentCache _vertCache;
     private readonly CameraBridge _cameras;
     private readonly WindowCaptureBridge _windows;
     private readonly BrowserBridge _browsers;
@@ -181,7 +182,7 @@ public sealed partial class StreamEngine : IDisposable
     /// <summary>At least one multistream output is running (or reconnecting).</summary>
     public bool Live => _outputs.AnyActive;
     public bool ReplayBuffer { get; private set; }
-    public bool Recording => _cache.IsRecording;
+    public bool Recording => IsRecording;
     public bool Running => _runner is not null;
     public bool Reconnecting => _reconnectCts is not null;
     public EncodePlan? CurrentPlan { get; private set; }
@@ -300,6 +301,7 @@ public sealed partial class StreamEngine : IDisposable
         _segmentsRoot = Path.Combine(dataRoot, "cache", "segments");
         _cache = new SegmentCache(_segmentsRoot);
         _clipCache = new SegmentCache(Path.Combine(dataRoot, "cache", "clips-9x16"));
+        _vertCache = new SegmentCache(Path.Combine(dataRoot, "cache", "vertical-9x16"));
         _logDir = Path.Combine(dataRoot, "logs");
         _tempDir = Path.Combine(dataRoot, "cache", "overlays");
         _pipeDir = Path.Combine(dataRoot, "cache", "pipes");
@@ -1018,14 +1020,25 @@ public sealed partial class StreamEngine : IDisposable
 
     // ------------------------------------------------------------------ recording / replay
 
+    /// <summary>
+    /// What a recording is cut from. Normally the widescreen canvas; set to record in 9:16 it is your own vertical
+    /// canvas when you have one laid out, and otherwise the automatic TikTok layout clips use.
+    /// </summary>
+    private SegmentCache RecCache => !Settings.RecordVertical ? _cache
+        : Settings.VerticalCanvas ? _vertCache : _clipCache;
+
+    /// <summary>A recording is running, whichever canvas it is being cut from.</summary>
+    public bool IsRecording => _cache.IsRecording || _clipCache.IsRecording || _vertCache.IsRecording;
+
     public Task StartRecordingAsync() => Locked(async () =>
     {
-        if (_cache.IsRecording) return;
-        _cache.StartRecording(Settings.RecordingFolder);
+        var cache = RecCache;
+        if (cache.IsRecording) return;
+        cache.StartRecording(Settings.RecordingFolder);
         try { await ReconcileAsync(requireSuccess: true); }
         catch
         {
-            try { await _cache.StopRecordingAsync(FfmpegPath!, Path.Combine(_tempDir, "discard.mp4")); } catch { }
+            try { await cache.StopRecordingAsync(FfmpegPath!, Path.Combine(_tempDir, "discard.mp4")); } catch { }
             try { await ReconcileAsync(); } catch { }
             throw;
         }
@@ -1036,10 +1049,12 @@ public sealed partial class StreamEngine : IDisposable
         Task<string>? export = null;
         await Locked(async () =>
         {
-            if (!_cache.IsRecording) return;
+            var cache = _clipCache.IsRecording ? _clipCache : _vertCache.IsRecording ? _vertCache : _cache;
+            if (!cache.IsRecording) return;
             Directory.CreateDirectory(Settings.RecordingFolder);
-            string file = Path.Combine(Settings.RecordingFolder, $"Leapcast {DateTime.Now:yyyy-MM-dd HH-mm-ss}.mp4");
-            export = _cache.StopRecordingAsync(RequireFfmpeg(), file); // captures the range synchronously
+            string file = Path.Combine(Settings.RecordingFolder,
+                $"Leapcast {DateTime.Now:yyyy-MM-dd HH-mm-ss}{(cache == _cache ? "" : " 9x16")}.mp4");
+            export = cache.StopRecordingAsync(RequireFfmpeg(), file); // captures the range synchronously
             await ReconcileAsync();
         });
         return export is null ? "" : await export;
@@ -1287,7 +1302,7 @@ public sealed partial class StreamEngine : IDisposable
             await StopRunnerAsync();
             CloseDevices();
         });
-        if (_cache.IsRecording) { try { await StopRecordingAsync(); } catch { } }
+        if (IsRecording) { try { await StopRecordingAsync(); } catch { } }
     }
 
     // ------------------------------------------------------------------ pipeline management
@@ -1311,13 +1326,14 @@ public sealed partial class StreamEngine : IDisposable
         bool mainBus = pool.Any(o => !o.IsVertical && o.OwnBitrateKbps <= 0) || OutputBudget.MainRiders(pool).Ids.Count > 0;
         // while live, the main encode also keeps the last seconds for voice clips
         bool main = ReplayBuffer || _cache.IsRecording || mainBus || (anyOut && Settings.VoiceClipEnabled);
-        bool vEnc = vCanvas && pool.Any(o => o.IsVertical && o.OwnBitrateKbps <= 0);
+        bool vEnc = vCanvas && (pool.Any(o => o.IsVertical && o.OwnBitrateKbps <= 0) || _vertCache.IsRecording);
         string own = string.Join(",", pool.Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || vCanvas))
             .Select(o => $"{o.Id:N}:{o.OwnBitrateKbps}:{(o.IsVertical ? "v" : "h")}").OrderBy(x => x, StringComparer.Ordinal));
         bool run = PreviewOn || main || vEnc || own.Length > 0;
         // 9:16 clips are made live alongside the clip history (from the raw game and camera), not re-rendered after
-        bool clip = main && Settings.VerticalClips && ClipCanvasEnabled;
-        return new Shape(run, main, mainBus, vCanvas, vEnc, own, clip);
+        // recording in 9:16 runs the clip canvas on its own: no 16:9 encode is needed just to record for TikTok
+        bool clip = ClipCanvasEnabled && ((main && Settings.VerticalClips) || _clipCache.IsRecording);
+        return new Shape(run || clip, main, mainBus, vCanvas, vEnc, own, clip);
     }
 
     private async Task ReconcileAsync(bool requireSuccess = false)
@@ -1354,10 +1370,10 @@ public sealed partial class StreamEngine : IDisposable
 
     /// <summary>Something you started is on: a recording, a destination or the replay buffer. The app never ends
     /// these by itself; only you do.</summary>
-    private bool MustKeepRunning => _outputs.AnyActive || _cache.IsRecording || ReplayBuffer;
+    private bool MustKeepRunning => _outputs.AnyActive || IsRecording || ReplayBuffer;
 
     private string WhatsRunning() =>
-        _outputs.AnyActive && _cache.IsRecording ? "stream and recording" : _outputs.AnyActive ? "stream" : _cache.IsRecording ? "recording" : "replay buffer";
+        _outputs.AnyActive && IsRecording ? "stream and recording" : _outputs.AnyActive ? "stream" : IsRecording ? "recording" : "replay buffer";
 
     /// <summary>A line in logs\stream-health.log (why something stopped or restarted: for finding the cause later).</summary>
     private void LogEvent(string text)
@@ -1440,8 +1456,14 @@ public sealed partial class StreamEngine : IDisposable
         // (with the safety delay, encoded timestamps run that much ahead of when things happened)
         string? segPattern = shape.Main ? _cache.BeginSession(origin - safetyDelay) : null;
         string? clipPattern = shape.Clip ? _clipCache.BeginSession(origin - safetyDelay) : null;
+        string? vertPattern = shape.VerticalEncode && _vertCache.IsRecording ? _vertCache.BeginSession(origin - safetyDelay) : null;
         var clipSize = VerticalClip.OutputSize(plan.Height);
-        var clipPlan = plan with { Width = clipSize.W, Height = clipSize.H, Fps = 30, CapKbps = clipSize.W >= 1080 ? 6000 : 4500, LowLatency = false, Light = false };
+        // a clip is a short upload; a 9:16 recording is the whole session, so it keeps the stream's frame rate and room to breathe
+        bool recVertical = _clipCache.IsRecording;
+        var clipPlan = plan with { Width = clipSize.W, Height = clipSize.H,
+            Fps = recVertical ? plan.Fps : 30,
+            CapKbps = recVertical ? Math.Max(plan.CapKbps, clipSize.W >= 1080 ? 12000 : 8000) : clipSize.W >= 1080 ? 6000 : 4500,
+            LowLatency = false, Light = false };
         _stuckWarned = false;
 
         // One TS bus per encode that feeds destinations; outputs subscribe/unsubscribe at will.
@@ -1490,6 +1512,7 @@ public sealed partial class StreamEngine : IDisposable
             VerticalCanvas = shape.Vertical ? vSize : null,
             VerticalPlan = shape.Vertical ? plans.Vertical : null,
             VerticalBusPath = buses.TryGetValue("vertical", out var vb) ? vb.Path : null,
+            VerticalSegmentPattern = vertPattern,
             ExtraEncodes = extra,
             KnownSizes = new Dictionary<string, (int, int)>(_knownSizes),
             SegmentPattern = segPattern,
@@ -1775,6 +1798,7 @@ public sealed partial class StreamEngine : IDisposable
         bool encoded = _runnerShape is { } sh && (sh.Main || sh.VerticalEncode || sh.Own.Length > 0 || sh.Clip);
         if (_runnerShape?.Main == true) _cache.EndSession();
         if (_runnerShape?.Clip == true) _clipCache.EndSession();
+        if (_vertCache.HasActiveSession) _vertCache.EndSession();
         if (encoded) _audio.ClosePipes();
         _cameras.ClosePipes(); // readers stay open (warm) for the next run
         StopGpu();
@@ -1891,6 +1915,7 @@ public sealed partial class StreamEngine : IDisposable
                 if (Settings.DeathClips) keep = Math.Max(keep, (int)(DeathDetector.MaxFight + DeathDetector.BeforeFight).TotalSeconds + 10);
                 _cache.Housekeep(Math.Clamp(keep, 5, 600));
                 _clipCache.Housekeep(Math.Clamp(keep, 5, 600));
+                _vertCache.Housekeep(Math.Clamp(keep, 5, 600));
                 if (!_stuckWarned && _cache.SegmentsStuck())
                 {
                     _stuckWarned = true;
@@ -1981,7 +2006,7 @@ public sealed partial class StreamEngine : IDisposable
             useful: level => adapt && RungEffect(level) != RungEffect(before),
             // stepping up rebuilds the pipeline: freely when nothing is live; mid-stream only to a rung with the same
             // picture size (a brief pause, destinations stay connected: e.g. back from 30 to 60 FPS) after 5 calm minutes
-            mayStepUp: (!_outputs.AnyActive && !_cache.IsRecording)
+            mayStepUp: (!_outputs.AnyActive && !IsRecording)
                        || (DateTime.UtcNow - _governor.LastChange >= TimeSpan.FromMinutes(5) && SameSizeAbove()),
             adaptBitrate: Settings.AutoAdjustBitrate && _outputs.AnyActive);
 

@@ -2210,6 +2210,42 @@ Console.WriteLine("A recording is never ended by the app: an encoder that dies (
     await engine.StopAllAsync();
 }
 
+Console.WriteLine("Recording in 9:16 for TikTok: the recording is the vertical picture, not the widescreen one");
+{
+    var tok = settings.Clone();
+    tok.RecordVertical = true;
+    tok.VerticalCanvas = true;
+    await engine.UpdateAsync(new[] { light }, light, tok, false);
+    await engine.StartRecordingAsync();
+    await Task.Delay(9000);
+    bool runningVertical = engine.Recording && engine.Running;
+    string recV = await engine.StopRecordingAsync();
+    var pv = await ProbeAsync(recV);
+    string size = await RunCaptureAsync("ffprobe", new[] { "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-of", "csv=p=0", recV });
+    var wh = size.Trim().Split(',');
+    bool portrait = wh.Length == 2 && int.TryParse(wh[0], out int rw) && int.TryParse(wh[1], out int rh) && rh > rw
+                    && Math.Abs(rw / (double)rh - 9.0 / 16) < 0.02;
+    Check(runningVertical && pv.ok && pv.duration > 5 && portrait,
+        $"the recording comes out 9:16 and upload-ready ({size.Trim()}, {pv.duration:0.0}s, {pv.streams})");
+    Check(Path.GetFileName(recV).Contains("9x16"),
+        $"…and says so in its name ({Path.GetFileName(recV)})");
+    await engine.StopAllAsync();
+
+    // with the setting off it is the widescreen picture again, as before
+    await engine.UpdateAsync(new[] { light }, light, settings, false);
+    await engine.StartRecordingAsync();
+    await Task.Delay(7000);
+    string recH = await engine.StopRecordingAsync();
+    string hsize = await RunCaptureAsync("ffprobe", new[] { "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-of", "csv=p=0", recH });
+    var hw = hsize.Trim().Split(',');
+    Check(hw.Length == 2 && int.TryParse(hw[0], out int hww) && int.TryParse(hw[1], out int hhh) && hww > hhh,
+        $"with it off, recordings are widescreen as before ({hsize.Trim()})");
+    await engine.StopAllAsync();
+}
+
+
 Console.WriteLine("\nThe stream timer: counting, and the card drawn on the scene");
 await CoreTests.TimerTests.RunAsync(ffmpeg, Path.Combine(work, "timer"), Check);
 

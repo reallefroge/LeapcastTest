@@ -139,6 +139,7 @@ public partial class SettingsWindow : Window
         UpdateYouTubeSignedIn(current);
         HideFromCaptureBox.IsChecked = current.HideFromCapture;
         VerticalClipsBox.IsChecked = current.VerticalClips;
+        RecordVerticalBox.IsChecked = current.RecordVertical;
         ClipCaptionsBox.IsChecked = current.ClipCaptions;
         CaptionSpellingsBox.Text = current.CaptionSpellings ?? "";
         SafetyDelayBox.IsChecked = current.SafetyDelay;
@@ -261,6 +262,7 @@ public partial class SettingsWindow : Window
         s.YouTubeClientSecretProtected = SecretStore.Protect(YouTubeSecretBox.Password.Trim());
         s.HideFromCapture = HideFromCaptureBox.IsChecked == true;
         s.VerticalClips = VerticalClipsBox.IsChecked == true;
+        s.RecordVertical = RecordVerticalBox.IsChecked == true;
         s.ClipCaptions = ClipCaptionsBox.IsChecked == true;
         s.CaptionSpellings = CaptionSpellingsBox.Text.Trim();
         s.SafetyDelay = SafetyDelayBox.IsChecked == true;
