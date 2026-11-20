@@ -57,6 +57,8 @@ public static class TimerTests
         check(hour.Widest(t0) == "1:00:00" && mins.Widest(t0) == "10:00" && wide.W > narrow.W,
             $"timer card: sized for the longest reading it can show ({narrow.W}px for minutes, {wide.W}px once there are hours)");
 
+        PiecesMatchTheCard(check, f.Advance);
+
         // ---- it is drawn, see-through outside the plate, and the reading can be read back
         string file = Path.Combine(dir, "t.txt");
         TimerCard.Write(file, "1:23:45");
@@ -114,6 +116,45 @@ public static class TimerTests
             $"timer on a scene: sized {sl.W}x{sl.H} and anchored top-right at the 28px margin, re-read every frame " +
             $"[rect {rect.X:0},{rect.Y:0} {rect.W:0}x{rect.H:0}; shown {timerSrc.Shown}; reload {spec.FilterGraph.Contains("reload=1")}; " +
             $"warnings: {string.Join("; ", spec.Warnings)}]");
+    }
+
+    /// <summary>
+    /// The pieces handed to the in-process renderer must describe the same card the FFmpeg chain draws:
+    /// both come from one Measure, so this catches the two drifting apart.
+    /// </summary>
+    public static void PiecesMatchTheCard(Action<bool, string> check, double advance)
+    {
+        var bad = new List<string>();
+        foreach (var (style, title, widest, fs) in new[] {
+            (TimerCard.Stacked, "Subathon", "1:23:45", 64.0),
+            (TimerCard.Inline, "Break ends in", "09:58", 54.0),
+            (TimerCard.Plain, "", "2:00:00", 60.0) })
+        {
+            var L = TimerCard.Measure(style, title, widest, fs, advance);
+            var ps = TimerCard.Pieces(L, style, title, widest);
+            bool plate = ps.Any(x => x.Kind == TimerCard.PlateKind);
+            if (plate != (style != TimerCard.Plain)) bad.Add($"{style}: plate {plate}");
+            if (plate && ps.First(x => x.Kind == TimerCard.PlateKind) is { } pl
+                && (pl.W != L.W || pl.H != L.H)) bad.Add($"{style}: plate {pl.W}x{pl.H} not {L.W}x{L.H}");
+            var time = ps.LastOrDefault(x => x.Kind == TimerCard.TextKind && x.Text == widest);
+            if (time is null) { bad.Add($"{style}: no reading"); continue; }
+            if (Math.Abs(time.Size - L.TimeSize) > 0.01) bad.Add($"{style}: reading at {time.Size} not {L.TimeSize}");
+            // where the text lands, worked out the way each renderer would: it has to sit inside the card
+            double w = widest.Length * advance * time.Size * 1.06;
+            double x0 = time.AlignX switch
+            {
+                TimerCard.Anchor.Middle => time.X - w / 2,
+                TimerCard.Anchor.End => time.X - w,
+                _ => time.X,
+            };
+            if (x0 < -1 || x0 + w > L.W + 1) bad.Add($"{style}: reading spans {x0:0}..{x0 + w:0} of {L.W}");
+            double y1 = (time.AlignY == TimerCard.Anchor.Middle ? time.Y + time.Size * 0.6 : time.Y + time.Size * 1.2);
+            if (time.Y < -1 || y1 > L.H + 2) bad.Add($"{style}: reading ends at y {y1:0} of {L.H}");
+            foreach (var x in ps.Where(x => x.Kind != TimerCard.TextKind))
+                if (x.X < 0 || x.Y < 0 || x.X + x.W > L.W + 0.5 || x.Y + x.H > L.H + 0.5)
+                    bad.Add($"{style}: {x.Kind} outside the card");
+        }
+        check(bad.Count == 0, $"timer card: what the GPU canvas draws matches what FFmpeg draws{(bad.Count == 0 ? "" : ": " + string.Join("; ", bad))}");
     }
 
     private static bool SameBytes(string a, string b) => File.ReadAllBytes(a).SequenceEqual(File.ReadAllBytes(b));

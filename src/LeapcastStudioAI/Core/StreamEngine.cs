@@ -31,6 +31,11 @@ public interface IPlatformServices
 {
     /// <summary>Renders a text source to a transparent PNG sized for the output height. Null if empty.</summary>
     string? RenderText(StudioSource source, int outputHeight);
+    /// <summary>
+    /// Draws a timer card to a transparent PNG at <paramref name="path"/> (true on success). Null platforms and
+    /// those without a drawing surface return false and the card is rendered through FFmpeg instead.
+    /// </summary>
+    bool RenderTimerCard(IReadOnlyList<TimerCard.Piece> pieces, int width, int height, string fontFile, string path) => false;
     (int X, int Y, int W, int H)? MonitorBounds(int index);
     /// <summary>Handle of the visible top-level window with exactly this title (null if not open).</summary>
     long? FindWindow(string title) => null;
@@ -295,6 +300,7 @@ public sealed partial class StreamEngine : IDisposable
         _platform = platform;
         _lightTimer = new Timer(_ => AutoLightTick(), null, 1500, 1000);
         _timerTick = new Timer(_ => TimerTick(), null, 250, 250);
+        _perfTick = new Timer(_ => PerformanceTick(), null, 10_000, 10_000);
         // ffmpeg readers/writers (preview, progress, outputs) must never queue behind each other on a small pool
         ThreadPool.GetMinThreads(out int workers, out int io);
         ThreadPool.SetMinThreads(Math.Max(workers, 32), Math.Max(io, 32));
@@ -1375,6 +1381,69 @@ public sealed partial class StreamEngine : IDisposable
     private string WhatsRunning() =>
         _outputs.AnyActive && IsRecording ? "stream and recording" : _outputs.AnyActive ? "stream" : IsRecording ? "recording" : "replay buffer";
 
+    private readonly Timer _perfTick;
+    private int _perfBusy;
+    private string _perfShape = "";
+
+    /// <summary>
+    /// Every ten seconds while something is running, a line in logs\performance.log: what is being composited
+    /// and encoded, how the encoder is keeping up, CPU and memory per role, and how far behind each capture
+    /// reader is. Tuning the app's appetite without these numbers is guesswork.
+    /// </summary>
+    private void PerformanceTick()
+    {
+        if (!Running || Interlocked.Exchange(ref _perfBusy, 1) == 1) return;
+        try
+        {
+            var shape = _runnerShape;
+            var plan = CurrentPlan;
+            if (shape is null || plan is null) return;
+            // the resource monitor's CPU figures are deltas since its last call, so take the app's sample when it is fresh
+            var usage = ResourceMonitor.Recent(TimeSpan.FromSeconds(20));
+            var p = _lastProgress;
+            var canvases = new List<string> { "16:9" };
+            if (shape.Vertical) canvases.Add("9:16");
+            if (shape.Clip) canvases.Add("9:16 clip");
+            int encodes = (shape.Main ? 1 : 0) + (shape.VerticalEncode ? 1 : 0) + (shape.Clip ? 1 : 0)
+                          + (shape.Own.Length == 0 ? 0 : shape.Own.Split(',').Length);
+            string head = $"{plan.Width}x{plan.Height}@{plan.Fps} {plan.Encoder} q{plan.Quality} cap{plan.CapKbps}k";
+            string what = $"canvases={string.Join("+", canvases)} encodes={encodes} gpu={GpuStatus} preview={(PreviewOn ? "on" : "off")}" +
+                          $" outputs={_outputs.ActiveOutputs().Count()} {WhatsRunning()}";
+            if (what != _perfShape) { Perf("shape " + head + " " + what); _perfShape = what; }
+            string enc = p is null ? "encoder: no progress yet"
+                : $"encoder fps={p.Fps:0.0} speed={p.Speed:0.00}x dropped={p.DroppedFrames} duped={p.DupFrames}";
+            string cpu = string.Join(" ", usage.Select(u => $"{Role(u.Role)}={u.CpuPercent:0.0}%"));
+            string ram = string.Join(" ", usage.Select(u => $"{Role(u.Role)}={u.MemoryBytes / 1048576}M"));
+            string backlog = $"windows={_windows.MaxBacklogSeconds():0.00}s cameras={_cameras.MaxBacklogSeconds():0.00}s pages={_browsers.MaxBacklogSeconds():0.00}s";
+            Perf($"{enc} | cpu {cpu} total={usage.Sum(u => u.CpuPercent):0.0}% | ram {ram} total={usage.Sum(u => u.MemoryBytes) / 1048576}M | backlog {backlog}");
+        }
+        catch { }
+        finally { Interlocked.Exchange(ref _perfBusy, 0); }
+    }
+
+    private static string Role(string role) => role switch
+    {
+        ResourceMonitor.App => "app",
+        ResourceMonitor.Encoder => "enc",
+        ResourceMonitor.Capture => "cap",
+        ResourceMonitor.Destinations => "dest",
+        ResourceMonitor.Browser => "web",
+        _ => role.ToLowerInvariant(),
+    };
+
+    private void Perf(string text)
+    {
+        try
+        {
+            Directory.CreateDirectory(_logDir);
+            string file = Path.Combine(_logDir, "performance.log");
+            // one session's worth: trimmed when it gets long, so it stays easy to read and send
+            try { if (new FileInfo(file) is { Exists: true, Length: > 2_000_000 } f) File.Move(file, file + ".1", true); } catch { }
+            File.AppendAllText(file, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {text}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
     /// <summary>A line in logs\stream-health.log (why something stopped or restarted: for finding the cause later).</summary>
     private void LogEvent(string text)
     {
@@ -2129,6 +2198,7 @@ public sealed partial class StreamEngine : IDisposable
         _audio.Dispose();
         _lightTimer.Dispose();
         _timerTick.Dispose();
+        _perfTick.Dispose();
         _gpuPipe?.Dispose();
         _gpu?.Dispose();
         _cameras.Dispose();

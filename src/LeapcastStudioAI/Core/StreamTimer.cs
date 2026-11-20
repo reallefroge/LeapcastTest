@@ -220,6 +220,62 @@ public static class TimerCard
         return parts.Count == 0 ? "" : "," + string.Join(",", parts);
     }
 
+    /// <summary>Where a piece of the card sits: 0 = left/top, 1 = centre, 2 = right, within the card.</summary>
+    public enum Anchor { Start, Middle, End }
+
+    /// <summary>
+    /// One thing drawn on the card. A plate or bar uses X/Y/W/H; text uses X/Y as the anchor point with
+    /// <see cref="AlignX"/> and <see cref="AlignY"/> saying what X/Y mean, so a renderer that measures text
+    /// itself lands in the same place as FFmpeg's drawtext.
+    /// </summary>
+    public sealed record Piece(string Kind, double X, double Y, double W, double H, double Radius,
+        string Text, string Colour, double Alpha, double Size, Anchor AlignX, Anchor AlignY, bool Outlined);
+
+    public const string PlateKind = "plate", BarKind = "bar", TextKind = "text";
+
+    /// <summary>
+    /// The card as a list of pieces, for a renderer that draws it itself (the GPU canvas) rather than through
+    /// FFmpeg. Both come from <see cref="Measure"/>, so the two can't drift apart in size or placement.
+    /// </summary>
+    public static IReadOnlyList<Piece> Pieces(Layout L, string style, string title, string reading, string colour = "#FFFFFF")
+    {
+        string t = TitleText(title);
+        bool hasTitle = t.Length > 0;
+        var ps = new List<Piece>();
+        Piece Text(string text, double x, double y, double size, string col, Anchor ax, Anchor ay) =>
+            new(TextKind, x, y, 0, 0, 0, text, col, 1, size, ax, ay, !L.HasPlate);
+
+        if (L.HasPlate)
+            ps.Add(new Piece(PlateKind, 0, 0, L.W, L.H, Math.Min(18, L.H * 0.22), "", Hex(Plate), 0.88, 0,
+                Anchor.Start, Anchor.Start, false));
+
+        if (style == Inline && hasTitle)
+        {
+            double bar = Math.Round(L.TimeSize * 0.11), inset = Math.Round(L.H * 0.22);
+            ps.Add(new Piece(BarKind, L.Pad, inset, bar, L.H - inset * 2, 0, "", Hex(Gold), 1, 0,
+                Anchor.Start, Anchor.Start, false));
+            ps.Add(Text(t, L.Pad + bar + Math.Round(L.TimeSize * 0.26), L.H / 2.0 - 1, L.TitleSize, Hex(Gold),
+                Anchor.Start, Anchor.Middle));
+            ps.Add(Text(reading, L.W - L.Pad, L.H / 2.0, L.TimeSize, colour, Anchor.End, Anchor.Middle));
+        }
+        else if (hasTitle)
+        {
+            ps.Add(Text(t, L.W / 2.0, L.Pad, L.TitleSize, Hex(Gold), Anchor.Middle, Anchor.Start));
+            ps.Add(Text(reading, L.W / 2.0,
+                L.Pad + Math.Round(L.TitleSize * 1.40) + Math.Round(L.TimeSize * (L.HasPlate ? 0.06 : 0.02)),
+                L.TimeSize, colour, Anchor.Middle, Anchor.Start));
+        }
+        else
+            ps.Add(Text(reading, L.W / 2.0, L.H / 2.0, L.TimeSize, colour, Anchor.Middle, Anchor.Middle));
+
+        return ps;
+    }
+
+    /// <summary>FFmpeg writes colours as 0xRRGGBB; a renderer on this side wants #RRGGBB.</summary>
+    public static string Hex(string ffColour) =>
+        ffColour.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? "#" + ffColour[2..]
+        : ffColour.StartsWith('#') ? ffColour : "#" + ffColour;
+
     /// <summary>
     /// The whole card as one filter chain, applied to a transparent frame of the measured size.
     /// </summary>

@@ -163,35 +163,43 @@ public sealed partial class StreamEngine
     private GpuState? _gpuState;
 
     /// <summary>
-    /// Timer sources on the GPU canvas: the same card the encoder draws, rendered to a picture whenever the
-    /// reading changes — one small FFmpeg pass a second, and the look can't drift from the FFmpeg path.
+    /// Timer sources on the GPU canvas: the card is drawn to a picture whenever the reading changes. The
+    /// geometry comes from the same measurements the FFmpeg chain is built from, so the two can't drift apart;
+    /// FFmpeg is only used where this platform can't draw (a test host, say), since spawning it every second
+    /// to redraw a clock costs more than the clock is worth.
     /// </summary>
     private void RenderGpuTimers(IEnumerable<StudioScene> scenes)
     {
         var sources = scenes.SelectMany(sc => sc.Sources)
             .Where(s => SourceTypes.KindOf(s.Type) == SourceKind.Timer && s.Shown).ToList();
-        if (sources.Count == 0 || _gpuTimerBusy || FfmpegPath is not { } ff || TimerCard.Face() is not { } face) return;
+        if (sources.Count == 0 || _gpuTimerBusy || TimerCard.Face() is not { } face) return;
         int h = _gpu?.Height ?? 720;
         var now = DateTime.UtcNow;
         string widest = Timer.Widest(now), text = Timer.Display(now, DateTime.Now);
-        var todo = new List<(StudioSource Src, string Sig, string Png, string Chain, int W, int H)>();
+        var slow = new List<(StudioSource Src, string Sig, string Png, string Chain, int W, int H)>();
         foreach (var s in sources)
         {
             string sig = $"{text}|{widest}|{s.TimerStyle}|{s.TimerTitle}|{s.FontSize}|{s.TextColor}|{h}";
             lock (_gpuTimer) if (_gpuTimer.TryGetValue(s.Id, out var e) && e.Sig == sig) continue;
             double fs = Math.Clamp(s.FontSize, 14, 400) * h / 1080.0;
             var L = TimerCard.Measure(s.TimerStyle, s.TimerTitle, widest, fs, face.Advance);
-            string txt = TimerFile(s.Id), png = TimerFile(s.Id) + ".png";
-            try { Directory.CreateDirectory(_timerDir); TimerCard.Write(txt, text); } catch { continue; }
-            todo.Add((s, sig, png, TimerCard.Filter(L, s.TimerStyle, s.TimerTitle, face.Path, txt, FfColour(s.TextColor)), L.W, L.H));
+            string png = TimerFile(s.Id) + ".png";
+            try { Directory.CreateDirectory(_timerDir); } catch { continue; }
+            var pieces = TimerCard.Pieces(L, s.TimerStyle, s.TimerTitle, text, TimerCard.Hex(s.TextColor));
+            bool drawn = false;
+            try { drawn = _platform.RenderTimerCard(pieces, L.W, L.H, face.Path, png); } catch { }
+            if (drawn) { lock (_gpuTimer) _gpuTimer[s.Id] = (sig, png); continue; }
+            string txt = TimerFile(s.Id);
+            try { TimerCard.Write(txt, text); } catch { continue; }
+            slow.Add((s, sig, png, TimerCard.Filter(L, s.TimerStyle, s.TimerTitle, face.Path, txt, FfColour(s.TextColor)), L.W, L.H));
         }
-        if (todo.Count == 0) return;
+        if (slow.Count == 0 || FfmpegPath is not { } ff) return;
         _gpuTimerBusy = true;
         _ = Task.Run(async () =>
         {
             try
             {
-                foreach (var j in todo)
+                foreach (var j in slow)
                 {
                     string tmp = j.Png + ".tmp.png";
                     var (code, _) = await EncoderCatalog.RunQuietAsync(ff, new[] { "-y", "-v", "error",

@@ -2210,6 +2210,19 @@ Console.WriteLine("A recording is never ended by the app: an encoder that dies (
     await engine.StopAllAsync();
 }
 
+Console.WriteLine("The performance log: what to read when the app is asked to use less of the PC");
+{
+    string perf = ReadShared(Path.Combine(work, "data", "logs", "performance.log"));
+    var lines = perf.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+    var sample = lines.LastOrDefault(l => l.Contains("encoder") && l.Contains("cpu "));
+    var shape = lines.FirstOrDefault(l => l.Contains("shape "));
+    Check(sample is not null && shape is not null && sample.Contains("ram ") && sample.Contains("backlog "),
+        $"every 10 s while running, a line with the encoder, CPU, memory and capture backlog ({lines.Length} lines)");
+    Check(shape?.Contains("canvases=") == true && shape.Contains("encodes=") == true,
+        $"…and the shape it is running in, so the numbers can be read against it ({shape?.Split("shape ").LastOrDefault()})");
+}
+
+
 Console.WriteLine("Recording in 9:16 for TikTok: the recording is the vertical picture, not the widescreen one");
 {
     var tok = settings.Clone();

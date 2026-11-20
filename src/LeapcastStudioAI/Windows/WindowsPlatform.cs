@@ -21,6 +21,83 @@ public sealed class WindowsPlatform : IPlatformServices
     public IGpuCanvas? CreateGpuCanvas(int width, int height, int fps, Func<string, GpuFrame?> frames) =>
         new D3DCanvas(width, height, fps, frames);
 
+    /// <summary>
+    /// Draws a timer card here rather than spawning FFmpeg for every tick of the clock. The geometry is
+    /// <see cref="TimerCard.Pieces"/>, the same measurements the FFmpeg chain is built from, so the two agree.
+    /// </summary>
+    public bool RenderTimerCard(IReadOnlyList<TimerCard.Piece> pieces, int width, int height, string fontFile, string path)
+    {
+        if (Application.Current is not { Dispatcher: { } dispatcher } || width < 2 || height < 2) return false;
+        bool ok = false;
+        dispatcher.Invoke(() =>
+        {
+            try
+            {
+                var face = Face(fontFile);
+                var visual = new DrawingVisual();
+                using (var dc = visual.RenderOpen())
+                    foreach (var p in pieces) Draw(dc, p, face);
+                var bmp = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+                bmp.Render(visual);
+                var enc = new PngBitmapEncoder();
+                enc.Frames.Add(BitmapFrame.Create(bmp));
+                string tmp = path + ".tmp.png";
+                using (var fs = File.Create(tmp)) enc.Save(fs);
+                File.Move(tmp, path, true);   // the canvas reads this file: it must never see half of one
+                ok = true;
+            }
+            catch { ok = false; }
+        });
+        return ok;
+    }
+
+    private static void Draw(DrawingContext dc, TimerCard.Piece p, Typeface face)
+    {
+        if (p.Kind == TimerCard.TextKind)
+        {
+            var ft = new FormattedText(p.Text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, face,
+                p.Size, Brush(p.Colour, 1), 96);
+            double x = p.AlignX switch
+            {
+                TimerCard.Anchor.Middle => p.X - ft.WidthIncludingTrailingWhitespace / 2,
+                TimerCard.Anchor.End => p.X - ft.WidthIncludingTrailingWhitespace,
+                _ => p.X,
+            };
+            double y = p.AlignY == TimerCard.Anchor.Middle ? p.Y - ft.Height / 2 : p.Y;
+            if (p.Outlined)   // no plate behind it: an outline keeps it readable over anything
+            {
+                var outline = ft.BuildGeometry(new Point(x, y));
+                dc.DrawGeometry(null, new Pen(Brush(TimerCard.Hex(TimerCard.Ink), 0.9),
+                    Math.Max(2, p.Size * (p.Size > 30 ? 0.09 : 0.14))), outline);
+            }
+            dc.DrawText(ft, new Point(x, y));
+            return;
+        }
+        var brush = Brush(p.Colour, p.Alpha);
+        var rect = new Rect(p.X, p.Y, Math.Max(0, p.W), Math.Max(0, p.H));
+        if (p.Radius >= 2) dc.DrawRoundedRectangle(brush, null, rect, p.Radius, p.Radius);
+        else dc.DrawRectangle(brush, null, rect);
+    }
+
+    private static Brush Brush(string colour, double alpha)
+    {
+        Color c;
+        try { c = (Color)ColorConverter.ConvertFromString(colour); }
+        catch { c = Colors.White; }
+        var b = new SolidColorBrush(c) { Opacity = Math.Clamp(alpha, 0, 1) };
+        b.Freeze();
+        return b;
+    }
+
+    /// <summary>The same fixed-width face the FFmpeg chain draws with, found by its file name.</summary>
+    private static Typeface Face(string fontFile)
+    {
+        string name = Path.GetFileNameWithoutExtension(fontFile).ToLowerInvariant();
+        var weight = name.EndsWith("b") || name.Contains("bold") ? FontWeights.Bold : FontWeights.Normal;
+        string family = name.StartsWith("consola") ? "Consolas" : name.StartsWith("lucon") ? "Lucida Console" : "Consolas";
+        return new Typeface(new FontFamily(family), FontStyles.Normal, weight, FontStretches.Normal);
+    }
+
     public string? RenderText(StudioSource source, int outputHeight)
     {
         if (string.IsNullOrWhiteSpace(source.Text)) return null;
