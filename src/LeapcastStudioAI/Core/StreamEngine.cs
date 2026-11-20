@@ -1407,7 +1407,12 @@ public sealed partial class StreamEngine : IDisposable
             int encodes = (shape.Main ? 1 : 0) + (shape.VerticalEncode ? 1 : 0) + (shape.Clip ? 1 : 0)
                           + (shape.Own.Length == 0 ? 0 : shape.Own.Split(',').Length);
             string head = $"{plan.Width}x{plan.Height}@{plan.Fps} {plan.Encoder} q{plan.Quality} cap{plan.CapKbps}k";
-            string what = $"canvases={string.Join("+", canvases)} encodes={encodes} gpu={GpuStatus} preview={(PreviewOn ? "on" : "off")}" +
+            // scenes and sources are in here because every scene in the graph is composited every frame,
+            // whether or not it is the one on air: the cost of simply having scenes is what this measures
+            var sc = Composited();
+            int shown = sc.Sum(x => x.Sources.Count(y => y.Shown && SourceTypes.IsVideo(SourceTypes.KindOf(y.Type))));
+            string what = $"canvases={string.Join("+", canvases)} encodes={encodes} scenes={sc.Count} sources={shown}" +
+                          $" gpu={GpuStatus} preview={(PreviewOn ? "on" : "off")}" +
                           $" outputs={_outputs.ActiveOutputs().Count()} {WhatsRunning()}";
             if (what != _perfShape) { Perf("shape " + head + " " + what); _perfShape = what; }
             string enc = p is null ? "encoder: no progress yet"
