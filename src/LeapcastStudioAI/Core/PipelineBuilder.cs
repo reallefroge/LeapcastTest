@@ -954,8 +954,9 @@ public static class PipelineBuilder
                     }
                     down = $"scale_d3d11=width={tw}:height={th}:format=nv12,hwdownload,format=nv12";
                 }
+                int dFps = s.CaptureFps > 0 ? Math.Clamp(s.CaptureFps, 1, Math.Max(1, F)) : F;
                 return new InputSpec(new[] { "-thread_queue_size", "512", "-f", "lavfi", "-i",
-                    $"ddagrab=output_idx={Math.Max(0, s.MonitorIndex)}:framerate={F}:draw_mouse={mouse},{down}" }, true);
+                    $"ddagrab=output_idx={Math.Max(0, s.MonitorIndex)}:framerate={dFps}:draw_mouse={mouse},{down}" }, true);
 
             // Windows and webcams are captured by their own reader processes (WindowCaptureBridge / CameraBridge)
             // and arrive as counted pipes; reaching here means there was nothing to capture.

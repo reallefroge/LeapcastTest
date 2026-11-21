@@ -265,7 +265,10 @@ public sealed class CameraBridge : IDisposable
         foreach (var (key, (device, uses)) in cameras)
         {
             var (w, h) = NeededSize(uses, outW, outH);
-            string dev = string.Join("\u001f", device.Args), tail = $"|{fps}";
+            // the rate this camera is asked for: the highest any scene wants of it, 0 meaning the canvas rate
+            int want = uses.Select(u => u.CaptureFps).DefaultIfEmpty(0).Max();
+            int rate = want > 0 ? Math.Clamp(want, 1, Math.Max(1, fps)) : fps;
+            string dev = string.Join("\u001f", device.Args), tail = $"|{rate}";
             _readers.TryGetValue(key, out var reader);
             // resized on the canvas: a camera that's already read big enough keeps going (no reopening the device,
             // no flicker); one too small is reopened bigger, with room to grow
@@ -290,7 +293,7 @@ public sealed class CameraBridge : IDisposable
                     if (last is not null && last.Length == reader.Width * reader.Height * 3 / 2) carry = Frames.ResizeI420(last, reader.Width, reader.Height, w, h);
                     reader.Dispose();
                 }
-                reader = StartReader(ffmpeg, device, w, h, fps, sig, uses.FirstOrDefault()?.Name ?? "Camera");
+                reader = StartReader(ffmpeg, device, w, h, rate, sig, uses.FirstOrDefault()?.Name ?? "Camera");
                 lock (_readers) _readers[key] = reader;
             }
             int bytes = w * h * 3 / 2;
@@ -298,7 +301,7 @@ public sealed class CameraBridge : IDisposable
             var latest = reader.Snapshot();
             var blank = carry ?? (latest is not null && latest.Length == bytes ? latest : null) ?? Frames.BlankI420(w, h);
             var r = reader;
-            var pipe = new CountedFramePipe(_scratch, bytes, fps, origin, r.Snapshot, blank);
+            var pipe = new CountedFramePipe(_scratch, bytes, rate, origin, r.Snapshot, blank);
             _pipes.Add(pipe);
             result[key] = new CameraFeed(pipe.Path, w, h);
         }

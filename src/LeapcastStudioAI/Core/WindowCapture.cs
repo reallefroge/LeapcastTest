@@ -24,7 +24,7 @@ public sealed class WindowCaptureBridge : IDisposable
         public int Instance;
         public required int Width, Height, Fps;
         public required string Fill;
-        public bool Light;
+        public bool Light, Full;
         public required bool Cursor;
         public required (int L, int T, int R, int B) Crop;
         public Process? Proc;
@@ -113,7 +113,8 @@ public sealed class WindowCaptureBridge : IDisposable
     private static bool SameShape(int w1, int h1, int w2, int h2) => Math.Abs(w1 / (double)h1 - w2 / (double)h2) < 0.03 * (w2 / (double)h2);
 
     /// <summary>What a window source needs from its reader for one pipeline run.</summary>
-    public sealed record Need(StudioSource Source, int Width, int Height, string Fill, bool Light = false);
+    /// <param name="Fps">Frames a second for this window; 0 follows the canvas.</param>
+    public sealed record Need(StudioSource Source, int Width, int Height, string Fill, bool Light = false, int Fps = 0, bool Full = false);
 
     /// <summary>Keeps a reader per window (restarting only those whose needs changed) and returns fresh pipes.</summary>
     public Dictionary<string, WindowFeed> Open(string ffmpeg, IReadOnlyDictionary<string, Need> needs, int fps, double origin)
@@ -128,7 +129,8 @@ public sealed class WindowCaptureBridge : IDisposable
             {
                 var s = need.Source;
                 var crop = (Math.Max(0, s.CropLeft), Math.Max(0, s.CropTop), Math.Max(0, s.CropRight), Math.Max(0, s.CropBottom));
-                string what = $"{s.WindowTitle.Trim()}#{s.WindowInstance}|{need.Fill}|{fps}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}|{need.Light}";
+                int rate = need.Fps > 0 ? Math.Clamp(need.Fps, 1, Math.Max(1, fps)) : fps;
+                string what = $"{s.WindowTitle.Trim()}#{s.WindowInstance}|{need.Fill}|{rate}|{s.CaptureCursor}|{crop}|{s.CaptureMethod}|{need.Light}";
                 int nw = need.Width, nh = need.Height;
                 _readers.TryGetValue(key, out var reader);
                 // resized on the canvas: a reader that's already big enough keeps going (the pipeline scales it
@@ -156,7 +158,7 @@ public sealed class WindowCaptureBridge : IDisposable
                     reader = new Reader
                     {
                         Key = key, Title = s.WindowTitle.Trim(), Instance = Math.Max(0, s.WindowInstance), Name = s.Name, Signature = sig, Width = nw, Height = nh,
-                        Fill = need.Fill, Fps = fps, Cursor = s.CaptureCursor, Crop = crop, Light = need.Light,
+                        Fill = need.Fill, Fps = rate, Cursor = s.CaptureCursor, Crop = crop, Light = need.Light, Full = need.Full,
                     };
                     reader.UsedGpu = GpuCapture && !string.Equals(s.CaptureMethod, "GDI", StringComparison.OrdinalIgnoreCase);
                     _readers[key] = reader;
@@ -195,8 +197,16 @@ public sealed class WindowCaptureBridge : IDisposable
                 string cap = $"gfxcapture=hwnd={hwnd}:max_framerate={r.Fps}:capture_cursor={(r.Cursor ? 1 : 0)}";
                 if (r.UsedGpuScale && r.Client is { } c)
                 {
-                    // crop + scale + colour conversion on the GPU: only a finished NV12 picture is downloaded
-                    var cut = PlanGpuCut(c.W, c.H, r.Crop, r.Fill, r.Width, r.Height);
+                    // crop + scale + colour conversion on the GPU: only a finished NV12 picture is downloaded.
+                    // At full quality nothing is shrunk here: the window arrives at its own size and the canvas
+                    // does the one scale, which is sharper when the picture is zoomed or cropped into later.
+                    int tw = r.Width, th = r.Height;
+                    if (r.Full)
+                    {
+                        tw = Math.Max(2, c.W - r.Crop.L - r.Crop.R);
+                        th = Math.Max(2, c.H - r.Crop.T - r.Crop.B);
+                    }
+                    var cut = PlanGpuCut(c.W, c.H, r.Crop, r.Fill, tw, th);
                     input = new InputSpec(new[] { "-f", "lavfi", "-i",
                         $"{cap}:crop_left={cut.L}:crop_top={cut.T}:crop_right={cut.R}:crop_bottom={cut.B}," +
                         $"scale_d3d11=width={cut.ScaleW}:height={cut.ScaleH}:format=nv12,hwdownload,format=nv12" }, false);

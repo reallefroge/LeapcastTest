@@ -35,6 +35,13 @@ if (args.Length > 0 && args[0] == "--au")
     VodTests.Learning((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
     return af == 0 ? 0 : 1;
 }
+// quick mode: per-source capture rates
+if (args.Length > 0 && args[0] == "--fpstest")
+{
+    int rateFails = 0;
+    CoreTests.FpsTests.Run((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) rateFails++; });
+    return rateFails == 0 ? 0 : 1;
+}
 // quick mode: the canvas choice
 if (args.Length > 0 && args[0] == "--canvastest")
 {
@@ -2235,6 +2242,9 @@ Console.WriteLine("A recording is never ended by the app: an encoder that dies (
         "each stop is written to stream-health.log with its reason, and the dead run's FFmpeg log is kept (ffmpeg-crash.log)");
     await engine.StopAllAsync();
 }
+
+Console.WriteLine("Each source's own capture rate, and game capture");
+CoreTests.FpsTests.Run(Check);
 
 Console.WriteLine("Which canvases run: widescreen, 9:16 on its own, or both");
 await CoreTests.CanvasTests.RunAsync(ffmpeg, Path.Combine(work, "canvas"), Check);

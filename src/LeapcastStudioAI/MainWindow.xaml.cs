@@ -2803,6 +2803,8 @@ public partial class MainWindow : Window
         var source = new StudioSource { Type = picker.SelectedType, Name = picker.NewSourceName ?? SourcePickerWindow.DefaultName(picker.SelectedType) };
         if (source.Type == SourceTypes.DesktopAudio) source.NoiseCleanup = false;
         if (source.Type == SourceTypes.Browser) { source.Anchor = Anchors.TopRight; source.SizePercent = 0; }
+        // a game fills the canvas and nobody wants the mouse pointer drawn over it
+        if (source.Type == SourceTypes.Game) { source.Anchor = Anchors.Fill; source.CaptureCursor = false; }
 
         var props = new SourcePropertiesWindow(source, _engine.FfmpegPath) { Owner = this };
         if (props.ShowDialog() != true) return;

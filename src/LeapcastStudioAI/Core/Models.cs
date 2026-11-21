@@ -11,6 +11,8 @@ public static class SourceTypes
 {
     public const string Display = "Display Capture";
     public const string Window = "Window Capture";
+    /// <summary>A game's window through Windows' own graphics capture: works with fullscreen DirectX games.</summary>
+    public const string Game = "Game Capture";
     public const string Camera = "Video Capture Device";
     public const string Image = "Image";
     public const string Text = "Text";
@@ -23,12 +25,14 @@ public static class SourceTypes
     public const string Folder = "Folder";
 
     /// <summary>Types offered in the "Add source" picker.</summary>
-    public static readonly string[] Pickable = { Window, Display, Camera, Browser, Image, Text, Timer, Microphone, DesktopAudio, Folder };
+    public static readonly string[] Pickable = { Game, Window, Display, Camera, Browser, Image, Text, Timer, Microphone, DesktopAudio, Folder };
 
     public static SourceKind KindOf(string? type) => type switch
     {
         Display => SourceKind.Display,
-        "Game Capture" => SourceKind.Display, // older saved scenes: display capture is the efficient GPU path
+        // A game is captured as its window; scenes saved before this type existed are moved over on load
+        // (one that named no window becomes Display Capture, which is what it used to mean).
+        Game => SourceKind.Window,
         Window => SourceKind.Window,
         Camera => SourceKind.Camera,
         Image => SourceKind.Image,
@@ -138,6 +142,13 @@ public sealed class StudioSource
     public int MonitorIndex { get; set; }
     /// <summary>"Auto" = GPU desktop duplication (fast, works with fullscreen games); "GDI" = legacy compatible capture.</summary>
     public string CaptureMethod { get; set; } = "Auto";
+    /// <summary>
+    /// Frames a second to capture this source at; 0 follows the canvas. A webcam or a second game client shown
+    /// small doesn't need 60: capturing it at 30 halves a reader's work, and the canvas repeats the frame.
+    /// </summary>
+    public int CaptureFps { get; set; }
+    /// <summary>Capture at the window's own resolution and let the canvas do the one scale (sharper, costs more).</summary>
+    public bool FullQuality { get; set; }
     public string WindowTitle { get; set; } = "Wizard101";
     /// <summary>Which window with that title (several game clients share one title): 0 = the first opened, 1 = the second…</summary>
     public int WindowInstance { get; set; }
@@ -612,6 +623,14 @@ public sealed class StudioSettings
 
 public sealed class StudioState
 {
+    /// <summary>
+    /// What this file was written by, so a change in what a saved value means can be applied once and only to
+    /// the scenes that predate it. 0 is anything saved before there was a number.
+    /// </summary>
+    public int Version { get; set; }
+    /// <summary>The number <see cref="StateStore.Migrate"/> brings a file up to.</summary>
+    public const int CurrentVersion = 1;
+
     public ObservableCollection<StudioScene> Scenes { get; set; } = new();
     public StudioSettings Settings { get; set; } = new();
     /// <summary>The stream timer behind every Timer source (one clock, however many scenes show it).</summary>
@@ -650,6 +669,14 @@ public static class StateStore
     public static void Migrate(StudioState state)
     {
         var s = state.Settings;
+        // "Game Capture" used to mean screen capture; from version 1 it is a game's own window. Scenes saved
+        // before that keep what they meant, and a window title can't tell them apart: every source carries one,
+        // set or not. The file's version can, so this runs once, on files that predate the change.
+        if (state.Version < 1)
+            foreach (var src in state.Scenes.SelectMany(sc => sc.Sources))
+                if (src.Type == SourceTypes.Game)
+                    src.Type = SourceTypes.Display;
+        state.Version = StudioState.CurrentVersion;
         if (s.Outputs.Count == 0 && !string.IsNullOrEmpty(s.StreamKeyProtected))
         {
             s.Outputs.Add(new StreamOutput

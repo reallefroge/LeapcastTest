@@ -47,7 +47,7 @@
             <ComboBoxItem Content="Client 5"/>
             <ComboBoxItem Content="Client 6"/>
           </ComboBox>
-          <TextBlock Text="Works in windowed and borderless mode. For exclusive fullscreen, use Display Capture."
+          <TextBlock x:Name="WindowHint" Text="Works in windowed and borderless mode. For exclusive fullscreen, use Display Capture."
                      Style="{StaticResource Hint}"/>
         </StackPanel>
 
@@ -59,6 +59,21 @@
             <ComboBoxItem Content="GDI (compatibility, 30 FPS max)" Tag="GDI"/>
           </ComboBox>
           <CheckBox x:Name="CursorBox" Content="Show mouse cursor"/>
+          <TextBlock Text="Frames a second" Style="{StaticResource FieldLabel}"/>
+          <ComboBox x:Name="CaptureFpsBox">
+            <ComboBoxItem Content="Same as the canvas" Tag="0"/>
+            <ComboBoxItem Content="60" Tag="60"/>
+            <ComboBoxItem Content="48" Tag="48"/>
+            <ComboBoxItem Content="30" Tag="30"/>
+            <ComboBoxItem Content="24" Tag="24"/>
+            <ComboBoxItem Content="15" Tag="15"/>
+            <ComboBoxItem Content="10" Tag="10"/>
+          </ComboBox>
+          <TextBlock Text="Capture this source slower than the canvas and the canvas repeats its frames. A second game client in the corner, or anything that barely moves, costs half as much at 30 on a 60 FPS stream — the game you are playing is the one that needs 60. Never faster than the canvas."
+                     Style="{StaticResource Hint}"/>
+          <CheckBox x:Name="FullQualityBox" Content="Capture at full resolution (sharper, costs more)"/>
+          <TextBlock Text="Off, the window is shrunk to the size the canvas shows it at while still on the graphics card, which is cheaper and looks the same. On, the whole window is captured and scaled once on the canvas: worth it only if you zoom or crop into it."
+                     Style="{StaticResource Hint}"/>
           <TextBlock Text="Crop (px): left, top, right, bottom" Style="{StaticResource FieldLabel}"/>
           <UniformGrid Columns="4">
             <TextBox x:Name="CropL"/><TextBox x:Name="CropT"/><TextBox x:Name="CropR"/><TextBox x:Name="CropB"/>

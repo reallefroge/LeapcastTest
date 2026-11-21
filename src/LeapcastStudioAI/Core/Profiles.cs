@@ -158,7 +158,7 @@ public sealed class ProfileStore
 
     public static StudioState NewDefaultState()
     {
-        var initial = new StudioState();
+        var initial = new StudioState { Version = StudioState.CurrentVersion };   // new, so nothing to migrate
         var scene = new StudioScene { Name = "Wizard101" };
         scene.Sources.Add(new StudioSource { Name = "Wizard101 (screen)", Type = SourceTypes.Display });
         scene.Sources.Add(new StudioSource { Name = "Desktop audio", Type = SourceTypes.DesktopAudio, NoiseCleanup = false });

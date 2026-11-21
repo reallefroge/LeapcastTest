@@ -1731,7 +1731,7 @@ public sealed partial class StreamEngine : IDisposable
                 : new List<StudioSource>();
             foreach (var s in layers.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.WindowTitle.Trim().Length > 0))
             {
-                if (Anchors.Resolve(s) == Anchors.Fill) fill.TryAdd(PipelineBuilder.InputKey(s), new WindowCaptureBridge.Need(s, W, H, s.FillMode, plan.Light));
+                if (Anchors.Resolve(s) == Anchors.Fill) fill.TryAdd(PipelineBuilder.InputKey(s), new WindowCaptureBridge.Need(s, W, H, s.FillMode, plan.Light, s.CaptureFps, s.FullQuality));
                 else Want(s, LayoutMath.Horizontal(s, W, H, PipelineBuilder.AspectFor(s, _knownSizes)).W);
             }
             if (vertical is { } v)
@@ -1744,7 +1744,7 @@ public sealed partial class StreamEngine : IDisposable
             if (needs.ContainsKey(key)) continue;
             int ww = SmartTuner.Even((int)Math.Clamp(Math.Round(w), 64, 3840));
             int hh = SmartTuner.Even((int)Math.Clamp(Math.Round(ww / PipelineBuilder.AspectFor(src, _knownSizes)), 36, 2160));
-            needs[key] = new WindowCaptureBridge.Need(src, ww, hh, Anchors.FillFit, plan.Light);
+            needs[key] = new WindowCaptureBridge.Need(src, ww, hh, Anchors.FillFit, plan.Light, src.CaptureFps, src.FullQuality);
         }
         return needs;
     }

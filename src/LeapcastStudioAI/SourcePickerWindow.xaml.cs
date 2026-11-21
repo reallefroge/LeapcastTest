@@ -15,6 +15,7 @@ public partial class SourcePickerWindow : Window
 
     private static readonly Choice[] Choices =
     {
+        new(SourceTypes.Game, "A game, through Windows' own graphics capture: works in fullscreen and borderless, with its own frame rate."),
         new(SourceTypes.Window, "A single window, such as Wizard101."),
         new(SourceTypes.Display, "An entire monitor. Use for exclusive fullscreen games."),
         new(SourceTypes.Camera, "Webcam or capture card."),
@@ -55,6 +56,7 @@ public partial class SourcePickerWindow : Window
     /// <summary>The usual name of a new source of this type.</summary>
     public static string DefaultName(string type) => type switch
     {
+        SourceTypes.Game => "Game",
         SourceTypes.Camera => "Webcam",
         SourceTypes.Timer => "Timer",
         SourceTypes.Window => "Wizard101 window",

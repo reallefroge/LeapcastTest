@@ -54,6 +54,12 @@ public partial class SourcePropertiesWindow : Window
         SelectTag(MonitorBox, Math.Clamp(source.MonitorIndex, 0, MonitorBox.Items.Count - 1).ToString(CultureInfo.InvariantCulture));
         SelectTag(MethodBox, source.CaptureMethod == "GDI" ? "GDI" : "Auto");
         CursorBox.IsChecked = source.CaptureCursor;
+        if (source.Type == SourceTypes.Game)
+            WindowHint.Text = "Pick the game's window. Windows' own graphics capture is used, which works in " +
+                              "windowed, borderless and fullscreen, and leaves the game's own frame rate alone.";
+        FullQualityBox.IsChecked = source.FullQuality;
+        CaptureFpsBox.SelectedIndex = Math.Max(0, CaptureFpsBox.Items.Cast<ComboBoxItem>()
+            .ToList().FindIndex(i => (string)i.Tag == source.CaptureFps.ToString(CultureInfo.InvariantCulture)));
         CropL.Text = source.CropLeft.ToString(CultureInfo.InvariantCulture);
         CropT.Text = source.CropTop.ToString(CultureInfo.InvariantCulture);
         CropR.Text = source.CropRight.ToString(CultureInfo.InvariantCulture);
@@ -222,6 +228,9 @@ public partial class SourcePropertiesWindow : Window
         s.MonitorIndex = Int(TagOf(MonitorBox, "0"), 0, 0, 16);
         s.CaptureMethod = TagOf(MethodBox, "Auto");
         s.CaptureCursor = CursorBox.IsChecked == true;
+        s.FullQuality = FullQualityBox.IsChecked == true;
+        s.CaptureFps = int.TryParse((string?)(CaptureFpsBox.SelectedItem as ComboBoxItem)?.Tag,
+            NumberStyles.Integer, CultureInfo.InvariantCulture, out int cfps) ? cfps : 0;
         s.CropLeft = Int(CropL.Text, 0, 0, 8000);
         s.CropTop = Int(CropT.Text, 0, 0, 8000);
         s.CropRight = Int(CropR.Text, 0, 0, 8000);
