@@ -1079,7 +1079,7 @@ public partial class MainWindow : Window
         _shownPlan = key;
         PlanTitle.Text = $"{plan.Width} × {plan.Height}  ·  {plan.Fps} FPS";
         PlanSubtitle.Text = $"{EncoderCatalog.DisplayName(plan.Encoder)} · {(plan.Cbr ? "constant" : "smart")} bitrate up to {plan.CapKbps} kbps · {plan.ProfileName}";
-        bool vertical = _state.Settings.VerticalCanvas && plans.Vertical is not null;
+        bool vertical = _state.Settings.VerticalCanvas && !_engine.VerticalOnly && plans.Vertical is not null;
         VerticalPlanText.Visibility = vertical ? Visibility.Visible : Visibility.Collapsed;
         if (vertical) VerticalPlanText.Text = $"Vertical: {plans.Vertical!.Width} × {plans.Vertical.Height} up to {plans.Vertical.CapKbps} kbps";
         var rung = _engine.Performance;
@@ -1111,7 +1111,11 @@ public partial class MainWindow : Window
         VCanvasHost.Width = _vCanvas.W; VCanvasHost.Height = _vCanvas.H;
         HorizontalCaption.Text = $"{(_studio ? "PROGRAM" : "HORIZONTAL")} · {_hCanvas.W}×{_hCanvas.H}";
         VerticalCaption.Text = $"VERTICAL · {_vCanvas.W}×{_vCanvas.H}";
-        bool vOn = _state.Settings.VerticalCanvas && !_studio; // studio mode needs the room (the vertical stream keeps running)
+        // with 9:16 on its own there is one picture: the program pane is it, and it edits the 9:16 positions
+        bool only = _engine.VerticalOnly;
+        _hEditor.Kind = only ? CanvasKind.Vertical : CanvasKind.Horizontal;
+        HorizontalCaption.Text = only ? $"PROGRAM · 9:16 · {_hCanvas.W}×{_hCanvas.H}" : HorizontalCaption.Text;
+        bool vOn = _state.Settings.VerticalCanvas && !only && !_studio; // studio mode needs the room (the vertical stream keeps running)
         VerticalPanel.Visibility = vOn ? Visibility.Visible : Visibility.Collapsed;
         VerticalColumn.Width = vOn ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
         VerticalToggle.IsChecked = vOn;
@@ -1124,7 +1128,7 @@ public partial class MainWindow : Window
     {
         _hEditor.Redraw();
         _sEditor.Redraw();
-        if (_state.Settings.VerticalCanvas) _vEditor.Redraw();
+        if (_state.Settings.VerticalCanvas && !_engine.VerticalOnly) _vEditor.Redraw();
     }
 
     // ------------------------------------------------------------------ fullscreen preview (right-click the preview)
@@ -1981,6 +1985,8 @@ public partial class MainWindow : Window
             if (answer != MessageBoxResult.Yes) { VerticalToggle.IsChecked = !on; return; }
         }
         _state.Settings.VerticalCanvas = on;
+        // this toggle is the second canvas beside the widescreen one; 9:16 on its own is chosen in settings
+        if (!on) _state.Settings.VerticalOnly = false;
         Save();
         UpdateCanvasLayout();
         _shownPlan = null;

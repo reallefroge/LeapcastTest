@@ -1026,11 +1026,14 @@ public sealed partial class StreamEngine : IDisposable
 
     // ------------------------------------------------------------------ recording / replay
 
+    /// <summary>The 9:16 picture has replaced the widescreen one: it is the program, the preview and the recording.</summary>
+    public bool VerticalOnly => Settings.VerticalCanvas && Settings.VerticalOnly;
+
     /// <summary>
     /// What a recording is cut from. Normally the widescreen canvas; set to record in 9:16 it is your own vertical
     /// canvas when you have one laid out, and otherwise the automatic TikTok layout clips use.
     /// </summary>
-    private SegmentCache RecCache => !Settings.RecordVertical ? _cache
+    private SegmentCache RecCache => !Settings.RecordVertical || VerticalOnly ? _cache
         : Settings.VerticalCanvas ? _vertCache : _clipCache;
 
     /// <summary>A recording is running, whichever canvas it is being cut from.</summary>
@@ -1151,7 +1154,8 @@ public sealed partial class StreamEngine : IDisposable
     }
 
     /// <summary>The live 9:16 clip canvas is running: <see cref="SaveClipAsync"/> can cut a 9:16 clip straight away.</summary>
-    public bool CanClipVertical => _runnerShape?.Clip == true && _runner is not null && _clipCache.HasActiveSession;
+    public bool CanClipVertical => VerticalOnly ? _cache.HasActiveSession
+        : _runnerShape?.Clip == true && _runner is not null && _clipCache.HasActiveSession;
 
     /// <summary>Off: 9:16 clips are rendered from the 16:9 clip after it's saved (tests, or a GPU out of encoder sessions).</summary>
     public bool ClipCanvasEnabled { get; set; } = true;
@@ -1163,6 +1167,9 @@ public sealed partial class StreamEngine : IDisposable
     public async Task<(string Path, bool Vertical)> SaveClipAsync(int seconds, string folder, bool vertical, DateTime? endUtc = null, string? label = null,
         CancellationToken ct = default)
     {
+        // the programme is already 9:16, so a clip of it is a 9:16 clip
+        if (vertical && VerticalOnly && _cache.HasActiveSession)
+            return (await SaveClipAsync(seconds, folder, ct, endUtc, label), true);
         if (vertical && CanClipVertical)
         {
             try { return (await SaveClipFromAsync(_clipCache, seconds, folder, ct, endUtc, label), true); }
@@ -1328,17 +1335,19 @@ public sealed partial class StreamEngine : IDisposable
     {
         bool anyOut = _outputs.AnyActive;
         var pool = anyOut ? Pool(Settings) : new List<StreamOutput>();
-        bool vCanvas = Settings.VerticalCanvas || _outputs.ActiveOutputs().Any(o => o.IsVertical);
-        bool mainBus = pool.Any(o => !o.IsVertical && o.OwnBitrateKbps <= 0) || OutputBudget.MainRiders(pool).Ids.Count > 0;
+        bool only = VerticalOnly;
+        bool vCanvas = !only && (Settings.VerticalCanvas || _outputs.ActiveOutputs().Any(o => o.IsVertical));
+        bool mainBus = pool.Any(o => (only || !o.IsVertical) && o.OwnBitrateKbps <= 0) || OutputBudget.MainRiders(pool).Ids.Count > 0;
         // while live, the main encode also keeps the last seconds for voice clips
         bool main = ReplayBuffer || _cache.IsRecording || mainBus || (anyOut && Settings.VoiceClipEnabled);
         bool vEnc = vCanvas && (pool.Any(o => o.IsVertical && o.OwnBitrateKbps <= 0) || _vertCache.IsRecording);
-        string own = string.Join(",", pool.Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || vCanvas))
-            .Select(o => $"{o.Id:N}:{o.OwnBitrateKbps}:{(o.IsVertical ? "v" : "h")}").OrderBy(x => x, StringComparer.Ordinal));
+        string own = string.Join(",", pool.Where(o => o.OwnBitrateKbps > 0 && (only || !o.IsVertical || vCanvas))
+            .Select(o => $"{o.Id:N}:{o.OwnBitrateKbps}:{(o.IsVertical && !only ? "v" : "h")}").OrderBy(x => x, StringComparer.Ordinal));
         bool run = PreviewOn || main || vEnc || own.Length > 0;
         // 9:16 clips are made live alongside the clip history (from the raw game and camera), not re-rendered after
         // recording in 9:16 runs the clip canvas on its own: no 16:9 encode is needed just to record for TikTok
-        bool clip = ClipCanvasEnabled && ((main && Settings.VerticalClips) || _clipCache.IsRecording);
+        // nothing to make a second 9:16 picture from: the programme already is one
+        bool clip = !only && ClipCanvasEnabled && ((main && Settings.VerticalClips) || _clipCache.IsRecording);
         return new Shape(run || clip, main, mainBus, vCanvas, vEnc, own, clip);
     }
 
@@ -1584,6 +1593,7 @@ public sealed partial class StreamEngine : IDisposable
             Plan = plan,
             MainBusPath = buses.TryGetValue("main", out var mb) ? mb.Path : null,
             VerticalCanvas = shape.Vertical ? vSize : null,
+            MainIsVertical = VerticalOnly,
             VerticalPlan = shape.Vertical ? plans.Vertical : null,
             VerticalBusPath = buses.TryGetValue("vertical", out var vb) ? vb.Path : null,
             VerticalSegmentPattern = vertPattern,

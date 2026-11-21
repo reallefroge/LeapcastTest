@@ -18,7 +18,11 @@ public sealed class PreviewEditor
 {
     private readonly Canvas _layer;
     private readonly FrameworkElement _viewbox;
-    private readonly CanvasKind _kind;
+    /// <summary>
+    /// Which canvas this pane edits. Not fixed at construction: when the 9:16 canvas replaces the widescreen one,
+    /// the program pane edits the 9:16 positions instead.
+    /// </summary>
+    public CanvasKind Kind { get; set; }
     private StudioSource? _drag;
     private Grip _grip;
     private enum EditMode { Move, Resize, Stretch, Crop }
@@ -58,7 +62,7 @@ public sealed class PreviewEditor
     {
         _layer = layer;
         _viewbox = viewbox;
-        _kind = kind;
+        Kind = kind;
         _layer.MouseLeftButtonDown += OnDown;
         _layer.MouseMove += OnMove;
         _layer.MouseLeftButtonUp += OnUp;
@@ -120,7 +124,7 @@ public sealed class PreviewEditor
         var scene = Scene();
         if (scene is null) return new();
         var sources = scene.Sources.ToList();
-        return _kind == CanvasKind.Horizontal
+        return Kind == CanvasKind.Horizontal
             ? PipelineBuilder.VisibleLayers(sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList()
             : PipelineBuilder.VerticalLayers(sources);
     }
@@ -128,7 +132,7 @@ public sealed class PreviewEditor
     public LayoutRect RectOf(StudioSource s, IReadOnlyList<StudioSource>? layers = null)
     {
         var (cw, ch) = CanvasSize();
-        if (_kind == CanvasKind.Horizontal)
+        if (Kind == CanvasKind.Horizontal)
         {
             layers ??= Layers();
             if (LayoutMath.IsBaseLayer(s, layers)) return LayoutMath.FillRect(s, cw, ch, Aspect(s));
@@ -241,7 +245,7 @@ public sealed class PreviewEditor
         foreach (var (m, start) in _group)
         {
             MakeFree(m, start);
-            if (_kind == CanvasKind.Horizontal) { m.X = (start.X + dx) / cw; m.Y = (start.Y + dy) / ch; }
+            if (Kind == CanvasKind.Horizontal) { m.X = (start.X + dx) / cw; m.Y = (start.Y + dy) / ch; }
             else { m.VX = (start.X + dx) / cw; m.VY = (start.Y + dy) / ch; }
         }
     }
@@ -266,7 +270,7 @@ public sealed class PreviewEditor
     {
         var _startRect = at;
         var (cw, ch) = CanvasSize();
-        if (_kind == CanvasKind.Horizontal)
+        if (Kind == CanvasKind.Horizontal)
         {
             if (Anchors.Resolve(s) == Anchors.Free) return;
             var k = SourceTypes.KindOf(s.Type);
@@ -288,13 +292,13 @@ public sealed class PreviewEditor
         }
     }
 
-    private bool Stretched(StudioSource s) => _kind == CanvasKind.Horizontal ? s.H > 0 && s.W > 0 : s.VH > 0;
+    private bool Stretched(StudioSource s) => Kind == CanvasKind.Horizontal ? s.H > 0 && s.W > 0 : s.VH > 0;
 
     /// <summary>Writes a rectangle back to the source (free placement); the height only when it's stretched.</summary>
     private void Place(StudioSource s, LayoutRect r, bool stretched)
     {
         var (cw, ch) = CanvasSize();
-        if (_kind == CanvasKind.Horizontal) { s.X = r.X / cw; s.Y = r.Y / ch; s.W = r.W / cw; s.H = stretched ? r.H / ch : 0; }
+        if (Kind == CanvasKind.Horizontal) { s.X = r.X / cw; s.Y = r.Y / ch; s.W = r.W / cw; s.H = stretched ? r.H / ch : 0; }
         else { s.VX = r.X / cw; s.VY = r.Y / ch; s.VW = r.W / cw; s.VH = stretched ? r.H / ch : 0; }
     }
 
@@ -335,14 +339,14 @@ public sealed class PreviewEditor
                 }
             }
             // a full-screen source stays full-screen while it's cropped (the rest of the picture refills the canvas)
-            if (_group is null && !(_mode == EditMode.Crop && _kind == CanvasKind.Horizontal && Anchors.Resolve(_drag) == Anchors.Fill)) MakeFree(_drag);
+            if (_group is null && !(_mode == EditMode.Crop && Kind == CanvasKind.Horizontal && Anchors.Resolve(_drag) == Anchors.Fill)) MakeFree(_drag);
         }
         bool snap = (Keyboard.Modifiers & ModifierKeys.Shift) == 0;
         if (_mode == EditMode.Crop)
         {
             var (crop, r) = LayoutMath.CropDrag(_startRect, _grip, p.X, p.Y, _startCrop, _sourcePixels!.Value);
             (_drag.CropLeft, _drag.CropTop, _drag.CropRight, _drag.CropBottom) = crop;
-            bool fill = _kind == CanvasKind.Horizontal && Anchors.Resolve(_drag) == Anchors.Fill;
+            bool fill = Kind == CanvasKind.Horizontal && Anchors.Resolve(_drag) == Anchors.Fill;
             if (!fill) Place(_drag, r, Stretched(_drag));
             Hint?.Invoke($"Cropping {_drag.Name}: left {crop.L}, top {crop.T}, right {crop.R}, bottom {crop.B} px (applies when you let go).");
             _changedSize = true;
@@ -361,7 +365,7 @@ public sealed class PreviewEditor
             var r = new LayoutRect(x, y, _startRect.W, _startRect.H);
             if (snap) (x, y) = LayoutMath.Snap(r, cw, ch, 12 / Scale);
             if (_group is not null) PlaceGroup(x, y);
-            else if (_kind == CanvasKind.Horizontal) { _drag.X = x / cw; _drag.Y = y / ch; }
+            else if (Kind == CanvasKind.Horizontal) { _drag.X = x / cw; _drag.Y = y / ch; }
             else { _drag.VX = x / cw; _drag.VY = y / ch; }
             Moving?.Invoke();
         }
@@ -388,9 +392,9 @@ public sealed class PreviewEditor
     {
         var p = e.GetPosition(_layer);
         var hit = HitTest(p, Layers());
-        if (hit is null) { BackgroundMenuRequested?.Invoke(_kind); e.Handled = true; return; }
+        if (hit is null) { BackgroundMenuRequested?.Invoke(Kind); e.Handled = true; return; }
         if (!ReferenceEquals(hit, Selected)) { Selected = hit; SelectionChanged?.Invoke(hit); Redraw(); }
-        ContextMenuRequested?.Invoke(hit, _kind);
+        ContextMenuRequested?.Invoke(hit, Kind);
         e.Handled = true;
     }
 
@@ -414,7 +418,7 @@ public sealed class PreviewEditor
         var (cw, ch) = CanvasSize();
         _startRect = RectOf(s);
         MakeFree(s);
-        if (_kind == CanvasKind.Horizontal) { s.X += dx / (double)cw; s.Y += dy / (double)ch; }
+        if (Kind == CanvasKind.Horizontal) { s.X += dx / (double)cw; s.Y += dy / (double)ch; }
         else { s.VX += dx / (double)cw; s.VY += dy / (double)ch; }
         Redraw();
         Moving?.Invoke();

@@ -94,8 +94,13 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <Border Style="{StaticResource Card}" Margin="0,4,8,0">
             <StackPanel>
-            <TextBlock Text="VERTICAL CANVAS" Style="{StaticResource SectionHeader}"/>
-            <CheckBox x:Name="VerticalBox" Content="Enable 9:16 canvas" Click="AnyChanged"/>
+            <TextBlock Text="CANVAS" Style="{StaticResource SectionHeader}"/>
+            <TextBlock Text="What you stream and record" Style="{StaticResource FieldLabel}"/>
+            <RadioButton x:Name="CanvasWideBox" GroupName="CanvasShape" Content="Widescreen 16:9 only" Click="AnyChanged"/>
+            <RadioButton x:Name="CanvasVerticalBox" GroupName="CanvasShape" Content="Vertical 9:16 only (TikTok, Shorts, Reels)" Margin="0,4,0,0" Click="AnyChanged"/>
+            <RadioButton x:Name="CanvasBothBox" GroupName="CanvasShape" Content="Both, side by side" Margin="0,4,0,0" Click="AnyChanged"/>
+            <TextBlock Text="9:16 only replaces the widescreen picture everywhere — the preview, the stream, recordings and clips are all 9:16, and no widescreen canvas is built. Both keeps the two beside each other, each with its own destinations."
+                       Style="{StaticResource Hint}"/>
             <TextBlock Text="Vertical resolution" Style="{StaticResource FieldLabel}"/>
             <ComboBox x:Name="VerticalResBox" SelectionChanged="AnyChanged">
               <ComboBoxItem Content="720 × 1280 (recommended)" Tag="720x1280"/>

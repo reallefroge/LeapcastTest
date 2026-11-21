@@ -258,20 +258,28 @@ public static class OutputBudget
     public static PlanSet Resolve(StudioSettings s, IReadOnlyList<StreamOutput> pool, bool verticalCanvas,
         IReadOnlyList<ProbedEncoder> encoders, int cpuThreads, double scale = 1.0)
     {
-        var hShared = pool.Where(o => !o.IsVertical && o.OwnBitrateKbps <= 0).ToList();
-        var vShared = verticalCanvas ? pool.Where(o => o.IsVertical && o.OwnBitrateKbps <= 0).ToList() : new List<StreamOutput>();
+        // with the 9:16 canvas on its own there is one picture, so "vertical" destinations are just destinations
+        bool only = s.VerticalOnly && verticalCanvas;
+        var hShared = pool.Where(o => (only || !o.IsVertical) && o.OwnBitrateKbps <= 0).ToList();
+        var vShared = verticalCanvas && !only ? pool.Where(o => o.IsVertical && o.OwnBitrateKbps <= 0).ToList() : new List<StreamOutput>();
         var riders = MainRiders(pool);
         var riding = pool.Where(o => riders.Ids.Contains(o.Id)).ToList();
-        var own = pool.Where(o => o.OwnBitrateKbps > 0 && (!o.IsVertical || verticalCanvas) && !riders.Ids.Contains(o.Id)).ToList();
+        var own = pool.Where(o => o.OwnBitrateKbps > 0 && (only || !o.IsVertical || verticalCanvas) && !riders.Ids.Contains(o.Id)).ToList();
         int audio = Math.Clamp(s.AudioBitrateKbps, 64, 320);
 
         // The strictest horizontal service sets the main cap (e.g. Twitch 6000 while also on YouTube).
         string platform = hShared.Count > 0
             ? hShared.OrderBy(o => Platforms.Get(o.Service).MaxKbps).First().Service
-            : (s.Outputs.FirstOrDefault(o => !o.IsVertical)?.Service ?? s.Platform);
+            : (s.Outputs.FirstOrDefault(o => only || !o.IsVertical)?.Service ?? s.Platform);
         var tuned = s.Clone();
         tuned.Platform = platform;
         var main = SmartTuner.Resolve(tuned, encoders, cpuThreads);
+        if (only)
+        {
+            var (ow, oh) = LayoutMath.VerticalSize(s.VerticalResolution);
+            main = main with { Width = ow, Height = oh,
+                Reasons = main.Reasons.Append($"9:16 only: the whole show is {ow}x{oh}.").ToList() };
+        }
         if (riding.Count > 0)
         {
             main = main with { CapKbps = Math.Clamp(riders.Kbps, 500, 50000) };
@@ -291,7 +299,7 @@ public static class OutputBudget
         }
 
         EncodePlan? vertical = null;
-        if (verticalCanvas)
+        if (verticalCanvas && !only)
         {
             var (vw, vh) = LayoutMath.VerticalSize(s.VerticalResolution);
             int platformCap = vShared.Count > 0 ? vShared.Min(o => Platforms.Get(o.Service).MaxKbps) : 6000;

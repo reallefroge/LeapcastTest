@@ -65,7 +65,7 @@ public partial class SettingsWindow : Window
         var locked = new FrameworkElement[]
         {
             ContentBox, ProfileBox, ResolutionBox, FrameRateBox, BitrateBox, EncoderBox, PresetBox, RateBox, AudioBox, LowLatencyBox,
-            VerticalBox, VerticalResBox, VerticalBitrateBox, UploadBox, TestButton, VerticalClipsBox, InstantSwitchBox,
+            CanvasWideBox, CanvasVerticalBox, CanvasBothBox, VerticalResBox, VerticalBitrateBox, UploadBox, TestButton, VerticalClipsBox, InstantSwitchBox,
             SafetyDelayBox, SafetyDelaySecondsBox, FilterMicBox,
         };
         var bannered = new HashSet<Panel>();
@@ -178,7 +178,9 @@ public partial class SettingsWindow : Window
         AdjustBox.IsChecked = current.AutoAdjustBitrate;
         AdaptBox.IsChecked = current.AdaptivePerformance;
         FfmpegBox.Text = current.FfmpegPath;
-        VerticalBox.IsChecked = current.VerticalCanvas;
+        CanvasVerticalBox.IsChecked = current.VerticalCanvas && current.VerticalOnly;
+        CanvasBothBox.IsChecked = current.VerticalCanvas && !current.VerticalOnly;
+        CanvasWideBox.IsChecked = !current.VerticalCanvas;
         VerticalBitrateBox.Text = current.VerticalBitrateKbps.ToString(CultureInfo.InvariantCulture);
         SelectTag(VerticalResBox, current.VerticalResolution.Replace(" ", "").Replace("×", "x"));
 
@@ -298,7 +300,8 @@ public partial class SettingsWindow : Window
         s.AutoAdjustBitrate = AdjustBox.IsChecked == true;
         s.AdaptivePerformance = AdaptBox.IsChecked == true;
         s.FfmpegPath = FfmpegBox.Text.Trim();
-        s.VerticalCanvas = VerticalBox.IsChecked == true;
+        s.VerticalCanvas = CanvasVerticalBox.IsChecked == true || CanvasBothBox.IsChecked == true;
+        s.VerticalOnly = CanvasVerticalBox.IsChecked == true;
         s.VerticalBitrateKbps = int.TryParse(VerticalBitrateBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vbr) && vbr > 0 ? Math.Clamp(vbr, 500, 20000) : 0;
         s.VerticalResolution = TagOf(VerticalResBox, "720x1280");
         return s;
@@ -313,7 +316,7 @@ public partial class SettingsWindow : Window
     {
         CustomPanel.Visibility = TagOf(ProfileBox, "Auto") == "Custom" ? Visibility.Visible : Visibility.Collapsed;
         var plans = _engine.PlansFor(Collect());
-        PlanPreview.Text = plans.Main.Summary + (plans.Vertical is not null && VerticalBox.IsChecked == true ? $"   +   vertical {plans.Vertical.Width}×{plans.Vertical.Height} ≤ {plans.Vertical.CapKbps} kbps" : "");
+        PlanPreview.Text = plans.Main.Summary + (plans.Vertical is not null && CanvasBothBox.IsChecked == true ? $"   +   vertical {plans.Vertical.Width}×{plans.Vertical.Height} ≤ {plans.Vertical.CapKbps} kbps" : "");
         PlanReasons.Text = string.Join(Environment.NewLine, plans.Main.Reasons.Select(r => "• " + r));
     }
 

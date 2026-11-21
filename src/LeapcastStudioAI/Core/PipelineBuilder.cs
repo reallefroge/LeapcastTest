@@ -21,6 +21,8 @@ public sealed class PipelineRequest
     public string? VerticalSegmentPattern { get; init; }
     /// <summary>Vertical (9:16) canvas: composited when set; encoded to <see cref="VerticalBusPath"/> when that is set.</summary>
     public (int W, int H)? VerticalCanvas { get; init; }
+    /// <summary>The program itself is the 9:16 picture: no widescreen canvas is composited at all.</summary>
+    public bool MainIsVertical { get; init; }
     public EncodePlan? VerticalPlan { get; init; }
     public string? VerticalBusPath { get; init; }
     /// <summary>Outputs with their own quality: an extra encode of a canvas at their own bitrate.</summary>
@@ -258,6 +260,7 @@ public static class PipelineBuilder
         int N = scenes.Count;
         int active = Math.Clamp(r.ActiveSceneIndex, 0, N - 1);
         bool vertical = r.VerticalCanvas is not null;
+        bool mainVertical = r.MainIsVertical;
         int VW = r.VerticalCanvas?.W ?? 0, VH = r.VerticalCanvas?.H ?? 0;
         // info level: ffmpeg reports each input's real picture size (used for exact layout); stats_period also sets
         // how often ffmpeg polls stdin for runtime commands (ffmpeg 7+: once per period).
@@ -376,7 +379,7 @@ public static class PipelineBuilder
 
         var sceneGraph = new List<string>();
         // ---------- horizontal canvas, per scene ----------
-        for (int k = 0; k < N; k++)
+        for (int k = 0; k < N && !mainVertical; k++)
         {
             var layers = hLayers[k];
             string p = $"s{k}";
@@ -417,10 +420,12 @@ public static class PipelineBuilder
             sceneGraph.Add($"[{cur}]fps={F},format=yuv420p{(staged is not null ? $",split=2[scene{k}][stg{k}]" : $"[scene{k}]")}");
         }
 
-        // ---------- vertical canvas, per scene (game over a blurred copy of itself, camera on top) ----------
-        if (vertical)
+        // ---------- the 9:16 picture, per scene (game over a blurred copy of itself, camera on top) ----------
+        // Built either as a second canvas beside the widescreen one, or — when 9:16 is the whole show — as the
+        // program itself, in which case it writes the scene labels the rest of the graph reads.
+        void VerticalScenes(int cw, int ch, string outPrefix, bool staging)
         {
-            int bw = SmartTuner.Even(Math.Max(16, VW / 4)), bh = SmartTuner.Even(Math.Max(16, VH / 4));
+            int bw = SmartTuner.Even(Math.Max(16, cw / 4)), bh = SmartTuner.Even(Math.Max(16, ch / 4));
             for (int k = 0; k < N; k++)
             {
                 var layers = vLayers[k];
@@ -432,12 +437,16 @@ public static class PipelineBuilder
                     // blur at quarter resolution: ~1/16 of the work of a full-size blur, looks the same
                     string coverName = "overlay@y" + bgGame.Id.ToString("N");
                     sceneGraph.Add($"[{Prep(InputKey(bgGame), $"{Crop(bgGame)}scale={bw}:{bh}:force_original_aspect_ratio=increase:flags=fast_bilinear," +
-                                   $"crop={bw}:{bh},boxblur=6:2,scale={VW}:{VH}:flags=bilinear,setsar=1,format=yuv420p,eq=brightness=-0.08")}]" +
-                                   $"[{ColorUse(VW, VH)}]{coverName}=eof_action=repeat:format=yuv420:enable={(bgGame.Shown ? 0 : 1)}[{p}base]");
+                                   $"crop={bw}:{bh},boxblur=6:2,scale={cw}:{ch}:flags=bilinear,setsar=1,format=yuv420p,eq=brightness=-0.08")}]" +
+                                   $"[{ColorUse(cw, ch)}]{coverName}=eof_action=repeat:format=yuv420:enable={(bgGame.Shown ? 0 : 1)}[{p}base]");
                     visibility.Add(new VisibilityStage(bgGame.Id, k, coverName, Cover: true, OnlyWhileSceneShown: false));
                 }
                 else
-                    sceneGraph.Add($"[{ColorUse(VW, VH)}]format=yuv420p[{p}base]");
+                {
+                    sceneGraph.Add($"[{ColorUse(cw, ch)}]format=yuv420p[{p}base]");
+                    if (layers.Count == 0 && N == 1)
+                        warnings.Add("No visible video source on the 9:16 canvas in this scene: streaming a blank canvas.");
+                }
                 string cur = $"{p}base";
                 for (int j = 0; j < layers.Count; j++)
                 {
@@ -445,20 +454,23 @@ public static class PipelineBuilder
                     var kind = SourceTypes.KindOf(src.Type);
                     bool alpha = SourceTypes.IsGraphic(kind);
                     double aspect = AspectFor(src, r.KnownSizes);
-                    var rect = LayoutMath.Vertical(src, VW, VH, aspect, hasCam);
+                    var rect = LayoutMath.Vertical(src, cw, ch, aspect, hasCam);
                     string pos = $"x={LayoutMath.Px(rect.X)}:y={LayoutMath.Px(rect.Y)}";
                     string name = OverlayName(src.Id, CanvasKind.Vertical);
-                    bool big = Large(rect, VW, VH);
+                    bool big = Large(rect, cw, ch);
                     if (big) sceneOverlays[k].Add(name);
                     visibility.Add(new VisibilityStage(src.Id, k, name, Cover: false, OnlyWhileSceneShown: big));
-                    string layer = Prep(InputKey(src), $"{Crop(src)}{TimerPrep(src, kind, r)}{CameraPrep(src, kind, VerticalScale(src, VW, VH))}format={AlphaFormat(alpha, kind)}");
+                    string layer = Prep(InputKey(src), $"{Crop(src)}{TimerPrep(src, kind, r)}{CameraPrep(src, kind, VerticalScale(src, cw, ch))}format={AlphaFormat(alpha, kind)}");
                     string on = !src.Shown ? ":enable=0" : big ? Enabled(k) : "";
                     sceneGraph.Add($"[{cur}][{layer}]{name}={pos}:eof_action=repeat:format=yuv420{on}[{p}c{j}]");
                     cur = $"{p}c{j}";
                 }
-                sceneGraph.Add($"[{cur}]fps={F},format=yuv420p[vscene{k}]");
+                sceneGraph.Add($"[{cur}]fps={F},format=yuv420p" +
+                    (staging && staged is not null ? $",split=2[{outPrefix}{k}][stg{k}]" : $"[{outPrefix}{k}]"));
             }
         }
+        if (mainVertical) VerticalScenes(W, H, "scene", staging: true);
+        else if (vertical) VerticalScenes(VW, VH, "vscene", staging: false);
 
         // ---------- 9:16 clip canvas, per scene: the raw game big, the raw camera small on top, blurred game behind ----------
         if (clip)
@@ -603,7 +615,9 @@ public static class PipelineBuilder
         Fan("vfinal", hOuts);
         if (vertical) Fan("vvfinal", vOuts);
 
-        int PH = r.PreviewHeight, PW = r.PreviewWidth;
+        int PH = r.PreviewHeight;
+        // a 9:16 program must not be squashed into a widescreen preview pane
+        int PW = mainVertical ? SmartTuner.Even(Math.Max(16, (int)Math.Round(PH * W / (double)H))) : r.PreviewWidth;
         int VPW = vertical ? SmartTuner.Even((int)Math.Round(PH * VW / (double)VH)) : 0;
         int SPW = staged is not null ? PW : 0;
         var gates = new List<string>();

@@ -419,7 +419,13 @@ public sealed class StudioSettings
     // Multistream outputs (replaces the single destination below, which is kept only to migrate old settings)
     public List<StreamOutput> Outputs { get; set; } = new();
     /// <summary>Second, 9:16 canvas for TikTok / Shorts / Reels outputs.</summary>
+    /// <summary>A 9:16 picture exists at all (on its own, or beside the widescreen one).</summary>
     public bool VerticalCanvas { get; set; }
+    /// <summary>
+    /// The 9:16 picture is the whole show: it replaces the widescreen one rather than running beside it, so the
+    /// preview, the stream, recordings and clips are all 9:16 and no widescreen canvas is composited at all.
+    /// </summary>
+    public bool VerticalOnly { get; set; }
     /// <summary>"720x1280" or "1080x1920".</summary>
     public string VerticalResolution { get; set; } = "720x1280";
 

@@ -35,6 +35,15 @@ if (args.Length > 0 && args[0] == "--au")
     VodTests.Learning((ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) af++; });
     return af == 0 ? 0 : 1;
 }
+// quick mode: the canvas choice
+if (args.Length > 0 && args[0] == "--canvastest")
+{
+    int cf = 0;
+    await CoreTests.CanvasTests.RunAsync(Environment.GetEnvironmentVariable("LEAPCAST_FFMPEG") ?? "ffmpeg",
+        Path.Combine(Path.GetTempPath(), "leapcast-canvas-" + Guid.NewGuid().ToString("N")[..6]),
+        (ok, what) => { Console.WriteLine((ok ? "  PASS " : "  FAIL ") + what); if (!ok) cf++; });
+    return cf == 0 ? 0 : 1;
+}
 // quick mode: scene switching on the real graph
 if (args.Length > 0 && args[0] == "--switchtest")
 {
@@ -2226,6 +2235,9 @@ Console.WriteLine("A recording is never ended by the app: an encoder that dies (
         "each stop is written to stream-health.log with its reason, and the dead run's FFmpeg log is kept (ffmpeg-crash.log)");
     await engine.StopAllAsync();
 }
+
+Console.WriteLine("Which canvases run: widescreen, 9:16 on its own, or both");
+await CoreTests.CanvasTests.RunAsync(ffmpeg, Path.Combine(work, "canvas"), Check);
 
 Console.WriteLine("Scene switching on the built graph: one crossfade however many scenes there are");
 await CoreTests.SwitchTests.RunAsync(ffmpeg, Path.Combine(work, "switch"), Check);
