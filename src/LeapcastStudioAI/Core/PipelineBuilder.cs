@@ -280,7 +280,9 @@ public static class PipelineBuilder
         // ---------- which sources each canvas shows ----------
         var hLayers = scenes.Select(sc => CompositedLayers(sc.Sources)
             .Where(s => SourceTypes.IsVideo(SourceTypes.KindOf(s.Type))).ToList()).ToList();
-        var vLayers = scenes.Select(sc => vertical ? VerticalLayers(sc.Sources, includeHidden: true) : new List<StudioSource>()).ToList();
+        // the 9:16 layers are needed whether that picture sits beside the widescreen one or has replaced it
+        var vLayers = scenes.Select(sc => vertical || mainVertical
+            ? VerticalLayers(sc.Sources, includeHidden: true) : new List<StudioSource>()).ToList();
         var visibility = new List<VisibilityStage>();
 
         // ---------- video inputs (deduplicated across scenes and canvases) ----------
@@ -316,10 +318,15 @@ public static class PipelineBuilder
             inputs[key] = (inputCount++, spec.Wallclock, new List<string>());
             return true;
         }
+        // Only open what is actually drawn. With the 9:16 canvas on its own the widescreen layers are composited
+        // nowhere, so capturing them would cost a reader, a pipe and its frames for a picture no one sees — and
+        // worse, "something live is feeding the graph" would be true of inputs that feed nothing, leaving the
+        // blank canvas unpaced and the whole graph free-running at hundreds of frames a second.
+        bool needWide = !mainVertical || clip;
         for (int k = 0; k < N; k++)
         {
-            hLayers[k] = hLayers[k].Where(Ensure).ToList();
-            vLayers[k] = vLayers[k].Where(Ensure).ToList();
+            hLayers[k] = needWide ? hLayers[k].Where(Ensure).ToList() : new List<StudioSource>();
+            vLayers[k] = mainVertical || vertical ? vLayers[k].Where(Ensure).ToList() : new List<StudioSource>();
         }
 
         string Use(string key)

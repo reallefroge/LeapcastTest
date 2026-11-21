@@ -41,13 +41,43 @@ public static class CanvasTests
         var v = Build(tall, true, null);
         check(!v.HasVertical && !v.FilterGraph.Contains("vscene") && v.FilterGraph.Contains("[scene0]"),
             "canvas: 9:16 only replaces the widescreen picture rather than adding to it");
-        bool wideScale = v.FilterGraph.Contains(":1280") || v.FilterGraph.Contains("1280:720");
+        bool wideScale = v.FilterGraph.Contains("1280:720") || v.FilterGraph.Contains("s=1280x720")
+                         || v.FilterGraph.Contains("=1280:h=720");
         check(!wideScale, $"…and nothing is composited at widescreen size{(wideScale ? " (found a 1280-wide stage)" : "")}");
 
         // the 9:16 program keeps its shape in the preview pane instead of being squashed into a widescreen one
         var tallPreview = System.Text.RegularExpressions.Regex.Match(v.FilterGraph, @"scale=(\d+):432:flags=bilinear,format=bgra\[hprev\]");
         int pw = tallPreview.Success ? int.Parse(tallPreview.Groups[1].Value) : 0;
         check(pw is > 230 and < 260, $"…and the preview pane is the same shape as the program ({pw}x432, expected about 243)");
+
+        // Only what is drawn gets opened. A widescreen-only source is captured for nothing under 9:16 only —
+        // and, worse, it would count as "something live is feeding the graph", leaving the blank canvas unpaced
+        // and the whole graph free-running at hundreds of frames a second instead of real time.
+        var wideOnly = new StudioSource { Name = "Alerts", Type = SourceTypes.Window, WindowTitle = "green",
+            Anchor = Anchors.BottomLeft, SizePercent = 20, VShow = false };
+        scene.Sources.Add(wideOnly);
+        int opened = 0;
+        InputSpec Counted(StudioSource s, double _)
+        {
+            opened++;
+            return new InputSpec(new[] { "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30" }, true);
+        }
+        opened = 0;
+        PipelineBuilder.Build(new PipelineRequest
+        {
+            Scenes = new[] { scene }, ActiveSceneIndex = 0, Preview = false, Plan = tall, IsWindows = true,
+            MainIsVertical = true, InputOverride = Counted,
+        });
+        int underVertical = opened;
+        opened = 0;
+        PipelineBuilder.Build(new PipelineRequest
+        {
+            Scenes = new[] { scene }, ActiveSceneIndex = 0, Preview = false, Plan = wide, IsWindows = true,
+            InputOverride = Counted,
+        });
+        check(underVertical < opened,
+            $"canvas: a source that is only on the widescreen canvas isn't captured under 9:16 only ({underVertical} inputs opened, {opened} when widescreen)");
+        scene.Sources.Remove(wideOnly);
 
         // it has to actually run, and what goes out has to be 9:16
         string ts = Path.Combine(dir, "vonly.ts");

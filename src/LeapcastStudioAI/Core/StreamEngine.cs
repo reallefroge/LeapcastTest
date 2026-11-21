@@ -151,7 +151,7 @@ public sealed partial class StreamEngine : IDisposable
     public bool InputThreadQueueSupported { get; private set; } = true;
     /// <summary>FFmpeg 8+ "gfxcapture" (Windows.Graphics.Capture): GPU window capture that works with DirectX games.</summary>
     public bool GpuWindowCaptureSupported { get; private set; }
-    private bool _gpuDisplayFailed, _gpuDisplayScaleFailed;
+    private bool _gpuDisplayFailed, _gpuDisplayScaleFailed, _displayGpuScale;
     private string _runnerCommand = "";
 
     /// <summary>
@@ -347,6 +347,10 @@ public sealed partial class StreamEngine : IDisposable
         var (_, d3dHelp) = await EncoderCatalog.RunQuietAsync(FfmpegPath, new[] { "-hide_banner", "-h", "filter=scale_d3d11" },
             TimeSpan.FromSeconds(10), _life.Token);
         _windows.GpuScale = GpuWindowCaptureSupported && d3dHelp.Contains("scale_d3d11 AVOptions", StringComparison.Ordinal);
+        // Screen capture scales on the GPU through its own filter chain, so it keeps its own flag: a game window
+        // the GPU scaler wouldn't take used to switch this off as well, and the whole screen was then downloaded
+        // at full size in BGRA (4 bytes a pixel, 60 times a second) for a picture the canvas shows much smaller.
+        _displayGpuScale = _windows.GpuScale;
         EncodersProbed = true;
     }
 
@@ -919,7 +923,8 @@ public sealed partial class StreamEngine : IDisposable
     {
         var req = _runnerRequest;
         int w = req?.Plan.Width ?? 1920, h = req?.Plan.Height ?? 1080;
-        return PipelineBuilder.LayoutFingerprint(scenes, w, h, req?.VerticalCanvas);
+        // under 9:16 only the programme's own positions are the 9:16 ones, so dragging there has to count
+        return PipelineBuilder.LayoutFingerprint(scenes, w, h, VerticalOnly ? (w, h) : req?.VerticalCanvas);
     }
 
     public Task SetPreviewAsync(bool on) => Locked(async () => { PreviewOn = on; await ReconcileAsync(); });
@@ -1526,15 +1531,17 @@ public sealed partial class StreamEngine : IDisposable
             if (dev is not null) camUses[key] = (dev, new List<StudioSource> { src });
         }
         var camFeeds = _cameras.Open(ffmpeg, camUses, plan.Width, plan.Height, plan.Fps, origin);
-        var winFeeds = _windows.Open(ffmpeg, WindowNeeds(plan, shape.Vertical ? vSize : null), plan.Fps, origin);
+        // with 9:16 on its own the programme is the 9:16 picture, so that is what the readers are sized for
+        (int W, int H)? readerVertical = VerticalOnly ? (plan.Width, plan.Height) : shape.Vertical ? vSize : null;
+        var winFeeds = _windows.Open(ffmpeg, WindowNeeds(plan, readerVertical), plan.Fps, origin);
         var browserUses = new Dictionary<string, StudioSource>();
-        foreach (var src in scenes.SelectMany(sc => PipelineBuilder.CompositedLayers(sc.Sources)
-                     .Concat(shape.Vertical ? PipelineBuilder.VerticalLayers(sc.Sources, includeHidden: true) : Enumerable.Empty<StudioSource>()))
+        foreach (var src in scenes.SelectMany(sc => (VerticalOnly ? Enumerable.Empty<StudioSource>() : PipelineBuilder.CompositedLayers(sc.Sources))
+                     .Concat(readerVertical is not null ? PipelineBuilder.VerticalLayers(sc.Sources, includeHidden: true) : Enumerable.Empty<StudioSource>()))
                      .Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && x.Url.Trim().Length > 0))
             browserUses.TryAdd(PipelineBuilder.InputKey(src), src);
         foreach (var (k, src) in browserUses) _knownSizes[k] = BrowserBridge.SizeOf(src);   // its layout size, whatever it's drawn at
         var browserFeeds = _browsers.Open(browserUses, origin, w => Message?.Invoke(this, new EngineMessageEventArgs(w, true)),
-            src => BrowserRenderSize(src, plan, shape.Vertical ? vSize : null, scenes));
+            src => BrowserRenderSize(src, plan, readerVertical, scenes, VerticalOnly));
         lock (_windows.CaptureSizes) foreach (var (k, v) in _windows.CaptureSizes) _knownSizes[k] = v;
         // (with the safety delay, encoded timestamps run that much ahead of when things happened)
         string? segPattern = shape.Main ? _cache.BeginSession(origin - safetyDelay) : null;
@@ -1617,7 +1624,7 @@ public sealed partial class StreamEngine : IDisposable
             TimerFilters = timerFilters,
             MonitorBounds = _platform.MonitorBounds,
             GpuDisplayCapture = !_gpuDisplayFailed,
-            GpuDisplayScale = _windows.GpuScale && !_gpuDisplayScaleFailed,
+            GpuDisplayScale = _displayGpuScale && !_gpuDisplayScaleFailed,
             DisplayFullSize = shape.Vertical || shape.Clip,
             AudioBitrateKbps = Math.Clamp(Settings.AudioBitrateKbps, 64, 320),
             MasterVolumeDb = Settings.MasterVolumeDb,
@@ -1716,9 +1723,12 @@ public sealed partial class StreamEngine : IDisposable
             string key = PipelineBuilder.InputKey(s);
             widths[key] = widths.TryGetValue(key, out var e) ? (e.src, Math.Max(e.w, w)) : (s, w);
         }
+        bool wideShown = !VerticalOnly;
         foreach (var sc in Composited())
         {
-            var layers = PipelineBuilder.CompositedLayers(sc.Sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList();
+            var layers = wideShown
+                ? PipelineBuilder.CompositedLayers(sc.Sources).Where(x => SourceTypes.IsVideo(SourceTypes.KindOf(x.Type))).ToList()
+                : new List<StudioSource>();
             foreach (var s in layers.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Window && x.WindowTitle.Trim().Length > 0))
             {
                 if (Anchors.Resolve(s) == Anchors.Fill) fill.TryAdd(PipelineBuilder.InputKey(s), new WindowCaptureBridge.Need(s, W, H, s.FillMode, plan.Light));
@@ -1748,7 +1758,8 @@ public sealed partial class StreamEngine : IDisposable
     /// page itself (a 1920×1080 alert box on a 960×540 stream is drawn at 960×540: a quarter of the pixels to
     /// render, convert and pipe). A cropped page keeps its full size (crops are in page pixels).
     /// </summary>
-    public static (int W, int H) BrowserRenderSize(StudioSource src, EncodePlan plan, (int W, int H)? vertical, IEnumerable<StudioScene> scenes)
+    public static (int W, int H) BrowserRenderSize(StudioSource src, EncodePlan plan, (int W, int H)? vertical,
+        IEnumerable<StudioScene> scenes, bool mainVertical = false)
     {
         var (pw, ph) = BrowserBridge.SizeOf(src);
         string key = PipelineBuilder.InputKey(src);
@@ -1757,8 +1768,11 @@ public sealed partial class StreamEngine : IDisposable
             foreach (var s in sc.Sources.Where(x => SourceTypes.KindOf(x.Type) == SourceKind.Browser && PipelineBuilder.InputKey(x) == key))
             {
                 if (s.CropLeft + s.CropTop + s.CropRight + s.CropBottom > 0) return (pw, ph);
-                var r = LayoutMath.Horizontal(s, plan.Width, plan.Height, aspect, (pw, ph));
-                f = Math.Max(f, Math.Max(r.W / pw, r.H / ph));
+                if (!mainVertical)
+                {
+                    var r = LayoutMath.Horizontal(s, plan.Width, plan.Height, aspect, (pw, ph));
+                    f = Math.Max(f, Math.Max(r.W / pw, r.H / ph));
+                }
                 if (vertical is { } v && LayoutMath.OnVerticalCanvas(s))
                 {
                     var vr = LayoutMath.Vertical(s, v.W, v.H, aspect, sc.Sources.Any(c => SourceTypes.KindOf(c.Type) == SourceKind.Camera && c.Shown));
